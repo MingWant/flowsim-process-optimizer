@@ -21,11 +21,11 @@ interface Position {
   y: number;
 }
 
-const NODE_WIDTH = 280;
+const NODE_WIDTH = 320;
 const NODE_HEIGHT = 300; 
-const START_END_WIDTH = 220;
+const START_END_WIDTH = 280;
 const START_HEIGHT = 118;
-const END_HEIGHT = 118;
+const END_HEIGHT = 186;
 const NODE_SPAWN_OFFSETS: Position[] = [
   { x: 0, y: 0 },
   { x: 48, y: 36 },
@@ -527,6 +527,21 @@ export const ProcessMap: React.FC<Props> = ({
                 {/* Draw Paths */}
                 {connections.map(conn => (
                     <g key={conn.id}>
+                    <circle
+                      cx={conn.p0.x}
+                      cy={conn.p0.y}
+                      r={6}
+                      fill="#0f172a"
+                      stroke={conn.color || '#475569'}
+                      strokeWidth={2.5}
+                      opacity="0.95"
+                    />
+                    <circle
+                      cx={conn.p0.x}
+                      cy={conn.p0.y}
+                      r={2.5}
+                      fill={conn.color || '#475569'}
+                    />
                         <path 
                             d={`M ${conn.p0.x} ${conn.p0.y} C ${conn.p1.x} ${conn.p1.y}, ${conn.p2.x} ${conn.p2.y}, ${conn.p3.x} ${conn.p3.y}`} 
                             stroke={conn.color || "#475569"} 
@@ -542,6 +557,15 @@ export const ProcessMap: React.FC<Props> = ({
                           markerEnd={`url(#arrow-${conn.toId})`}
                             strokeDasharray="10,10"
                             className={isRunning ? "animate-flow" : ""}
+                        />
+                        <circle
+                          cx={conn.p3.x}
+                          cy={conn.p3.y}
+                          r={4}
+                          fill="#0f172a"
+                          stroke={conn.color || '#475569'}
+                          strokeWidth={1.5}
+                          opacity="0.65"
                         />
                     </g>
                 ))}
@@ -583,6 +607,7 @@ export const ProcessMap: React.FC<Props> = ({
                     activeProcessing: 0,
                     utilization: 0,
                     avgWaitTime: 0,
+                    avgCompletionTime: 0,
                     totalProcessed: 0,
                     totalFailed: 0,
                     totalCancelled: 0

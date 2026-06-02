@@ -68,6 +68,8 @@ export interface WorkItem {
   processingEndsAtSimulationMs?: number;
   transmissionStartedAtSimulationMs?: number;
   transmissionEndsAtSimulationMs?: number;
+  transmissionStartedAtWallMs?: number;
+  transmissionEndsAtWallMs?: number;
 }
 
 export interface SimulationConfig {
@@ -93,6 +95,7 @@ export interface StepStats {
   activeProcessing: number;
   utilization: number;
   avgWaitTime: number;
+  avgCompletionTime: number;
   // Cumulative History
   totalProcessed: number;
   totalFailed: number;

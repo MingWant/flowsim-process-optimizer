@@ -25,9 +25,31 @@ const ARRIVAL_UNIT_LABELS: Record<string, string> = {
   year: 'sim year',
 };
 
+const formatMetricTime = (milliseconds: number): string => {
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) {
+    return '0s';
+  }
+
+  if (milliseconds >= 60 * 60 * 1000) {
+    return `${(milliseconds / (60 * 60 * 1000)).toFixed(1)}h`;
+  }
+
+  if (milliseconds >= 60 * 1000) {
+    return `${(milliseconds / (60 * 1000)).toFixed(1)}m`;
+  }
+
+  if (milliseconds >= 1000) {
+    return `${(milliseconds / 1000).toFixed(1)}s`;
+  }
+
+  return `${Math.round(milliseconds)}ms`;
+};
+
 const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, items, onEdit, onRemove, style, onMouseDown, isDragging = false }, ref) => {
   const queuedItems = items.filter(i => i.status === 'queued');
   const processingItems = items.filter(i => i.status === 'processing');
+  const totalCompleted = stats?.totalProcessed || 0;
+  const avgCompletedTime = stats?.avgCompletionTime || 0;
   
   const isBottleneck = (stats?.queueLength || 0) > 10 && (stats?.utilization || 0) > 0.9;
   const baseColor = step.color || '#64748b';
@@ -53,16 +75,16 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
         borderColor: baseColor,
         boxShadow: `0 6px 24px ${baseColor}25`
         }}
-        className={`absolute flex w-[220px] flex-col overflow-hidden rounded-2xl border-2 bg-slate-950 z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
+        className={`absolute flex w-[260px] flex-col overflow-hidden rounded-2xl border-2 bg-slate-950 z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
           onMouseDown={onMouseDown}
         >
         <div className="flex cursor-grab items-center justify-between border-b border-slate-800 bg-slate-900/80 p-3 active:cursor-grabbing" onMouseDown={onMouseDown}>
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 items-start gap-2">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl" style={{ backgroundColor: `${baseColor}20`, color: baseColor }}>
               <Play fill={baseColor} size={16} style={{ color: baseColor }} />
             </div>
-            <div className="min-w-0">
-              <div className="truncate text-sm font-bold text-slate-100" title={step.name}>{step.name}</div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-bold leading-snug text-slate-100 break-words" title={step.name}>{step.name}</div>
               <div className="text-[10px] uppercase tracking-wider text-emerald-300/80">Start Point</div>
             </div>
           </div>
@@ -98,35 +120,52 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
              borderColor: baseColor,
              boxShadow: `0 4px 20px ${baseColor}30`
           }}
-            className={`absolute flex w-[220px] flex-col overflow-hidden rounded-2xl border-2 bg-slate-950 z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
+            className={`absolute flex w-[280px] flex-col overflow-hidden rounded-2xl border-2 bg-slate-950 z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
           onMouseDown={onMouseDown}
         >
             <div className="flex cursor-grab items-center justify-between border-b border-slate-800 bg-slate-900/80 p-3 active:cursor-grabbing" onMouseDown={onMouseDown}>
-              <div className="flex min-w-0 items-center gap-2 text-slate-200 font-bold truncate">
+              <div className="flex min-w-0 items-start gap-2 text-slate-200 font-bold">
                 <div className="flex h-9 w-9 items-center justify-center rounded-xl" style={{ backgroundColor: `${baseColor}20`, color: baseColor }}>
                   <Square fill={baseColor} size={16} style={{ color: baseColor }} />
                 </div>
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-bold text-slate-100" title={step.name}>{step.name}</div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-bold leading-snug text-slate-100 break-words" title={step.name}>{step.name}</div>
                   <div className="text-[10px] uppercase tracking-wider text-rose-300/80">End Point</div>
                 </div>
-                </div>
+              </div>
               <div className="flex gap-1 shrink-0" onMouseDown={e => e.stopPropagation()}>
                 <button onClick={onEdit} className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"><Edit2 size={12}/></button>
                 <button onClick={onRemove} className="rounded p-1 text-red-400 transition-colors hover:bg-red-900/30 hover:text-red-300"><Trash2 size={12}/></button>
                 </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3 bg-gradient-to-b from-slate-950 to-slate-900 p-4">
+            <div className="bg-gradient-to-b from-slate-950 to-slate-900 p-4">
+              <div className="mb-3 grid grid-cols-2 gap-3">
               <div className="rounded-xl border border-rose-500/20 bg-rose-500/10 p-3">
                 <div className="text-[10px] font-semibold uppercase tracking-wider text-rose-300/70">Completed</div>
-                <div className="mt-1 font-mono text-2xl font-bold text-rose-100">{stats?.totalProcessed || 0}</div>
+                <div className="mt-1 font-mono text-2xl font-bold text-rose-100">{totalCompleted}</div>
                 <div className="text-[10px] text-slate-500">items delivered</div>
               </div>
               <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Role</div>
-                <div className="mt-1 text-sm font-semibold text-slate-200">Final Sink</div>
-                <div className="text-[10px] text-slate-500">Collects completed flow output</div>
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Avg Time</div>
+                <div className="mt-1 font-mono text-xl font-bold text-slate-100">{formatMetricTime(avgCompletedTime)}</div>
+                <div className="text-[10px] text-slate-500">average end-to-end flow time</div>
+              </div>
+            </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-2.5">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300/70">Success</div>
+                  <div className="mt-1 font-mono text-base font-bold text-emerald-100">{stats?.totalProcessed || 0}</div>
+                </div>
+                <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-2.5">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-red-300/70">Failed</div>
+                  <div className="mt-1 font-mono text-base font-bold text-red-100">{stats?.totalFailed || 0}</div>
+                </div>
+                <div className="rounded-xl border border-slate-700 bg-slate-900/70 p-2.5">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">In Flow</div>
+                  <div className="mt-1 font-mono text-base font-bold text-slate-100">{items.filter(item => !['finished', 'cancelled', 'error'].includes(item.status)).length}</div>
+                </div>
               </div>
             </div>
             
@@ -156,17 +195,17 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
         boxShadow: isBottleneck ? `0 0 20px rgba(239, 68, 68, 0.4)` : `0 4px 15px ${baseColor}30`,
         backgroundColor: '#0f172a',
       }}
-      className={`absolute flex flex-col w-[280px] border-2 rounded-2xl overflow-hidden z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
+      className={`absolute flex flex-col w-[320px] border-2 rounded-2xl overflow-hidden z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
     >
       {/* Header */}
       <div 
         className="flex justify-between items-start p-4 pb-2 cursor-grab active:cursor-grabbing group bg-slate-900/80 border-b border-slate-800/80"
         onMouseDown={onMouseDown}
       >
-        <div className="flex-1 mr-2 overflow-hidden">
-          <div className="flex items-center gap-2">
+          <div className="flex-1 mr-2 overflow-hidden">
+           <div className="flex items-start gap-2">
              <GripHorizontal size={16} className="text-slate-600 group-hover:text-slate-400 transition-colors shrink-0" />
-             <h3 className="font-bold text-slate-100 text-lg truncate" title={step.name}>{step.name}</h3>
+             <h3 className="font-bold text-slate-100 text-lg leading-snug break-words" title={step.name}>{step.name}</h3>
              {(step.failureProbability > 0 || step.cancellationProbability > 0) && (
                 <div title="Exceptions configured" className="flex items-center">
                     <AlertTriangle size={14} className="text-amber-500 shrink-0" />
