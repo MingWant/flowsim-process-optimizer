@@ -381,6 +381,11 @@ export const useProcessSimulation = (config: SimulationConfig) => {
               const arrivalStep = arrivalStepId ? stepMap.get(arrivalStepId) : undefined;
               if (arrivalStep) {
                 beginArrivalAtStep(item, arrivalStep, endsAt);
+              } else {
+                item.completedAtSimulationMs = endsAt;
+                item.status = 'finished';
+                item.currentStepId = 'finished';
+                item.targetStepId = undefined;
               }
             }
           }
@@ -388,7 +393,15 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         }
 
         const currentStep = stepMap.get(item.currentStepId);
-        if (!currentStep || currentStep.type === 'start' || currentStep.type === 'end') continue; 
+        if (!currentStep) {
+          item.completedAtSimulationMs = simulationTimeRef.current;
+          item.status = 'finished';
+          item.currentStepId = 'finished';
+          item.targetStepId = undefined;
+          continue;
+        }
+
+        if (currentStep.type === 'start' || currentStep.type === 'end') continue; 
 
         // --- QUEUED STATE ---
         if (item.status === 'queued') {
