@@ -1,0 +1,115 @@
+
+import { ProcessStep, SimulationConfig } from './types';
+
+export const DEFAULT_STEPS: ProcessStep[] = [
+  {
+    id: 'node-start-1',
+    type: 'start',
+    name: 'Online Orders',
+    randomnessMode: 'fixed',
+    capacity: 0,
+    processingTime: 0,
+    variance: 0,
+    arrivalRate: 0.5,
+    minArrivalRate: 0.2,
+    maxArrivalRate: 0.8,
+    failureProbability: 0,
+    cancellationProbability: 0,
+    color: '#10b981',
+    connections: [{ targetId: 'step-1', probability: 1.0 }],
+    x: 100,
+    y: 250
+  },
+  {
+    id: 'step-1',
+    type: 'process',
+    name: 'Order Taking',
+    randomnessMode: 'fixed',
+    capacity: 2,
+    processingTime: 2000,
+    variance: 0.2,
+    minProcessingTime: 1500,
+    maxProcessingTime: 3000,
+    failureProbability: 0,
+    cancellationProbability: 0.05, // 5% chance to drop out per second in queue
+    color: '#3b82f6',
+    connections: [{ targetId: 'step-2', probability: 1.0 }],
+    x: 400,
+    y: 250
+  },
+  {
+    id: 'step-2',
+    type: 'process',
+    name: 'Preparation',
+    randomnessMode: 'fixed',
+    capacity: 3,
+    processingTime: 4000,
+    variance: 0.3,
+    minProcessingTime: 3000,
+    maxProcessingTime: 6000,
+    failureProbability: 0.1, // 10% chance to burn/fail
+    cancellationProbability: 0,
+    color: '#f59e0b',
+    connections: [{ targetId: 'step-3', probability: 1.0 }],
+    x: 800,
+    y: 250
+  },
+  {
+    id: 'step-3',
+    type: 'process',
+    name: 'Quality Check',
+    randomnessMode: 'fixed',
+    capacity: 1,
+    processingTime: 1500,
+    variance: 0.1,
+    minProcessingTime: 1000,
+    maxProcessingTime: 2000,
+    failureProbability: 0.05,
+    cancellationProbability: 0,
+    color: '#8b5cf6',
+    connections: [
+      { targetId: 'step-4', probability: 0.9 },
+      { targetId: 'step-2', probability: 0.1 },
+    ],
+    x: 800,
+    y: 600
+  },
+  {
+    id: 'step-4',
+    type: 'process',
+    name: 'Packaging',
+    randomnessMode: 'fixed',
+    capacity: 2,
+    processingTime: 1000,
+    variance: 0.1,
+    minProcessingTime: 800,
+    maxProcessingTime: 1500,
+    failureProbability: 0,
+    cancellationProbability: 0,
+    color: '#ec4899',
+    connections: [{ targetId: 'node-end-1', probability: 1.0 }],
+    x: 1200,
+    y: 250
+  },
+  {
+    id: 'node-end-1',
+    type: 'end',
+    name: 'Shipment',
+    randomnessMode: 'fixed',
+    capacity: 0,
+    processingTime: 0,
+    variance: 0,
+    failureProbability: 0,
+    cancellationProbability: 0,
+    color: '#ef4444',
+    connections: [],
+    x: 1500,
+    y: 250
+  }
+];
+
+export const DEFAULT_CONFIG: SimulationConfig = {
+  steps: DEFAULT_STEPS,
+  isRunning: false,
+  speedMultiplier: 1,
+};

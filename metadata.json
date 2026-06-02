@@ -1,0 +1,6 @@
+{
+  "name": "FlowSim: Process Optimizer",
+  "description": "A visual process simulation tool to analyze workflow bottlenecks, resource allocation, and throughput using interactive modeling and Gemini AI analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
