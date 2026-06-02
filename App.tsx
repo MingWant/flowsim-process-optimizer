@@ -154,18 +154,28 @@ const App: React.FC = () => {
      return config.steps.filter(s => s.connections.some(c => c.targetId === editingStep.id));
   }, [config.steps, editingStep]);
 
+  const runningLabel = config.isRunning ? 'Running' : 'Paused';
+  const totalQueue = stepStats.reduce((sum, s) => sum + s.queueLength, 0);
+
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-200 flex flex-col font-sans selection:bg-blue-500/30">
+    <div className="min-h-screen bg-slate-950 text-slate-200 flex flex-col font-sans selection:bg-blue-500/30">
       {/* Header */}
-      <header className="h-16 border-b border-slate-700 bg-slate-900/90 backdrop-blur-md flex items-center justify-between px-4 md:px-6 sticky top-0 z-50">
+      <header className="h-16 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md flex items-center justify-between px-4 md:px-6 sticky top-0 z-50">
         <div className="flex items-center gap-3">
-          <div className="bg-blue-600 p-2 rounded-lg shadow-lg shadow-blue-900/20">
+          <div className="bg-blue-600 p-2 rounded-xl shadow-lg shadow-blue-900/20">
             <Zap size={20} className="text-white" />
           </div>
-          <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent hidden sm:block">FlowSim</h1>
+          <div>
+            <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">FlowSim</h1>
+            <p className="text-[11px] text-slate-500 hidden sm:block">Process optimizer workspace</p>
+          </div>
         </div>
         
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
+           <div className={`hidden sm:flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold ${config.isRunning ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 bg-slate-900 text-slate-400'}`}>
+             <span className={`h-2 w-2 rounded-full ${config.isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
+             {runningLabel}
+           </div>
            {!hasApiKey && (
              <button onClick={selectApiKey} className="text-xs bg-indigo-600 hover:bg-indigo-500 px-3 py-1.5 rounded-full transition-colors font-medium">
                Select API Key
@@ -183,20 +193,20 @@ const App: React.FC = () => {
       <div className="flex flex-1 flex-col lg:flex-row relative overflow-hidden">
         {/* Sidebar */}
         <aside className={`
-            fixed inset-y-0 left-0 z-40 w-80 bg-slate-900/95 backdrop-blur-xl border-r border-slate-700 
-            transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:bg-slate-800/50 lg:backdrop-blur-none
+            fixed inset-y-0 left-0 z-40 w-80 bg-slate-950/95 backdrop-blur-xl border-r border-slate-800 
+            transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:bg-slate-900/70 lg:backdrop-blur-none
             flex flex-col h-[calc(100vh-4rem)] overflow-y-auto
             ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
         `}>
-          <div className="p-4 flex items-center justify-between lg:hidden border-b border-slate-700/50">
-             <span className="font-semibold text-slate-200">Controls</span>
+          <div className="p-4 flex items-center justify-between lg:hidden border-b border-slate-800">
+             <span className="font-semibold text-slate-200">AI & Insights</span>
              <button onClick={() => setIsSidebarOpen(false)} className="text-slate-400"><X size={20}/></button>
           </div>
 
-          <div className="p-6 space-y-8">
-            <div className="space-y-4">
+          <div className="p-5 space-y-6">
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 space-y-4">
               <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                <Settings size={14}/> Simulation Control
+                <Settings size={14}/> Quick Controls
               </h3>
               <div className="flex gap-2">
                 <button 
@@ -218,7 +228,7 @@ const App: React.FC = () => {
                 </button>
               </div>
 
-              <div className="space-y-4 pt-2">
+              <div className="space-y-4 pt-1">
                 <div>
                   <div className="flex justify-between text-sm mb-1">
                     <span className="text-slate-400">Speed</span>
@@ -234,10 +244,11 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            <div className="space-y-3 pt-4 border-t border-slate-700/50">
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 space-y-3">
               <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
                 <Sparkles size={14}/> AI Scenario
               </h3>
+              <p className="text-xs text-slate-500 leading-relaxed">Describe a real process and let AI rebuild the nodes and routes.</p>
               <div className="relative">
                 <textarea 
                   value={aiPrompt}
@@ -255,7 +266,7 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            <div className="space-y-3 pt-4 border-t border-slate-700/50">
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 space-y-3">
               <div className="flex justify-between items-center">
                  <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
                     <BarChart3 size={14}/> Analysis
@@ -280,6 +291,25 @@ const App: React.FC = () => {
                 </div>
               )}
             </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 space-y-3">
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Flow steps</h3>
+              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                {config.steps.map(step => (
+                  <button
+                    key={step.id}
+                    onClick={() => { setEditingStep(step); setActiveTab('basic'); setIsSidebarOpen(false); }}
+                    className="w-full flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2 text-left hover:border-blue-500/50 hover:bg-slate-800 transition-colors"
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: step.color }} />
+                      <span className="truncate text-sm text-slate-200">{step.name}</span>
+                    </span>
+                    <span className="text-[10px] uppercase text-slate-500 shrink-0">{step.type}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </aside>
 
@@ -291,17 +321,34 @@ const App: React.FC = () => {
         )}
 
         {/* Main Content */}
-        <main className="flex-1 overflow-y-auto h-[calc(100vh-4rem)] p-4 lg:p-6 scroll-smooth relative">
-          <div className="max-w-[1920px] mx-auto space-y-6">
-             
-             <div className="w-full h-auto min-h-[400px]">
-                <StatsBoard globalStats={globalStats} stepStats={stepStats} steps={config.steps} />
-             </div>
-
-             <div className="w-full">
-               <div className="flex items-center justify-between mb-4">
-                 <h2 className="text-lg font-semibold text-slate-300">Process Map</h2>
-                 <div className="flex gap-2">
+        <main className="flex-1 overflow-y-auto h-[calc(100vh-4rem)] p-4 lg:p-6 scroll-smooth relative bg-[radial-gradient(circle_at_top_right,rgba(37,99,235,0.10),transparent_35%),radial-gradient(circle_at_bottom_left,rgba(16,185,129,0.08),transparent_30%)]">
+          <div className="max-w-[1920px] mx-auto space-y-5">
+             <section className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3 md:p-4 shadow-2xl shadow-black/20">
+               <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between mb-4">
+                 <div>
+                   <h2 className="text-lg font-semibold text-slate-100">Process Map</h2>
+                   <p className="text-xs text-slate-500">Zoom, pan, drag nodes, or pick a step from the left panel.</p>
+                 </div>
+                 <div className="flex flex-wrap items-center gap-2">
+                    <button 
+                      onClick={togglePlay}
+                      className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${config.isRunning ? 'bg-amber-500/10 text-amber-300 border border-amber-500/40' : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400'}`}
+                    >
+                      {config.isRunning ? <><Pause size={16}/> Pause</> : <><Play size={16}/> Start</>}
+                    </button>
+                    <button onClick={resetSimulation} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors">
+                      <RotateCcw size={16}/> Reset
+                    </button>
+                    <div className="hidden md:flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2">
+                      <span className="text-xs text-slate-500">Speed</span>
+                      <input 
+                        type="range" min="1" max="10" step="1"
+                        value={config.speedMultiplier}
+                        onChange={(e) => setConfig(p => ({ ...p, speedMultiplier: parseInt(e.target.value) }))}
+                        className="w-24 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                      />
+                      <span className="w-8 text-right font-mono text-xs text-purple-300">{config.speedMultiplier}x</span>
+                    </div>
                     <button 
                         onClick={() => addStep('start')}
                         className="flex items-center gap-1 text-xs bg-emerald-900/30 hover:bg-emerald-800/50 text-emerald-400 px-3 py-2 rounded-lg border border-emerald-800/50 transition-colors"
@@ -330,14 +377,22 @@ const App: React.FC = () => {
                   isRunning={config.isRunning}
                   onEditStep={(s) => { setEditingStep(s); setActiveTab('basic'); }}
                   onRemoveStep={removeStep}
-                  onAddStep={() => {}} 
+                  onAddStep={addStep} 
                />
-               <p className="text-xs text-slate-500 mt-2 flex gap-4">
-                 <span>• Scroll to Zoom</span>
-                 <span>• Drag background to Pan</span>
-                 <span>• Drag nodes to rearrange</span>
-               </p>
-             </div>
+               <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-500">
+                 <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Scroll = Zoom</span>
+                 <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Drag background = Pan</span>
+                 <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Drag node header = Move</span>
+               </div>
+             </section>
+
+             <section>
+                <div className="mb-3 flex items-center justify-between">
+                  <h2 className="text-lg font-semibold text-slate-100">Live Metrics</h2>
+                  <div className="text-xs text-slate-500">Queue: <span className="font-mono text-amber-300">{totalQueue}</span></div>
+                </div>
+                <StatsBoard globalStats={globalStats} stepStats={stepStats} steps={config.steps} />
+             </section>
           </div>
           
           <div className="h-12"/>

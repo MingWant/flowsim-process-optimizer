@@ -2,7 +2,7 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react';
 import { ProcessStep, StepStats, WorkItem } from '../types';
 import { ProcessNode } from './ProcessNode';
-import { Move, ZoomIn, ZoomOut, Maximize } from 'lucide-react';
+import { Move, ZoomIn, ZoomOut, Maximize, PlayCircle, Box, StopCircle, MousePointer2 } from 'lucide-react';
 
 interface Props {
   steps: ProcessStep[];
@@ -84,12 +84,15 @@ export const ProcessMap: React.FC<Props> = ({
     });
   }, [steps]);
 
-  const handlePanStart = (e: React.MouseEvent) => {
-     if (e.target === containerRef.current || (e.target as HTMLElement).tagName === 'svg') {
+    const handlePanStart = (e: React.MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const isInteractiveElement = !!target.closest('button, input, textarea, select, [data-process-node]');
+
+      if (!isInteractiveElement) {
         setIsPanning(true);
         setLastMousePos({ x: e.clientX, y: e.clientY });
-     }
-  };
+      }
+    };
 
   const handlePanMove = (e: React.MouseEvent) => {
     if (isPanning) {
@@ -240,20 +243,34 @@ export const ProcessMap: React.FC<Props> = ({
     return lines;
   }, [positions, steps]);
 
-  return (
-    <div className="relative w-full h-[600px] bg-slate-900 overflow-hidden border border-slate-700 rounded-xl select-none group">
-       
-       <div className="absolute top-4 right-4 z-50 flex flex-col gap-2 bg-slate-800/80 p-2 rounded-lg backdrop-blur-sm border border-slate-700 shadow-xl">
-          <button onClick={() => setScale(s => Math.min(s + 0.1, 3))} className="p-2 hover:bg-slate-700 rounded text-slate-300"><ZoomIn size={18}/></button>
-          <button onClick={() => setScale(s => Math.max(s - 0.1, 0.2))} className="p-2 hover:bg-slate-700 rounded text-slate-300"><ZoomOut size={18}/></button>
-          <button onClick={() => { setScale(1); setPan({x:0,y:0}); }} className="p-2 hover:bg-slate-700 rounded text-slate-300"><Maximize size={18}/></button>
-          <div className="h-px bg-slate-600 my-1"/>
-          <div className="p-2 text-slate-500 cursor-move flex justify-center" title="Drag canvas to pan"><Move size={18}/></div>
+    return (
+     <div className="relative w-full h-[72vh] min-h-[560px] bg-slate-950 overflow-hidden border border-slate-800 rounded-2xl select-none group shadow-inner">
+       <div className="absolute left-4 top-4 z-50 flex flex-wrap gap-2 rounded-2xl border border-slate-800 bg-slate-950/85 p-2 shadow-2xl backdrop-blur-sm">
+         <button onClick={() => onAddStep('start')} className="flex items-center gap-1.5 rounded-xl bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 transition-colors"><PlayCircle size={14}/> Start</button>
+         <button onClick={() => onAddStep('process')} className="flex items-center gap-1.5 rounded-xl bg-blue-500/10 px-3 py-2 text-xs font-semibold text-blue-300 hover:bg-blue-500/20 transition-colors"><Box size={14}/> Process</button>
+         <button onClick={() => onAddStep('end')} className="flex items-center gap-1.5 rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 transition-colors"><StopCircle size={14}/> End</button>
+       </div>
+
+       <div className="absolute top-4 right-4 z-50 flex flex-col gap-2 bg-slate-950/85 p-2 rounded-2xl backdrop-blur-sm border border-slate-800 shadow-2xl">
+         <button title="Zoom in" onClick={() => setScale(s => Math.min(s + 0.1, 3))} className="p-2 hover:bg-slate-800 rounded-xl text-slate-300 transition-colors"><ZoomIn size={18}/></button>
+         <button title="Zoom out" onClick={() => setScale(s => Math.max(s - 0.1, 0.2))} className="p-2 hover:bg-slate-800 rounded-xl text-slate-300 transition-colors"><ZoomOut size={18}/></button>
+         <button title="Reset view" onClick={() => { setScale(1); setPan({x:0,y:0}); }} className="p-2 hover:bg-slate-800 rounded-xl text-slate-300 transition-colors"><Maximize size={18}/></button>
+         <div className="h-px bg-slate-700 my-1"/>
+         <div className="p-2 text-slate-500 cursor-move flex justify-center" title="Drag canvas to pan"><Move size={18}/></div>
+       </div>
+
+       <div className="absolute bottom-4 left-4 z-50 hidden md:flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/85 px-3 py-2 text-xs text-slate-400 backdrop-blur-sm">
+         <MousePointer2 size={14} className="text-blue-300" />
+         <span>Tip: use edit icons to configure routing and processing rules.</span>
+       </div>
+
+       <div className="absolute bottom-4 right-4 z-50 rounded-full border border-slate-800 bg-slate-950/85 px-3 py-2 text-xs font-mono text-slate-400 backdrop-blur-sm">
+         {(scale * 100).toFixed(0)}%
        </div>
 
        <div 
           ref={containerRef}
-          className="w-full h-full cursor-grab active:cursor-grabbing bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:20px_20px]"
+         className="w-full h-full cursor-grab active:cursor-grabbing bg-[linear-gradient(rgba(30,41,59,.45)_1px,transparent_1px),linear-gradient(90deg,rgba(30,41,59,.45)_1px,transparent_1px),radial-gradient(circle_at_center,rgba(59,130,246,.08),transparent_45%)] [background-size:40px_40px,40px_40px,100%_100%]"
           onMouseDown={handlePanStart}
           onMouseMove={handlePanMove}
           onMouseUp={handlePanEnd}

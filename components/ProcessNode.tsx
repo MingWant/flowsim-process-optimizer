@@ -31,19 +31,20 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
     return (
         <div 
           ref={ref}
+          data-process-node="true"
           style={{ ...style }}
           className="absolute flex flex-col items-center group z-10"
           onMouseDown={onMouseDown}
         >
             <div 
-                className="w-20 h-20 rounded-full flex flex-col items-center justify-center shadow-lg border-2 bg-slate-900 transition-all hover:scale-105 cursor-grab active:cursor-grabbing"
+              className="w-20 h-20 rounded-full flex flex-col items-center justify-center shadow-lg border-2 bg-slate-950 transition-all hover:scale-105 cursor-grab active:cursor-grabbing ring-4 ring-slate-950"
                 style={{ borderColor: baseColor, boxShadow: `0 0 15px ${baseColor}40` }}
             >
                 <Play fill={baseColor} className="text-slate-900" size={24} style={{ color: baseColor }} />
                 <span className="text-[10px] text-slate-300 font-mono mt-1">{rateDisplay}/s</span>
             </div>
             
-            <div className="mt-2 bg-slate-800/80 px-2 py-1 rounded text-xs font-bold text-slate-200 border border-slate-700 whitespace-nowrap flex items-center gap-2">
+            <div className="mt-2 bg-slate-950/90 px-2 py-1 rounded-lg text-xs font-bold text-slate-200 border border-slate-700 whitespace-nowrap flex items-center gap-2 shadow-xl">
                 {step.name}
                 <button onClick={onEdit} className="hover:text-blue-400 p-0.5"><Edit2 size={10}/></button>
                 <button onClick={onRemove} className="hover:text-red-400 p-0.5"><Trash2 size={10}/></button>
@@ -57,15 +58,16 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
     return (
         <div 
           ref={ref}
+          data-process-node="true"
           style={{ 
              ...style,
              borderColor: baseColor,
              boxShadow: `0 4px 20px ${baseColor}30`
           }}
-          className="absolute flex flex-col w-[200px] bg-slate-900 border-2 rounded-xl overflow-hidden z-10 select-none transition-shadow"
+          className="absolute flex flex-col w-[200px] bg-slate-950 border-2 rounded-2xl overflow-hidden z-10 select-none transition-all hover:-translate-y-0.5 hover:shadow-2xl"
           onMouseDown={onMouseDown}
         >
-            <div className="bg-slate-800/50 p-2 flex justify-between items-center border-b border-slate-700">
+            <div className="bg-slate-900/80 p-2 flex justify-between items-center border-b border-slate-800">
                 <div className="flex items-center gap-2 text-slate-200 font-bold truncate">
                     <Square fill={baseColor} className="text-slate-900" size={14} style={{ color: baseColor }} />
                     <span className="truncate text-sm" title={step.name}>{step.name}</span>
@@ -76,7 +78,7 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
                 </div>
             </div>
 
-            <div className="p-4 flex flex-col items-center justify-center bg-gradient-to-b from-slate-900 to-slate-800">
+            <div className="p-4 flex flex-col items-center justify-center bg-gradient-to-b from-slate-950 to-slate-900">
                 <span className="text-3xl font-mono font-bold text-white mb-1">
                     {stats?.totalProcessed || 0}
                 </span>
@@ -86,7 +88,7 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
             </div>
             
             {/* Visual stacking of finished items */}
-            <div className="h-2 w-full bg-slate-800 relative overflow-hidden">
+            <div className="h-2 w-full bg-slate-900 relative overflow-hidden">
                  <div 
                    className="h-full transition-all duration-500" 
                    style={{ width: '100%', backgroundColor: baseColor, opacity: 0.3 }}
@@ -104,17 +106,18 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
   return (
     <div 
       ref={ref}
+      data-process-node="true"
       style={{
         ...style,
         borderColor: isBottleneck ? '#ef4444' : baseColor,
         boxShadow: isBottleneck ? `0 0 20px rgba(239, 68, 68, 0.4)` : `0 4px 15px ${baseColor}30`,
-        backgroundColor: '#1e293b',
+        backgroundColor: '#0f172a',
       }}
-      className={`absolute flex flex-col w-[280px] border-2 rounded-xl overflow-hidden transition-shadow z-10 select-none`}
+      className={`absolute flex flex-col w-[280px] border-2 rounded-2xl overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-2xl z-10 select-none`}
     >
       {/* Header */}
       <div 
-        className="flex justify-between items-start p-4 pb-2 cursor-grab active:cursor-grabbing group bg-slate-800/30"
+        className="flex justify-between items-start p-4 pb-2 cursor-grab active:cursor-grabbing group bg-slate-900/80 border-b border-slate-800/80"
         onMouseDown={onMouseDown}
       >
         <div className="flex-1 mr-2 overflow-hidden">
@@ -143,7 +146,7 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
         
         {/* Active Processing */}
         <div 
-            className="rounded-lg p-2 border border-slate-700/50"
+          className="rounded-xl p-2 border border-slate-700/50"
             style={{ backgroundColor: `${baseColor}10` }}
         >
           <div className="text-xs mb-1 flex justify-between font-medium" style={{ color: baseColor }}>
@@ -152,7 +155,7 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
           </div>
           <div className="flex flex-col gap-1 min-h-[2.5rem]">
             {processingItems.length > 0 ? processingItems.map(item => (
-               <div key={item.id} className="w-full relative h-3 bg-slate-800 rounded-full overflow-hidden">
+               <div key={item.id} className="w-full relative h-3 bg-slate-900 rounded-full overflow-hidden">
                   <div 
                     className="h-full transition-all duration-75 ease-linear"
                     style={{ width: `${item.progress * 100}%`, backgroundColor: baseColor }}
@@ -168,7 +171,7 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
         </div>
 
         {/* Queue List */}
-        <div className="bg-slate-900/50 rounded-lg border border-slate-700/50 flex flex-col flex-grow overflow-hidden">
+        <div className="bg-slate-950/70 rounded-xl border border-slate-800 flex flex-col flex-grow overflow-hidden">
           <div className="text-xs text-slate-400 p-2 flex justify-between border-b border-slate-800">
             <span className="flex items-center gap-1"><ListFilter size={10}/> Queue</span>
             <span className="font-mono">{queuedItems.length}</span>
@@ -179,7 +182,7 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
                 <div className="text-center py-4 text-xs text-slate-600 italic">Queue Empty</div>
              )}
              {queuedItems.map((item, idx) => (
-                <div key={item.id} className="flex items-center justify-between text-[10px] bg-slate-800 px-2 py-1 rounded text-slate-300 border border-slate-700/50">
+                <div key={item.id} className="flex items-center justify-between text-[10px] bg-slate-900 px-2 py-1 rounded-lg text-slate-300 border border-slate-800">
                     <span className="font-mono text-slate-500">#{item.id.split('-')[1]}</span>
                     <span className="text-slate-400">Wait: {(item.totalWaitTime/1000).toFixed(1)}s</span>
                     <div className={`w-2 h-2 rounded-full ${item.status === 'queued' ? 'bg-amber-500' : 'bg-slate-500'}`}></div>
@@ -190,7 +193,7 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
       </div>
 
       {/* Metrics Footer */}
-      <div className="px-3 pb-3 pt-2 border-t border-slate-700/50 grid grid-cols-2 gap-2 text-xs bg-slate-800/20">
+      <div className="px-3 pb-3 pt-2 border-t border-slate-800 grid grid-cols-2 gap-2 text-xs bg-slate-900/50">
         <div>
           <div className="text-[10px] text-slate-500 uppercase font-semibold mb-1">Utilization</div>
           <div className={`font-mono font-bold ${(stats?.utilization || 0) > 0.9 ? 'text-red-400' : 'text-emerald-400'}`}>
