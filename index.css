@@ -10,6 +10,35 @@ body {
   margin: 0;
 }
 
+.theme-root {
+  transition: background 220ms ease, color 220ms ease;
+}
+
+.theme-root[data-theme='light'] {
+  filter: invert(0.92) hue-rotate(180deg) saturate(0.86) brightness(1.08);
+}
+
+.theme-root[data-theme='light'] img,
+.theme-root[data-theme='light'] video,
+.theme-root[data-theme='light'] canvas,
+.theme-root[data-theme='light'] svg,
+.theme-root[data-theme='light'] input[type='color'] {
+  filter: invert(1) hue-rotate(180deg) saturate(1.1);
+}
+
+.theme-root[data-theme='ocean'] {
+  filter: hue-rotate(28deg) saturate(1.18) brightness(1.05);
+}
+
+.theme-root[data-theme='warm'] {
+  filter: hue-rotate(150deg) saturate(1.08) brightness(1.08);
+}
+
+.theme-switcher,
+.theme-switcher * {
+  filter: none !important;
+}
+
 button,
 input,
 textarea {

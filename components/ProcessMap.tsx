@@ -1,5 +1,6 @@
 
 import React, { useRef, useState, useEffect, useMemo } from 'react';
+import { flushSync } from 'react-dom';
 import { ProcessStep, StepStats, WorkItem } from '../types';
 import { ProcessNode } from './ProcessNode';
 import { Move, ZoomIn, ZoomOut, Maximize, PlayCircle, Box, StopCircle, MousePointer2 } from 'lucide-react';
@@ -11,7 +12,8 @@ interface Props {
   isRunning: boolean;
   onEditStep: (step: ProcessStep) => void;
   onRemoveStep: (id: string) => void;
-  onAddStep: (type: 'process' | 'start' | 'end') => void;
+  onAddStep: (type: 'process' | 'start' | 'end', position?: Position) => void;
+  onPositionChange: (id: string, position: Position) => void;
 }
 
 interface Position {
@@ -21,6 +23,17 @@ interface Position {
 
 const NODE_WIDTH = 280;
 const NODE_HEIGHT = 300; 
+const START_END_WIDTH = 220;
+const START_HEIGHT = 118;
+const END_HEIGHT = 118;
+const NODE_SPAWN_OFFSETS: Position[] = [
+  { x: 0, y: 0 },
+  { x: 48, y: 36 },
+  { x: -48, y: 36 },
+  { x: 72, y: -28 },
+  { x: -72, y: -28 },
+  { x: 0, y: 72 },
+];
 
 // Helper to calculate point on Cubic Bezier Curve
 const getPointOnBezier = (t: number, p0: Position, p1: Position, p2: Position, p3: Position): Position => {
@@ -42,7 +55,8 @@ export const ProcessMap: React.FC<Props> = ({
   isRunning,
   onEditStep, 
   onRemoveStep,
-  onAddStep 
+  onAddStep,
+  onPositionChange,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
@@ -51,6 +65,14 @@ export const ProcessMap: React.FC<Props> = ({
   const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
   const [positions, setPositions] = useState<Record<string, Position>>({});
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [settlingId, setSettlingId] = useState<string | null>(null);
+  const [dragPreview, setDragPreview] = useState<{ id: string; offsetX: number; offsetY: number } | null>(null);
+  const dragDeltaRef = useRef({ x: 0, y: 0 });
+  const dragFrameRef = useRef<number | null>(null);
+  const dragOffsetRef = useRef({ x: 0, y: 0 });
+  const settleTimerRef = useRef<number | null>(null);
+  const nodeRefs = useRef(new Map<string, HTMLDivElement | null>());
+  const addCounterRef = useRef(0);
 
   useEffect(() => {
     setPositions(prev => {
@@ -110,52 +132,221 @@ export const ProcessMap: React.FC<Props> = ({
       setScale(s => Math.min(Math.max(0.2, s + delta), 3));
   };
 
+  const getViewportSpawnPosition = (type: 'process' | 'start' | 'end'): Position => {
+    const container = containerRef.current;
+    const rect = container?.getBoundingClientRect();
+    const viewportWidth = rect?.width ?? 1200;
+    const viewportHeight = rect?.height ?? 720;
+
+    const nodeWidth = type === 'process' ? NODE_WIDTH : START_END_WIDTH;
+    const nodeHeight = type === 'process' ? NODE_HEIGHT : type === 'start' ? START_HEIGHT : END_HEIGHT;
+
+    const worldCenterX = (-pan.x + viewportWidth / 2) / scale;
+    const worldCenterY = (-pan.y + viewportHeight / 2) / scale;
+    const offset = NODE_SPAWN_OFFSETS[addCounterRef.current % NODE_SPAWN_OFFSETS.length];
+
+    addCounterRef.current += 1;
+
+    return {
+      x: Math.round(worldCenterX - nodeWidth / 2 + offset.x),
+      y: Math.round(worldCenterY - nodeHeight / 2 + offset.y),
+    };
+  };
+
+  const handleAddStep = (type: 'process' | 'start' | 'end') => {
+    onAddStep(type, getViewportSpawnPosition(type));
+  };
+
   const handleNodeDragStart = (e: React.MouseEvent, id: string) => {
     e.preventDefault();
     e.stopPropagation();
+    if (settleTimerRef.current !== null) {
+      window.clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
+    setSettlingId(null);
+    dragDeltaRef.current = { x: 0, y: 0 };
+    dragOffsetRef.current = { x: 0, y: 0 };
+    setDragPreview({ id, offsetX: 0, offsetY: 0 });
     setDraggingId(id);
   };
 
   useEffect(() => {
+    const flushDraggedPosition = () => {
+      const activeId = draggingId;
+      dragFrameRef.current = null;
+
+      if (!activeId) {
+        dragDeltaRef.current = { x: 0, y: 0 };
+        return;
+      }
+
+      const { x, y } = dragDeltaRef.current;
+      if (x === 0 && y === 0) {
+        return;
+      }
+
+      dragDeltaRef.current = { x: 0, y: 0 };
+
+      dragOffsetRef.current = {
+        x: dragOffsetRef.current.x + x / scale,
+        y: dragOffsetRef.current.y + y / scale,
+      };
+
+      const node = nodeRefs.current.get(activeId);
+      if (node) {
+        node.style.transform = `translate(${dragOffsetRef.current.x}px, ${dragOffsetRef.current.y}px)`;
+        node.style.willChange = 'transform';
+        node.style.zIndex = '30';
+      }
+
+      setDragPreview({
+        id: activeId,
+        offsetX: dragOffsetRef.current.x,
+        offsetY: dragOffsetRef.current.y,
+      });
+    };
+
     const handleWindowMouseMove = (e: MouseEvent) => {
       if (draggingId) {
-         setPositions(prev => ({
-            ...prev,
-            [draggingId]: { 
-                x: (prev[draggingId]?.x || 0) + e.movementX / scale, 
-                y: (prev[draggingId]?.y || 0) + e.movementY / scale 
-            }
-         }));
+        dragDeltaRef.current.x += e.movementX;
+        dragDeltaRef.current.y += e.movementY;
+
+        if (dragFrameRef.current === null) {
+          dragFrameRef.current = window.requestAnimationFrame(flushDraggedPosition);
+        }
       }
     };
-    const handleWindowMouseUp = () => setDraggingId(null);
+    const handleWindowMouseUp = () => {
+      if (dragFrameRef.current !== null) {
+        window.cancelAnimationFrame(dragFrameRef.current);
+        flushDraggedPosition();
+      }
+
+      if (draggingId) {
+        const { x, y } = dragOffsetRef.current;
+        const node = nodeRefs.current.get(draggingId);
+        const releasedId = draggingId;
+        const current = positions[draggingId] || { x: 0, y: 0 };
+        const nextPosition = {
+          x: current.x + x,
+          y: current.y + y,
+        };
+
+        if (x !== 0 || y !== 0) {
+          flushSync(() => {
+            setPositions(prev => ({
+              ...prev,
+              [draggingId]: nextPosition,
+            }));
+            onPositionChange(draggingId, nextPosition);
+          });
+        }
+
+        if (node) {
+          node.style.transform = '';
+          node.style.willChange = '';
+          node.style.zIndex = '';
+        }
+
+        setSettlingId(releasedId);
+        settleTimerRef.current = window.setTimeout(() => {
+          setSettlingId((currentId) => currentId === releasedId ? null : currentId);
+          settleTimerRef.current = null;
+        }, 140);
+      }
+
+      dragDeltaRef.current = { x: 0, y: 0 };
+      dragOffsetRef.current = { x: 0, y: 0 };
+      setDragPreview(null);
+      setDraggingId(null);
+    };
+
     if (draggingId) {
         window.addEventListener('mousemove', handleWindowMouseMove);
         window.addEventListener('mouseup', handleWindowMouseUp);
     }
     return () => {
+        if (dragFrameRef.current !== null) {
+          window.cancelAnimationFrame(dragFrameRef.current);
+          dragFrameRef.current = null;
+        }
+        if (settleTimerRef.current !== null) {
+          window.clearTimeout(settleTimerRef.current);
+          settleTimerRef.current = null;
+        }
         window.removeEventListener('mousemove', handleWindowMouseMove);
         window.removeEventListener('mouseup', handleWindowMouseUp);
     };
-  }, [draggingId, scale]);
+  }, [draggingId, onPositionChange, positions, scale]);
+
+  const stepById = useMemo(() => new Map(steps.map(step => [step.id, step])), [steps]);
+
+  const statsByStepId = useMemo(() => {
+    const map = new Map<string, StepStats>();
+    stepStats.forEach((stats) => map.set(stats.stepId, stats));
+    return map;
+  }, [stepStats]);
+
+  const itemsByStepId = useMemo(() => {
+    const map = new Map<string, WorkItem[]>();
+    items.forEach((item) => {
+      if (item.status === 'transmitting' || item.status === 'finished') {
+        return;
+      }
+
+      const stepItems = map.get(item.currentStepId) || [];
+      stepItems.push(item);
+      map.set(item.currentStepId, stepItems);
+    });
+    return map;
+  }, [items]);
+
+  const transmittingItems = useMemo(
+    () => items.filter((item) => item.status === 'transmitting'),
+    [items]
+  );
+
+  const effectivePositions = useMemo(() => {
+    if (!dragPreview) {
+      return positions;
+    }
+
+    return {
+      ...positions,
+      [dragPreview.id]: {
+        x: (positions[dragPreview.id]?.x || 0) + dragPreview.offsetX,
+        y: (positions[dragPreview.id]?.y || 0) + dragPreview.offsetY,
+      }
+    };
+  }, [dragPreview, positions]);
 
   // SMART CONNECTIONS LOGIC
   const connections = useMemo(() => {
-    const lines = [];
+    const lines: Array<{
+      id: string;
+      fromId: string;
+      toId: string;
+      p0: Position;
+      p1: Position;
+      p2: Position;
+      p3: Position;
+      color: string;
+    }> = [];
 
     // Helper to find the best anchor points between two rectangles
     const getBestAnchors = (fromId: string, toId: string) => {
-        const fromStep = steps.find(s => s.id === fromId);
-        const toStep = steps.find(s => s.id === toId);
+        const fromStep = stepById.get(fromId);
+        const toStep = stepById.get(toId);
 
-        const fromPos = positions[fromId] || {x:0, y:0};
-        const toPos = positions[toId] || {x:0, y:0};
+        const fromPos = effectivePositions[fromId] || {x:0, y:0};
+        const toPos = effectivePositions[toId] || {x:0, y:0};
         
         // Dimensions vary by node type
-        const w1 = fromStep?.type === 'process' ? NODE_WIDTH : 80;
-        const h1 = fromStep?.type === 'process' ? NODE_HEIGHT : 80;
-        const w2 = toStep?.type === 'process' ? NODE_WIDTH : 80;
-        const h2 = toStep?.type === 'process' ? NODE_HEIGHT : 80;
+          const w1 = fromStep?.type === 'process' ? NODE_WIDTH : START_END_WIDTH;
+          const h1 = fromStep?.type === 'process' ? NODE_HEIGHT : fromStep?.type === 'start' ? START_HEIGHT : END_HEIGHT;
+          const w2 = toStep?.type === 'process' ? NODE_WIDTH : START_END_WIDTH;
+          const h2 = toStep?.type === 'process' ? NODE_HEIGHT : toStep?.type === 'start' ? START_HEIGHT : END_HEIGHT;
 
         const fromCenter = { x: fromPos.x + w1/2, y: fromPos.y + h1/2 };
         const toCenter = { x: toPos.x + w2/2, y: toPos.y + h2/2 };
@@ -194,13 +385,11 @@ export const ProcessMap: React.FC<Props> = ({
     };
 
     const calculateControlPoints = (from: Position, to: Position, fromId: string, toId: string) => {
-        const fromStep = steps.find(s => s.id === fromId);
-        
         const getOutwardDir = (pos: Position, id: string) => {
-            const rectPos = positions[id] || {x:0,y:0};
-            const s = steps.find(x => x.id === id);
-            const w = s?.type === 'process' ? NODE_WIDTH : 80;
-            const h = s?.type === 'process' ? NODE_HEIGHT : 80;
+        const rectPos = effectivePositions[id] || {x:0,y:0};
+      const s = stepById.get(id);
+            const w = s?.type === 'process' ? NODE_WIDTH : START_END_WIDTH;
+            const h = s?.type === 'process' ? NODE_HEIGHT : s?.type === 'start' ? START_HEIGHT : END_HEIGHT;
             
             // Simple proximity check
             if (Math.abs(pos.x - (rectPos.x + w)) < 2) return { x: 1, y: 0 }; // Right
@@ -226,7 +415,7 @@ export const ProcessMap: React.FC<Props> = ({
     steps.forEach(step => {
         if (!step.connections) return;
         step.connections.forEach(conn => {
-            if (positions[step.id] && positions[conn.targetId]) {
+        if (effectivePositions[step.id] && effectivePositions[conn.targetId]) {
                 const { start, end } = getBestAnchors(step.id, conn.targetId);
                 const { cp1, cp2 } = calculateControlPoints(start, end, step.id, conn.targetId);
                 
@@ -241,14 +430,56 @@ export const ProcessMap: React.FC<Props> = ({
         });
     });
     return lines;
-  }, [positions, steps]);
+  }, [effectivePositions, stepById, steps]);
+
+  const connectionByRoute = useMemo(() => {
+    const map = new Map<string, (typeof connections)[number]>();
+    connections.forEach((connection) => {
+      map.set(`${connection.fromId}->${connection.toId}`, connection);
+    });
+    return map;
+  }, [connections]);
+
+  const editHandlersByStepId = useMemo(() => {
+    const map = new Map<string, () => void>();
+    steps.forEach((step) => {
+      map.set(step.id, () => onEditStep(step));
+    });
+    return map;
+  }, [onEditStep, steps]);
+
+  const removeHandlersByStepId = useMemo(() => {
+    const map = new Map<string, () => void>();
+    steps.forEach((step) => {
+      map.set(step.id, () => onRemoveStep(step.id));
+    });
+    return map;
+  }, [onRemoveStep, steps]);
+
+  const dragHandlersByStepId = useMemo(() => {
+    const map = new Map<string, (e: React.MouseEvent) => void>();
+    steps.forEach((step) => {
+      map.set(step.id, (e: React.MouseEvent) => handleNodeDragStart(e, step.id));
+    });
+    return map;
+  }, [steps]);
+
+  const nodeRefHandlersByStepId = useMemo(() => {
+    const map = new Map<string, (node: HTMLDivElement | null) => void>();
+    steps.forEach((step) => {
+      map.set(step.id, (node: HTMLDivElement | null) => {
+        nodeRefs.current.set(step.id, node);
+      });
+    });
+    return map;
+  }, [steps]);
 
     return (
      <div className="relative w-full h-[72vh] min-h-[560px] bg-slate-950 overflow-hidden border border-slate-800 rounded-2xl select-none group shadow-inner">
        <div className="absolute left-4 top-4 z-50 flex flex-wrap gap-2 rounded-2xl border border-slate-800 bg-slate-950/85 p-2 shadow-2xl backdrop-blur-sm">
-         <button onClick={() => onAddStep('start')} className="flex items-center gap-1.5 rounded-xl bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 transition-colors"><PlayCircle size={14}/> Start</button>
-         <button onClick={() => onAddStep('process')} className="flex items-center gap-1.5 rounded-xl bg-blue-500/10 px-3 py-2 text-xs font-semibold text-blue-300 hover:bg-blue-500/20 transition-colors"><Box size={14}/> Process</button>
-         <button onClick={() => onAddStep('end')} className="flex items-center gap-1.5 rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 transition-colors"><StopCircle size={14}/> End</button>
+         <button onClick={() => handleAddStep('start')} className="flex items-center gap-1.5 rounded-xl bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 transition-colors"><PlayCircle size={14}/> Start</button>
+         <button onClick={() => handleAddStep('process')} className="flex items-center gap-1.5 rounded-xl bg-blue-500/10 px-3 py-2 text-xs font-semibold text-blue-300 hover:bg-blue-500/20 transition-colors"><Box size={14}/> Process</button>
+         <button onClick={() => handleAddStep('end')} className="flex items-center gap-1.5 rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 transition-colors"><StopCircle size={14}/> End</button>
        </div>
 
        <div className="absolute top-4 right-4 z-50 flex flex-col gap-2 bg-slate-950/85 p-2 rounded-2xl backdrop-blur-sm border border-slate-800 shadow-2xl">
@@ -308,7 +539,7 @@ export const ProcessMap: React.FC<Props> = ({
                             stroke={conn.color || "#475569"} 
                             strokeWidth="2" 
                             fill="none" 
-                            markerEnd={`url(#arrow-${steps.find(s => s.id === conn.toId)?.id || 'default'})`}
+                          markerEnd={`url(#arrow-${conn.toId})`}
                             strokeDasharray="10,10"
                             className={isRunning ? "animate-flow" : ""}
                         />
@@ -316,11 +547,11 @@ export const ProcessMap: React.FC<Props> = ({
                 ))}
 
                 {/* Render Transmitting Items as Dots */}
-                {items.filter(i => i.status === 'transmitting').map(item => {
+                {transmittingItems.map(item => {
                     const fromId = item.previousStepId || 'start'; // Fallback
                     const toId = item.targetStepId;
 
-                    const conn = connections.find(c => c.fromId === fromId && c.toId === toId);
+                  const conn = toId ? connectionByRoute.get(`${fromId}->${toId}`) : undefined;
                     
                     if (!conn) return null;
 
@@ -346,7 +577,7 @@ export const ProcessMap: React.FC<Props> = ({
                   const pos = positions[step.id];
                   if (!pos) return null;
                   
-                  const stats = stepStats.find(s => s.stepId === step.id) || {
+                  const stats = statsByStepId.get(step.id) || {
                     stepId: step.id,
                     queueLength: 0,
                     activeProcessing: 0,
@@ -358,21 +589,20 @@ export const ProcessMap: React.FC<Props> = ({
                   };
                   
                   // Only pass non-transmitting items to the node itself
-                  const stepItems = items.filter(i => 
-                    i.currentStepId === step.id && i.status !== 'transmitting' && i.status !== 'finished'
-                  );
+                  const stepItems = itemsByStepId.get(step.id) || [];
 
                   return (
                       <ProcessNode 
                         key={step.id}
+                        ref={nodeRefHandlersByStepId.get(step.id)}
                         step={step}
                         stats={stats}
                         items={stepItems}
-                        onEdit={() => onEditStep(step)}
-                        onRemove={() => onRemoveStep(step.id)}
+                        onEdit={editHandlersByStepId.get(step.id) || (() => onEditStep(step))}
+                        onRemove={removeHandlersByStepId.get(step.id) || (() => onRemoveStep(step.id))}
                         style={{ left: pos.x, top: pos.y }}
-                        onMouseDown={(e) => handleNodeDragStart(e, step.id)}
-                        scale={scale}
+                        onMouseDown={dragHandlersByStepId.get(step.id)}
+                        isDragging={draggingId === step.id || settlingId === step.id}
                       />
                   );
               })}

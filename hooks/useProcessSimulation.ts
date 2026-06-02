@@ -3,10 +3,23 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { ProcessStep, WorkItem, SimulationConfig, StepStats, SimulationStats } from '../types';
 
 const TRANSMISSION_DURATION = 1000; // ms to travel between nodes
+const TIME_UNIT_TO_MS = {
+  ms: 1,
+  s: 1000,
+  min: 60 * 1000,
+  h: 60 * 60 * 1000,
+  day: 24 * 60 * 60 * 1000,
+  week: 7 * 24 * 60 * 60 * 1000,
+  month: 30 * 24 * 60 * 60 * 1000,
+  year: 365 * 24 * 60 * 60 * 1000,
+} as const;
+
+const MIN_ARRIVAL_RATE = 0.000000001;
 
 export const useProcessSimulation = (config: SimulationConfig) => {
   const [items, setItems] = useState<WorkItem[]>([]);
   const [stepStats, setStepStats] = useState<StepStats[]>([]);
+  const [simulationTimeMs, setSimulationTimeMs] = useState(0);
   const [globalStats, setGlobalStats] = useState<SimulationStats>({
     totalItemsCreated: 0,
     totalItemsFinished: 0,
@@ -18,6 +31,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
   });
 
   const lastTickRef = useRef<number>(Date.now());
+  const simulationTimeRef = useRef(0);
   const itemsRef = useRef<WorkItem[]>([]);
   const statsRef = useRef<SimulationStats>({ ...globalStats });
   const stepsRef = useRef<ProcessStep[]>(config.steps);
@@ -47,6 +61,8 @@ export const useProcessSimulation = (config: SimulationConfig) => {
   const resetSimulation = useCallback(() => {
     itemsRef.current = [];
     setItems([]);
+    simulationTimeRef.current = 0;
+    setSimulationTimeMs(0);
     const initialStats = {
       totalItemsCreated: 0,
       totalItemsFinished: 0,
@@ -93,40 +109,59 @@ export const useProcessSimulation = (config: SimulationConfig) => {
       return defaultVal;
   };
 
+  const getArrivalUnitMs = (step: ProcessStep) => TIME_UNIT_TO_MS[step.arrivalUnit || 's'];
+
   const calculateNextSpawnDelay = (step: ProcessStep): number => {
+    const unitMs = getArrivalUnitMs(step);
+    const inputMode = step.arrivalInputMode || 'rate';
+
     if (step.randomnessMode === 'range') {
-        const minRate = safeNumber(step.minArrivalRate, 0.1);
-        const maxRate = safeNumber(step.maxArrivalRate, 1.0);
-        // Random rate between min and max
-        const randomRate = minRate + Math.random() * (maxRate - minRate);
-        const safeRate = Math.max(0.001, randomRate);
-        return 1000 / safeRate; 
+        const minValue = safeNumber(step.minArrivalRate, inputMode === 'interval' ? 1 : 0.1);
+        const maxValue = safeNumber(step.maxArrivalRate, inputMode === 'interval' ? 3 : 1.0);
+
+        if (inputMode === 'interval') {
+          const minInterval = Math.max(MIN_ARRIVAL_RATE, Math.min(minValue, maxValue));
+          const maxInterval = Math.max(MIN_ARRIVAL_RATE, Math.max(minValue, maxValue));
+          const randomInterval = minInterval + Math.random() * (maxInterval - minInterval);
+          return randomInterval * unitMs;
+        }
+
+        const randomRate = minValue + Math.random() * (maxValue - minValue);
+        const safeRate = Math.max(MIN_ARRIVAL_RATE, randomRate);
+        return unitMs / safeRate; 
     } else {
-        // Fixed
-        const rate = safeNumber(step.arrivalRate, 0.5);
-        const safeRate = Math.max(0.001, rate);
-        return 1000 / safeRate;
+        const value = safeNumber(step.arrivalRate, inputMode === 'interval' ? 1 : 0.5);
+
+        if (inputMode === 'interval') {
+          return Math.max(MIN_ARRIVAL_RATE, value) * unitMs;
+        }
+
+        const safeRate = Math.max(MIN_ARRIVAL_RATE, value);
+        return unitMs / safeRate;
     }
   };
 
   const calculateProcessingDuration = (step: ProcessStep, item: WorkItem): number => {
+      const fixedUnitMultiplier = TIME_UNIT_TO_MS[step.processingTimeUnit || 'ms'];
+      const rangeUnitMultiplier = TIME_UNIT_TO_MS[step.rangeTimeUnit || step.processingTimeUnit || 'ms'];
+
     // 1. Check Source Rule Override (Fixed Mode only usually, but applies generally)
     if (step.randomnessMode === 'fixed' && item.previousStepId && step.sourceProcessingTimes && step.sourceProcessingTimes[item.previousStepId]) {
-         const base = safeNumber(step.sourceProcessingTimes[item.previousStepId], 1000);
+        const base = safeNumber(step.sourceProcessingTimes[item.previousStepId], 1000) * fixedUnitMultiplier;
          const speedNoise = 1 + (Math.random() * 2 - 1) * safeNumber(step.variance, 0);
          return Math.max(100, base * speedNoise);
     }
 
     // 2. Range Mode
     if (step.randomnessMode === 'range') {
-        const min = safeNumber(step.minProcessingTime, 500);
-        const max = safeNumber(step.maxProcessingTime, 2000);
+      const min = safeNumber(step.minProcessingTime, 500) * rangeUnitMultiplier;
+      const max = safeNumber(step.maxProcessingTime, 2000) * rangeUnitMultiplier;
         // Independent random number for this call
         return min + Math.random() * (max - min);
     }
 
     // 3. Default Fixed Mode
-    const base = safeNumber(step.processingTime, 1000);
+    const base = safeNumber(step.processingTime, 1000) * fixedUnitMultiplier;
     const speedNoise = 1 + (Math.random() * 2 - 1) * safeNumber(step.variance, 0);
     return Math.max(100, base * speedNoise);
   };
@@ -143,8 +178,9 @@ export const useProcessSimulation = (config: SimulationConfig) => {
       const now = Date.now();
       const rawDt = now - lastTickRef.current;
       // Cap dt to prevent massive jumps after lag spikes or background tabs
-      const dt = Math.min(rawDt, 100) * config.speedMultiplier; 
+      const dt = Math.min(rawDt, 100) * config.speedMultiplier * config.timeCompression; 
       lastTickRef.current = now;
+      simulationTimeRef.current += dt;
 
       const steps = stepsRef.current;
       const stepMap = new Map(steps.map(s => [s.id, s]));
@@ -258,10 +294,12 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                         // Reached a process node
                         item.previousStepId = item.currentStepId; 
                         item.currentStepId = item.targetStepId;
-                        item.status = 'queued';
+                        item.status = targetStep?.simulationMode === 'delay' ? 'processing' : 'queued';
                         item.stepEntryTime = now;
                         item.targetStepId = undefined;
-                        item.requiredDuration = undefined; 
+                        item.requiredDuration = targetStep?.simulationMode === 'delay'
+                          ? calculateProcessingDuration(targetStep, item)
+                          : undefined; 
                     }
                 } else {
                     item.status = 'finished';
@@ -290,14 +328,16 @@ export const useProcessSimulation = (config: SimulationConfig) => {
             }
 
             const currentUsage = stepUsage.get(item.currentStepId) || 0;
-            if (currentUsage < currentStep.capacity) {
+            if (currentStep.simulationMode === 'delay' || currentUsage < currentStep.capacity) {
                 item.status = 'processing';
                 item.progress = 0;
                 
                 const d = calculateProcessingDuration(currentStep, item);
                 item.requiredDuration = isNaN(d) || d < 100 ? 1000 : d;
                 
+              if (currentStep.simulationMode !== 'delay') {
                 stepUsage.set(item.currentStepId, currentUsage + 1);
+              }
             }
         } 
         // --- PROCESSING STATE ---
@@ -320,8 +360,10 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                     if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0 };
                     stepCountersRef.current[item.currentStepId].failed++;
 
-                    const currentUsage = stepUsage.get(item.currentStepId) || 0;
-                    stepUsage.set(item.currentStepId, Math.max(0, currentUsage - 1));
+                    if (currentStep.simulationMode !== 'delay') {
+                      const currentUsage = stepUsage.get(item.currentStepId) || 0;
+                      stepUsage.set(item.currentStepId, Math.max(0, currentUsage - 1));
+                    }
                     continue;
                 }
 
@@ -337,8 +379,10 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                 item.status = 'transmitting';
                 item.transmissionProgress = 0;
                 
-                const currentUsage = stepUsage.get(item.currentStepId) || 0;
-                stepUsage.set(item.currentStepId, Math.max(0, currentUsage - 1));
+                if (currentStep.simulationMode !== 'delay') {
+                  const currentUsage = stepUsage.get(item.currentStepId) || 0;
+                  stepUsage.set(item.currentStepId, Math.max(0, currentUsage - 1));
+                }
             }
         }
       }
@@ -360,7 +404,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           const activeProcessing = stepActiveItems.filter(i => i.status === 'processing').length;
           
           let utilization = 0;
-          if (s.type === 'process') {
+            if (s.type === 'process' && s.simulationMode !== 'delay') {
               const cap = Math.max(1, s.capacity || 1);
               const used = stepUsage.get(s.id) || 0;
               utilization = used / cap;
@@ -380,6 +424,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
       setItems([...itemsRef.current]);
       setStepStats(newStepStats);
+      setSimulationTimeMs(simulationTimeRef.current);
       setGlobalStats({ ...statsRef.current, activeItems: itemsRef.current.filter(i => !['finished', 'error', 'cancelled'].includes(i.status)).length });
 
       animationFrameId = requestAnimationFrame(tick);
@@ -388,11 +433,12 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     animationFrameId = requestAnimationFrame(tick);
 
     return () => cancelAnimationFrame(animationFrameId);
-  }, [config.isRunning, config.speedMultiplier, config.steps]);
+  }, [config.isRunning, config.speedMultiplier, config.timeCompression, config.steps]);
 
   return {
     items,
     stepStats,
+    simulationTimeMs,
     globalStats,
     resetSimulation
   };

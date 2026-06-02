@@ -31,7 +31,7 @@ export const generateScenario = async (prompt: string): Promise<ProcessStep[]> =
       model: "gemini-2.5-flash",
       contents: `Create a process simulation scenario for: "${prompt}". 
       Return a JSON array of process steps. 
-      Each step must have: name (string), capacity (integer 1-10), processingTime (milliseconds, 500-10000), variance (0.1-0.5).
+      Each step must have: name (string), capacity (integer 1-10), processingTime (milliseconds, 500-10000), variance (0-0.5).
       Make it realistic.`,
       config: {
         responseMimeType: "application/json",

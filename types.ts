@@ -2,6 +2,9 @@
 export type ColorTheme = 'blue' | 'emerald' | 'amber' | 'rose' | 'purple' | 'cyan' | 'indigo';
 export type NodeType = 'start' | 'process' | 'end';
 export type RandomnessMode = 'fixed' | 'range';
+export type StepSimulationMode = 'resource' | 'delay';
+export type DurationUnit = 'ms' | 's' | 'min' | 'h' | 'day' | 'week' | 'month' | 'year';
+export type ArrivalInputMode = 'rate' | 'interval';
 
 export interface StepConnection {
   targetId: string;
@@ -15,18 +18,23 @@ export interface ProcessStep {
   
   // Logic Config
   randomnessMode: RandomnessMode;
+  simulationMode?: StepSimulationMode; // resource = capacity/queue, delay = time-only
   
   // Process Node Fields
   capacity: number; 
   processingTime: number; // Default ms (Fixed Mode)
+  processingTimeUnit?: DurationUnit;
   variance: number; // 0-1 (Fixed Mode)
   minProcessingTime?: number; // ms (Range Mode)
   maxProcessingTime?: number; // ms (Range Mode)
+  rangeTimeUnit?: DurationUnit;
 
   // Start Node Fields
-  arrivalRate?: number; // Items per second (Fixed Mode)
-  minArrivalRate?: number; // Items per second (Range Mode)
-  maxArrivalRate?: number; // Items per second (Range Mode)
+  arrivalInputMode?: ArrivalInputMode;
+  arrivalUnit?: DurationUnit;
+  arrivalRate?: number; // Items per selected simulated unit (Fixed Mode)
+  minArrivalRate?: number; // Items per selected simulated unit (Range Mode)
+  maxArrivalRate?: number; // Items per selected simulated unit (Range Mode)
 
   // Exception Config
   failureProbability: number; // 0-1, chance of error upon completion
@@ -59,6 +67,7 @@ export interface SimulationConfig {
   steps: ProcessStep[];
   isRunning: boolean;
   speedMultiplier: number;
+  timeCompression: number; // simulated ms advanced per real ms
 }
 
 export interface SimulationStats {

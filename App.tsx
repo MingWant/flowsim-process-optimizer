@@ -1,28 +1,287 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { DEFAULT_CONFIG } from './constants';
 import { useProcessSimulation } from './hooks/useProcessSimulation';
-import { ProcessStep, SimulationConfig, NodeType } from './types';
+import { ProcessStep, SimulationConfig, NodeType, DurationUnit, RandomnessMode, StepSimulationMode, ArrivalInputMode } from './types';
 import { ProcessMap } from './components/ProcessMap';
 import { StatsBoard } from './components/StatsBoard';
 import { generateScenario, analyzeBottlenecks } from './services/geminiService';
-import { Play, Pause, RotateCcw, Plus, Zap, MessageSquare, Loader2, Sparkles, Menu, X, Settings, BarChart3, ArrowRight, ArrowDownUp, Clock, PlayCircle, StopCircle, Box, Shuffle, Dna, AlertTriangle } from 'lucide-react';
+import { Play, Pause, RotateCcw, Download, Upload, Zap, MessageSquare, Loader2, Sparkles, Menu, X, Settings, BarChart3, ArrowRight, ArrowDownUp, Clock, PlayCircle, StopCircle, Box, Shuffle, AlertTriangle, Palette, Users, Dna } from 'lucide-react';
+
+interface CanvasSpawnPosition {
+  x: number;
+  y: number;
+}
+
+type UiTheme = 'dark' | 'light' | 'ocean' | 'warm';
+
+const DURATION_UNITS = [
+  { value: 'ms', label: 'ms' },
+  { value: 's', label: 'seconds' },
+  { value: 'min', label: 'minutes' },
+  { value: 'h', label: 'hours' },
+  { value: 'day', label: 'days' },
+  { value: 'week', label: 'weeks' },
+  { value: 'month', label: 'months' },
+  { value: 'year', label: 'years' },
+] as const;
+
+const ARRIVAL_UNITS = [
+  { value: 'ms', label: 'sim millisecond' },
+  { value: 's', label: 'sim second' },
+  { value: 'min', label: 'sim minute' },
+  { value: 'h', label: 'sim hour' },
+  { value: 'day', label: 'sim day' },
+  { value: 'week', label: 'sim week' },
+  { value: 'month', label: 'sim month' },
+  { value: 'year', label: 'sim year' },
+] as const;
+
+const TIME_COMPRESSION_PRESETS = [
+  { value: 1, label: 'Real-time', hint: '1 simulated second = 1 real second' },
+  { value: 60, label: '1 sim min / sec', hint: 'Useful for short delay testing' },
+  { value: 60 * 60, label: '1 sim hour / sec', hint: 'Good for shift-level simulations' },
+  { value: 24 * 60 * 60, label: '1 sim day / sec', hint: 'Great for daily process playback' },
+  { value: 7 * 24 * 60 * 60, label: '1 sim week / sec', hint: 'For weekly flow trends' },
+  { value: 30 * 24 * 60 * 60, label: '1 sim month / sec', hint: 'For monthly cycle simulations' },
+  { value: 365 * 24 * 60 * 60, label: '1 sim year / sec', hint: 'For long-horizon scenario testing' },
+] as const;
+
+const UI_THEMES: { id: UiTheme; label: string; swatch: string }[] = [
+  { id: 'dark', label: 'Dark', swatch: 'bg-slate-950' },
+  { id: 'light', label: 'Light', swatch: 'bg-slate-100' },
+  { id: 'ocean', label: 'Ocean', swatch: 'bg-cyan-700' },
+  { id: 'warm', label: 'Warm', swatch: 'bg-orange-500' },
+];
+
+const formatSimulationTime = (totalMs: number) => {
+  const safeMs = Math.max(0, Math.floor(totalMs));
+  const totalSeconds = Math.floor(safeMs / 1000);
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const minutes = totalMinutes % 60;
+  const totalHours = Math.floor(totalMinutes / 60);
+  const hours = totalHours % 24;
+  const days = Math.floor(totalHours / 24);
+
+  if (days > 0) {
+    return `D${days} ${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  return `${String(totalHours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+};
+
+const CUSTOM_CLOCK_VALUE = 'custom';
+const FLOWSIM_EXPORT_VERSION = 1;
+const FLOWSIM_DRAFT_STORAGE_KEY = 'flowsim-local-draft';
+const VALID_NODE_TYPES: NodeType[] = ['start', 'process', 'end'];
+const VALID_RANDOMNESS_MODES: RandomnessMode[] = ['fixed', 'range'];
+const VALID_SIMULATION_MODES: StepSimulationMode[] = ['resource', 'delay'];
+const VALID_ARRIVAL_INPUT_MODES: ArrivalInputMode[] = ['rate', 'interval'];
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> => (
+  typeof value === 'object' && value !== null
+);
+
+const toFiniteNumber = (value: unknown, fallback: number) => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const toPositiveNumber = (value: unknown, fallback: number, min = 0.001) => {
+  const parsed = toFiniteNumber(value, fallback);
+  return parsed > 0 ? Math.max(parsed, min) : fallback;
+};
+
+const clampProbability = (value: number) => Math.max(0, Math.min(1, value));
+
+const getArrivalUnitLabel = (unit?: DurationUnit) => (
+  ARRIVAL_UNITS.find((option) => option.value === unit)?.label || 'sim second'
+);
+
+const getArrivalMinValue = (mode?: ArrivalInputMode) => mode === 'interval' ? 0.001 : 0.000000001;
+
+const sanitizeStep = (rawStep: unknown, index: number): ProcessStep | null => {
+  if (!isObjectRecord(rawStep)) {
+    return null;
+  }
+
+  const rawType = rawStep.type;
+  if (typeof rawType !== 'string' || !VALID_NODE_TYPES.includes(rawType as NodeType)) {
+    return null;
+  }
+
+  const type = rawType as NodeType;
+  const isStart = type === 'start';
+  const isEnd = type === 'end';
+  const isProcess = type === 'process';
+  const rawRandomnessMode = rawStep.randomnessMode;
+  const randomnessMode = typeof rawRandomnessMode === 'string' && VALID_RANDOMNESS_MODES.includes(rawRandomnessMode as RandomnessMode)
+    ? rawRandomnessMode as RandomnessMode
+    : 'fixed';
+  const rawArrivalInputMode = rawStep.arrivalInputMode;
+  const arrivalInputMode = isStart && typeof rawArrivalInputMode === 'string' && VALID_ARRIVAL_INPUT_MODES.includes(rawArrivalInputMode as ArrivalInputMode)
+    ? rawArrivalInputMode as ArrivalInputMode
+    : isStart ? 'rate' : undefined;
+  const rawSimulationMode = rawStep.simulationMode;
+  const simulationMode = isProcess && typeof rawSimulationMode === 'string' && VALID_SIMULATION_MODES.includes(rawSimulationMode as StepSimulationMode)
+    ? rawSimulationMode as StepSimulationMode
+    : isProcess ? 'resource' : undefined;
+  const arrivalUnit = isStart && typeof rawStep.arrivalUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.arrivalUnit)
+    ? rawStep.arrivalUnit as DurationUnit
+    : isStart ? 's' : undefined;
+  const processingTimeUnit = typeof rawStep.processingTimeUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.processingTimeUnit)
+    ? rawStep.processingTimeUnit as DurationUnit
+    : 'ms';
+  const rangeTimeUnit = typeof rawStep.rangeTimeUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.rangeTimeUnit)
+    ? rawStep.rangeTimeUnit as DurationUnit
+    : processingTimeUnit;
+  const connections = Array.isArray(rawStep.connections)
+    ? rawStep.connections
+        .filter(isObjectRecord)
+        .map((connection) => ({
+          targetId: typeof connection.targetId === 'string' ? connection.targetId : '',
+          probability: clampProbability(toFiniteNumber(connection.probability, 0)),
+        }))
+        .filter((connection) => connection.targetId)
+    : [];
+  const sourceProcessingTimes = isObjectRecord(rawStep.sourceProcessingTimes)
+    ? Object.fromEntries(
+        Object.entries(rawStep.sourceProcessingTimes)
+          .filter(([key]) => typeof key === 'string' && key.length > 0)
+          .map(([key, value]) => [key, Math.max(0, toFiniteNumber(value, 0))])
+      )
+    : {};
+
+  return {
+    id: typeof rawStep.id === 'string' && rawStep.id.trim() ? rawStep.id : `node-import-${Date.now()}-${index}`,
+    type,
+    name: typeof rawStep.name === 'string' && rawStep.name.trim() ? rawStep.name : isStart ? 'Start Point' : isEnd ? 'End Point' : `Step ${index + 1}`,
+    randomnessMode,
+    arrivalInputMode,
+    arrivalUnit,
+    simulationMode,
+    capacity: isProcess ? Math.max(1, Math.round(toFiniteNumber(rawStep.capacity, 1))) : 0,
+    processingTime: isProcess ? Math.max(0, toFiniteNumber(rawStep.processingTime, 2000)) : 0,
+    processingTimeUnit,
+    variance: isProcess ? Math.max(0, Math.min(1, toFiniteNumber(rawStep.variance, 0))) : 0,
+    minProcessingTime: isProcess ? Math.max(0, toFiniteNumber(rawStep.minProcessingTime, 1000)) : 0,
+    maxProcessingTime: isProcess ? Math.max(0, toFiniteNumber(rawStep.maxProcessingTime, 3000)) : 0,
+    rangeTimeUnit,
+    arrivalRate: isStart ? toPositiveNumber(rawStep.arrivalRate, 0.5, 0.000000001) : undefined,
+    minArrivalRate: isStart ? toPositiveNumber(rawStep.minArrivalRate, 0.2, 0.000000001) : undefined,
+    maxArrivalRate: isStart ? toPositiveNumber(rawStep.maxArrivalRate, 0.8, 0.000000001) : undefined,
+    failureProbability: Math.max(0, Math.min(1, toFiniteNumber(rawStep.failureProbability, 0))),
+    cancellationProbability: Math.max(0, Math.min(1, toFiniteNumber(rawStep.cancellationProbability, 0))),
+    color: typeof rawStep.color === 'string' && rawStep.color.trim() ? rawStep.color : isStart ? '#10b981' : isEnd ? '#ef4444' : '#3b82f6',
+    connections,
+    sourceProcessingTimes,
+    x: toFiniteNumber(rawStep.x, 100 + index * 60),
+    y: toFiniteNumber(rawStep.y, 100 + index * 40),
+  };
+};
+
+const sanitizeConfig = (rawConfig: unknown): SimulationConfig => {
+  if (!isObjectRecord(rawConfig) || !Array.isArray(rawConfig.steps)) {
+    throw new Error('Invalid config file: missing steps array.');
+  }
+
+  const sanitizedSteps = rawConfig.steps
+    .map((step, index) => sanitizeStep(step, index))
+    .filter((step): step is ProcessStep => step !== null);
+
+  if (sanitizedSteps.length === 0) {
+    throw new Error('Import file does not contain any valid steps.');
+  }
+
+  const validIds = new Set(sanitizedSteps.map((step) => step.id));
+  const normalizedSteps = sanitizedSteps.map((step) => {
+    const validConnections = step.connections.filter((connection) => validIds.has(connection.targetId) && connection.targetId !== step.id);
+    const probabilityTotal = validConnections.reduce((sum, connection) => sum + connection.probability, 0);
+    const normalizedConnections = validConnections.length === 0
+      ? []
+      : probabilityTotal > 0
+        ? validConnections.map((connection) => ({ ...connection, probability: connection.probability / probabilityTotal }))
+        : validConnections.map((connection) => ({ ...connection, probability: 1 / validConnections.length }));
+
+    const filteredSourceRules = Object.fromEntries(
+      Object.entries(step.sourceProcessingTimes || {}).filter(([sourceId]) => validIds.has(sourceId))
+    );
+
+    return {
+      ...step,
+      connections: normalizedConnections,
+      sourceProcessingTimes: filteredSourceRules,
+      minArrivalRate: step.type === 'start' ? Math.min(step.minArrivalRate ?? 0.2, step.maxArrivalRate ?? 0.8) : undefined,
+      maxArrivalRate: step.type === 'start' ? Math.max(step.minArrivalRate ?? 0.2, step.maxArrivalRate ?? 0.8) : undefined,
+      minProcessingTime: step.type === 'process' ? Math.min(step.minProcessingTime ?? 1000, step.maxProcessingTime ?? 3000) : 0,
+      maxProcessingTime: step.type === 'process' ? Math.max(step.minProcessingTime ?? 1000, step.maxProcessingTime ?? 3000) : 0,
+    };
+  });
+
+  return {
+    steps: normalizedSteps,
+    isRunning: false,
+    speedMultiplier: Math.max(1, Math.round(toFiniteNumber(rawConfig.speedMultiplier, 1))),
+    timeCompression: toPositiveNumber(rawConfig.timeCompression, 1),
+  };
+};
+
+const parseImportedConfig = (payload: unknown): SimulationConfig => {
+  if (isObjectRecord(payload) && isObjectRecord(payload.config)) {
+    return sanitizeConfig(payload.config);
+  }
+
+  return sanitizeConfig(payload);
+};
+
+const loadInitialConfig = (): SimulationConfig => {
+  if (typeof window === 'undefined') {
+    return DEFAULT_CONFIG;
+  }
+
+  const savedDraft = window.localStorage.getItem(FLOWSIM_DRAFT_STORAGE_KEY);
+  if (!savedDraft) {
+    return DEFAULT_CONFIG;
+  }
+
+  try {
+    return parseImportedConfig(JSON.parse(savedDraft) as unknown);
+  } catch (error) {
+    console.warn('Failed to restore FlowSim draft from local storage.', error);
+    window.localStorage.removeItem(FLOWSIM_DRAFT_STORAGE_KEY);
+    return DEFAULT_CONFIG;
+  }
+};
 
 const App: React.FC = () => {
   // App State
-  const [config, setConfig] = useState<SimulationConfig>(DEFAULT_CONFIG);
+  const [config, setConfig] = useState<SimulationConfig>(loadInitialConfig);
   const [aiPrompt, setAiPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [importExportNotice, setImportExportNotice] = useState<string | null>(null);
+  const [draftStatus, setDraftStatus] = useState<'restored' | 'saved' | 'save-failed' | null>(() => {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+
+    return window.localStorage.getItem(FLOWSIM_DRAFT_STORAGE_KEY) ? 'restored' : null;
+  });
+  const [uiTheme, setUiTheme] = useState<UiTheme>(() => {
+    const savedTheme = localStorage.getItem('flowsim-ui-theme') as UiTheme | null;
+    return savedTheme && UI_THEMES.some(theme => theme.id === savedTheme) ? savedTheme : 'dark';
+  });
+  const importInputRef = useRef<HTMLInputElement | null>(null);
   
   // Edit Modal State
   const [editingStep, setEditingStep] = useState<ProcessStep | null>(null);
   const [activeTab, setActiveTab] = useState<'basic' | 'connections' | 'rules' | 'exceptions'>('basic');
 
   // Simulation Hook
-  const { items, stepStats, globalStats, resetSimulation } = useProcessSimulation(config);
+  const { items, stepStats, simulationTimeMs, globalStats, resetSimulation } = useProcessSimulation(config);
 
   // Handlers
   const togglePlay = () => setConfig(p => ({ ...p, isRunning: !p.isRunning }));
@@ -43,7 +302,14 @@ const App: React.FC = () => {
     }));
   };
 
-  const addStep = (type: NodeType) => {
+  const updateStepPosition = (id: string, position: CanvasSpawnPosition) => {
+    setConfig((p) => ({
+      ...p,
+      steps: p.steps.map((step) => step.id === id ? { ...step, x: position.x, y: position.y } : step),
+    }));
+  };
+
+  const addStep = (type: NodeType, position?: CanvasSpawnPosition) => {
     const isStart = type === 'start';
     const isEnd = type === 'end';
     
@@ -52,21 +318,26 @@ const App: React.FC = () => {
       type: type,
       name: isStart ? 'Start Point' : isEnd ? 'End Point' : 'New Step',
       randomnessMode: 'fixed',
+      arrivalInputMode: isStart ? 'rate' : undefined,
+      arrivalUnit: isStart ? 'h' : undefined,
+      simulationMode: type === 'process' ? 'resource' : undefined,
       capacity: isStart || isEnd ? 0 : 1,
       processingTime: isStart || isEnd ? 0 : 2000,
-      variance: 0.1,
+      processingTimeUnit: 'ms',
+      variance: 0,
       minProcessingTime: 1000,
       maxProcessingTime: 3000,
-      arrivalRate: isStart ? 0.5 : undefined,
-      minArrivalRate: 0.2,
-      maxArrivalRate: 0.8,
+      rangeTimeUnit: 'ms',
+      arrivalRate: isStart ? 12 : undefined,
+      minArrivalRate: isStart ? 8 : undefined,
+      maxArrivalRate: isStart ? 20 : undefined,
       failureProbability: 0,
       cancellationProbability: 0,
       color: isStart ? '#10b981' : isEnd ? '#ef4444' : '#3b82f6',
       connections: [],
       sourceProcessingTimes: {},
-      x: 100,
-      y: 100
+      x: position?.x ?? 100,
+      y: position?.y ?? 100
     };
     setConfig(p => ({ ...p, steps: [...p.steps, newStep] }));
   };
@@ -134,6 +405,30 @@ const App: React.FC = () => {
     if (process.env.API_KEY) setHasApiKey(true);
   }, []);
 
+  useEffect(() => {
+    localStorage.setItem('flowsim-ui-theme', uiTheme);
+  }, [uiTheme]);
+
+  useEffect(() => {
+    try {
+      const draftPayload = {
+        app: 'FlowSim',
+        version: FLOWSIM_EXPORT_VERSION,
+        savedAt: new Date().toISOString(),
+        config: {
+          ...config,
+          isRunning: false,
+        },
+      };
+
+      window.localStorage.setItem(FLOWSIM_DRAFT_STORAGE_KEY, JSON.stringify(draftPayload));
+      setDraftStatus((current) => current === 'restored' ? 'restored' : 'saved');
+    } catch (error) {
+      console.error('Failed to save FlowSim draft.', error);
+      setDraftStatus('save-failed');
+    }
+  }, [config]);
+
   const selectApiKey = async () => {
     if (window.aistudio) {
         try {
@@ -154,11 +449,111 @@ const App: React.FC = () => {
      return config.steps.filter(s => s.connections.some(c => c.targetId === editingStep.id));
   }, [config.steps, editingStep]);
 
+  const exportConfig = () => {
+    const payload = {
+      app: 'FlowSim',
+      version: FLOWSIM_EXPORT_VERSION,
+      exportedAt: new Date().toISOString(),
+      config,
+    };
+    const fileName = `flowsim-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+
+    link.href = url;
+    link.download = fileName;
+    link.click();
+    URL.revokeObjectURL(url);
+    setImportExportNotice(`Exported ${config.steps.length} steps to ${fileName}`);
+  };
+
+  const triggerImport = () => {
+    importInputRef.current?.click();
+  };
+
+  const handleImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+
+    if (!file) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as unknown;
+      const importedConfig = parseImportedConfig(parsed);
+
+      setConfig(importedConfig);
+      setEditingStep(null);
+      setAiAnalysis(null);
+      resetSimulation();
+      setDraftStatus('saved');
+      setImportExportNotice(`Imported ${importedConfig.steps.length} steps from ${file.name}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Import failed.';
+      setImportExportNotice(`Import failed: ${message}`);
+    }
+  };
+
+  useEffect(() => {
+    if (!importExportNotice) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => setImportExportNotice(null), 4000);
+    return () => window.clearTimeout(timeoutId);
+  }, [importExportNotice]);
+
+  useEffect(() => {
+    if (!draftStatus) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => setDraftStatus(null), draftStatus === 'save-failed' ? 5000 : 2500);
+    return () => window.clearTimeout(timeoutId);
+  }, [draftStatus]);
+
   const runningLabel = config.isRunning ? 'Running' : 'Paused';
   const totalQueue = stepStats.reduce((sum, s) => sum + s.queueLength, 0);
+  const activeCompressionPreset = TIME_COMPRESSION_PRESETS.find(preset => preset.value === config.timeCompression);
+  const simulationClockLabel = formatSimulationTime(simulationTimeMs);
+  const compressionSelectValue = activeCompressionPreset ? String(activeCompressionPreset.value) : CUSTOM_CLOCK_VALUE;
+  const draftStatusMessage = draftStatus === 'restored'
+    ? 'Recovered your last local draft.'
+    : draftStatus === 'saved'
+      ? 'Draft auto-saved locally.'
+      : draftStatus === 'save-failed'
+        ? 'Local draft save failed.'
+        : null;
+
+  const applyClockPreset = (value: string) => {
+    if (value === CUSTOM_CLOCK_VALUE) {
+      return;
+    }
+
+    setConfig((p) => ({ ...p, timeCompression: Number(value) }));
+  };
+
+  const applyCustomClockValue = (value: string) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return;
+    }
+
+    setConfig((p) => ({ ...p, timeCompression: parsed }));
+  };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 flex flex-col font-sans selection:bg-blue-500/30">
+    <div data-theme={uiTheme} className="min-h-screen bg-slate-950 text-slate-200 flex flex-col font-sans selection:bg-blue-500/30 theme-root">
+      <input
+        ref={importInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={handleImportFile}
+      />
       {/* Header */}
       <header className="h-16 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md flex items-center justify-between px-4 md:px-6 sticky top-0 z-50">
         <div className="flex items-center gap-3">
@@ -172,9 +567,27 @@ const App: React.FC = () => {
         </div>
         
         <div className="flex items-center gap-3">
+           <div className="hidden md:flex items-center gap-1 rounded-full border border-slate-800 bg-slate-900/80 p-1 theme-switcher">
+             <Palette size={14} className="ml-2 mr-1 text-slate-400" />
+             {UI_THEMES.map(theme => (
+               <button
+                 key={theme.id}
+                 onClick={() => setUiTheme(theme.id)}
+                 className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold transition-colors ${uiTheme === theme.id ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'}`}
+                 title={`Switch to ${theme.label} theme`}
+               >
+                 <span className={`h-2.5 w-2.5 rounded-full border border-white/30 ${theme.swatch}`} />
+                 {theme.label}
+               </button>
+             ))}
+           </div>
            <div className={`hidden sm:flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold ${config.isRunning ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 bg-slate-900 text-slate-400'}`}>
              <span className={`h-2 w-2 rounded-full ${config.isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
              {runningLabel}
+           </div>
+           <div className="hidden xl:flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-200">
+             <Clock size={14} />
+             {simulationClockLabel}
            </div>
            {!hasApiKey && (
              <button onClick={selectApiKey} className="text-xs bg-indigo-600 hover:bg-indigo-500 px-3 py-1.5 rounded-full transition-colors font-medium">
@@ -208,6 +621,23 @@ const App: React.FC = () => {
               <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
                 <Settings size={14}/> Quick Controls
               </h3>
+              <div className="md:hidden space-y-2">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+                  <Palette size={14}/> Theme
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {UI_THEMES.map(theme => (
+                    <button
+                      key={theme.id}
+                      onClick={() => setUiTheme(theme.id)}
+                      className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold transition-colors ${uiTheme === theme.id ? 'border-blue-500 bg-blue-600 text-white' : 'border-slate-800 bg-slate-900 text-slate-400'}`}
+                    >
+                      <span className={`h-2.5 w-2.5 rounded-full border border-white/30 ${theme.swatch}`} />
+                      {theme.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="flex gap-2">
                 <button 
                   onClick={togglePlay}
@@ -240,6 +670,43 @@ const App: React.FC = () => {
                     onChange={(e) => setConfig(p => ({ ...p, speedMultiplier: parseInt(e.target.value) }))}
                     className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
                   />
+                </div>
+                <div>
+                  <div className="flex justify-between text-sm mb-1 gap-3">
+                    <span className="text-slate-400">Simulation Clock</span>
+                    <span className="text-right font-mono text-cyan-400 text-[11px]">{activeCompressionPreset?.label || `${config.timeCompression}x time`}</span>
+                  </div>
+                  <select
+                    value={compressionSelectValue}
+                    onChange={(e) => applyClockPreset(e.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/30"
+                  >
+                    {TIME_COMPRESSION_PRESETS.map((preset) => (
+                      <option key={preset.value} value={String(preset.value)}>{preset.label}</option>
+                    ))}
+                    <option value={CUSTOM_CLOCK_VALUE}>Custom</option>
+                  </select>
+                  <p className="mt-2 text-xs leading-relaxed text-slate-500">{activeCompressionPreset?.hint || 'Choose how much simulated time passes during each real second.'}</p>
+                  <div className="mt-3">
+                    <div className="flex justify-between text-[11px] text-slate-500 mb-1">
+                      <span>Custom Ratio</span>
+                      <span className="font-mono text-cyan-400">{config.timeCompression} sim sec / real sec</span>
+                    </div>
+                    <input
+                      type="number"
+                      min="0.001"
+                      step="0.001"
+                      value={config.timeCompression}
+                      onChange={(e) => applyCustomClockValue(e.target.value)}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/30"
+                    />
+                  </div>
+                </div>
+                <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-3">
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <span className="text-slate-300">Current Sim Time</span>
+                    <span className="font-mono text-cyan-300">{simulationClockLabel}</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -327,9 +794,23 @@ const App: React.FC = () => {
                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between mb-4">
                  <div>
                    <h2 className="text-lg font-semibold text-slate-100">Process Map</h2>
-                   <p className="text-xs text-slate-500">Zoom, pan, drag nodes, or pick a step from the left panel.</p>
+                   <p className="text-xs text-slate-500">Zoom, pan, drag nodes, or pick a step from the left panel. Sim time: {simulationClockLabel}</p>
+                   {importExportNotice && <p className="mt-1 text-xs text-cyan-300">{importExportNotice}</p>}
+                   {draftStatusMessage && <p className={`mt-1 text-xs ${draftStatus === 'save-failed' ? 'text-rose-300' : 'text-emerald-300'}`}>{draftStatusMessage}</p>}
                  </div>
                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={triggerImport}
+                      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors"
+                    >
+                      <Upload size={16}/> Import
+                    </button>
+                    <button
+                      onClick={exportConfig}
+                      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors"
+                    >
+                      <Download size={16}/> Export
+                    </button>
                     <button 
                       onClick={togglePlay}
                       className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${config.isRunning ? 'bg-amber-500/10 text-amber-300 border border-amber-500/40' : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400'}`}
@@ -348,6 +829,19 @@ const App: React.FC = () => {
                         className="w-24 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
                       />
                       <span className="w-8 text-right font-mono text-xs text-purple-300">{config.speedMultiplier}x</span>
+                    </div>
+                    <div className="hidden md:flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2">
+                      <span className="text-xs text-slate-500">Clock</span>
+                      <select
+                        value={compressionSelectValue}
+                        onChange={(e) => applyClockPreset(e.target.value)}
+                        className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-cyan-300 outline-none focus:border-cyan-500"
+                      >
+                        {TIME_COMPRESSION_PRESETS.map((preset) => (
+                          <option key={preset.value} value={String(preset.value)}>{preset.label}</option>
+                        ))}
+                        <option value={CUSTOM_CLOCK_VALUE}>Custom</option>
+                      </select>
                     </div>
                     <button 
                         onClick={() => addStep('start')}
@@ -377,7 +871,8 @@ const App: React.FC = () => {
                   isRunning={config.isRunning}
                   onEditStep={(s) => { setEditingStep(s); setActiveTab('basic'); }}
                   onRemoveStep={removeStep}
-                  onAddStep={addStep} 
+                onAddStep={addStep}
+                onPositionChange={updateStepPosition}
                />
                <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-500">
                  <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Scroll = Zoom</span>
@@ -493,41 +988,84 @@ const App: React.FC = () => {
                             {/* START NODE SPECIFIC */}
                             {editingStep.type === 'start' && (
                                 <div className="p-4 bg-emerald-900/20 border border-emerald-900/50 rounded-lg">
-                                    <label className="block text-xs font-semibold text-emerald-400 uppercase mb-2">Arrival Rate (Items per Second)</label>
+                                <div className="flex items-center justify-between gap-3 mb-3">
+                                  <label className="block text-xs font-semibold text-emerald-400 uppercase">Arrival Input</label>
+                                  <div className="flex items-center gap-2 bg-slate-900 rounded p-1">
+                                    <button
+                                      onClick={() => setEditingStep({ ...editingStep, arrivalInputMode: 'rate' })}
+                                      className={`text-xs px-3 py-1.5 rounded transition-all ${(editingStep.arrivalInputMode || 'rate') === 'rate' ? 'bg-emerald-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                    >
+                                      Rate
+                                    </button>
+                                    <button
+                                      onClick={() => setEditingStep({ ...editingStep, arrivalInputMode: 'interval' })}
+                                      className={`text-xs px-3 py-1.5 rounded transition-all ${editingStep.arrivalInputMode === 'interval' ? 'bg-cyan-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                    >
+                                      Interval
+                                    </button>
+                                  </div>
+                                </div>
+                                <div className="mb-4 grid grid-cols-[1fr_180px] gap-3">
+                                  <div className="rounded-lg border border-emerald-900/40 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+                                    {(editingStep.arrivalInputMode || 'rate') === 'interval'
+                                      ? 'Define how much simulated time passes before one new item arrives.'
+                                      : 'Define how many items arrive within the selected simulated time unit.'}
+                                  </div>
+                                  <select
+                                    value={editingStep.arrivalUnit || 's'}
+                                    onChange={(e) => setEditingStep({ ...editingStep, arrivalUnit: e.target.value as DurationUnit })}
+                                    className="rounded-lg border border-emerald-900/50 bg-slate-800 px-3 py-2 text-sm text-emerald-100 outline-none focus:ring-2 focus:ring-emerald-500"
+                                  >
+                                    {ARRIVAL_UNITS.map((unit) => (
+                                      <option key={unit.value} value={unit.value}>{unit.label}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <label className="block text-xs font-semibold text-emerald-400 uppercase mb-2">
+                                  {(editingStep.arrivalInputMode || 'rate') === 'interval'
+                                    ? `Arrival Interval (${getArrivalUnitLabel(editingStep.arrivalUnit)})`
+                                    : `Arrival Rate (items / ${getArrivalUnitLabel(editingStep.arrivalUnit)})`}
+                                </label>
                                     
                                     {editingStep.randomnessMode === 'range' ? (
                                          <div className="grid grid-cols-2 gap-4">
                                             <div>
-                                                <label className="text-[10px] text-slate-400 uppercase mb-1 block">Min Rate</label>
+                                                <label className="text-[10px] text-slate-400 uppercase mb-1 block">Min {(editingStep.arrivalInputMode || 'rate') === 'interval' ? 'Interval' : 'Rate'}</label>
                                                 <input 
-                                                    type="number" min="0.1" step="0.1"
-                                                    value={editingStep.minArrivalRate ?? 0.2} 
-                                                    onChange={e => setEditingStep({...editingStep, minArrivalRate: Number(e.target.value)})}
+                                        type="number" min={String(getArrivalMinValue(editingStep.arrivalInputMode))} step="0.001"
+                                        value={editingStep.minArrivalRate ?? ((editingStep.arrivalInputMode || 'rate') === 'interval' ? 1 : 0.2)} 
+                                        onChange={e => setEditingStep({...editingStep, minArrivalRate: Number(e.target.value)})}
                                                     className="w-full bg-slate-800 border border-emerald-900/50 rounded-lg p-2 text-emerald-100 font-mono focus:ring-2 focus:ring-emerald-500 outline-none"
                                                 />
                                             </div>
                                             <div>
-                                                <label className="text-[10px] text-slate-400 uppercase mb-1 block">Max Rate</label>
+                                                <label className="text-[10px] text-slate-400 uppercase mb-1 block">Max {(editingStep.arrivalInputMode || 'rate') === 'interval' ? 'Interval' : 'Rate'}</label>
                                                 <input 
-                                                    type="number" min="0.1" step="0.1"
-                                                    value={editingStep.maxArrivalRate ?? 0.8} 
-                                                    onChange={e => setEditingStep({...editingStep, maxArrivalRate: Number(e.target.value)})}
+                                        type="number" min={String(getArrivalMinValue(editingStep.arrivalInputMode))} step="0.001"
+                                        value={editingStep.maxArrivalRate ?? ((editingStep.arrivalInputMode || 'rate') === 'interval' ? 3 : 0.8)} 
+                                        onChange={e => setEditingStep({...editingStep, maxArrivalRate: Number(e.target.value)})}
                                                     className="w-full bg-slate-800 border border-emerald-900/50 rounded-lg p-2 text-emerald-100 font-mono focus:ring-2 focus:ring-emerald-500 outline-none"
                                                 />
                                             </div>
                                             <div className="col-span-2 text-xs text-slate-500 mt-1">
-                                                Arrivals will randomly fluctuate between {editingStep.minArrivalRate} and {editingStep.maxArrivalRate} items/sec.
+                                      {(editingStep.arrivalInputMode || 'rate') === 'interval'
+                                        ? `One new item will arrive after a random interval between ${editingStep.minArrivalRate ?? 0} and ${editingStep.maxArrivalRate ?? 0} ${getArrivalUnitLabel(editingStep.arrivalUnit)}.`
+                                        : `Arrivals will randomly fluctuate between ${editingStep.minArrivalRate ?? 0} and ${editingStep.maxArrivalRate ?? 0} items per ${getArrivalUnitLabel(editingStep.arrivalUnit)}.`}
                                             </div>
                                         </div>
                                     ) : (
                                         <div className="flex items-center gap-4">
                                             <input 
-                                                type="number" min="0.1" step="0.1"
-                                                value={editingStep.arrivalRate ?? 0.5} 
-                                                onChange={e => setEditingStep({...editingStep, arrivalRate: Number(e.target.value)})}
+                                      type="number" min={String(getArrivalMinValue(editingStep.arrivalInputMode))} step="0.001"
+                                      value={editingStep.arrivalRate ?? ((editingStep.arrivalInputMode || 'rate') === 'interval' ? 1 : 0.5)} 
+                                      onChange={e => setEditingStep({...editingStep, arrivalRate: Number(e.target.value)})}
                                                 className="flex-1 bg-slate-800 border border-emerald-900/50 rounded-lg p-3 text-emerald-100 font-mono text-lg focus:ring-2 focus:ring-emerald-500 outline-none"
                                             />
-                                            <span className="font-mono text-sm text-emerald-500 font-bold whitespace-nowrap">items / sec</span>
+                                    <span className="font-mono text-sm text-emerald-500 font-bold whitespace-nowrap">
+                                      {(editingStep.arrivalInputMode || 'rate') === 'interval'
+                                        ? getArrivalUnitLabel(editingStep.arrivalUnit)
+                                        : `items / ${getArrivalUnitLabel(editingStep.arrivalUnit)}`}
+                                    </span>
                                         </div>
                                     )}
                                 </div>
@@ -536,7 +1074,27 @@ const App: React.FC = () => {
                             {/* PROCESS NODE SPECIFIC */}
                             {editingStep.type === 'process' && (
                                 <div className="space-y-4">
-                                    <div>
+                                <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                  <label className="block text-xs font-semibold text-slate-400 uppercase mb-2">Simulation Type</label>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <button
+                                      onClick={() => setEditingStep({...editingStep, simulationMode: 'resource'})}
+                                      className={`rounded-lg border px-3 py-3 text-left transition-all ${editingStep.simulationMode !== 'delay' ? 'border-blue-500 bg-blue-500/10 text-blue-200' : 'border-slate-700 bg-slate-900 text-slate-400 hover:bg-slate-800'}`}
+                                    >
+                                      <div className="flex items-center gap-2 text-sm font-bold"><Users size={14}/> Resource Mode</div>
+                                      <p className="mt-1 text-[11px] opacity-75">Uses capacity and can create queues.</p>
+                                    </button>
+                                    <button
+                                      onClick={() => setEditingStep({...editingStep, simulationMode: 'delay'})}
+                                      className={`rounded-lg border px-3 py-3 text-left transition-all ${editingStep.simulationMode === 'delay' ? 'border-cyan-500 bg-cyan-500/10 text-cyan-200' : 'border-slate-700 bg-slate-900 text-slate-400 hover:bg-slate-800'}`}
+                                    >
+                                      <div className="flex items-center gap-2 text-sm font-bold"><Clock size={14}/> Time Delay</div>
+                                      <p className="mt-1 text-[11px] opacity-75">No resource limit; items start timing immediately.</p>
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {editingStep.simulationMode !== 'delay' && <div>
                                         <label className="block text-xs font-semibold text-slate-400 uppercase mb-1">Capacity (Resources)</label>
                                         <input 
                                             type="number" min="1" max="50"
@@ -544,10 +1102,10 @@ const App: React.FC = () => {
                                             onChange={e => setEditingStep({...editingStep, capacity: parseInt(e.target.value) || 1})}
                                             className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
                                         />
-                                    </div>
+                                        </div>}
                                     
                                     <div className="p-4 bg-slate-800/50 border border-slate-700 rounded-lg">
-                                        <label className="block text-xs font-semibold text-blue-400 uppercase mb-3">Processing Duration (ms)</label>
+                                          <label className="block text-xs font-semibold text-blue-400 uppercase mb-3">{editingStep.simulationMode === 'delay' ? 'Delay Duration (ms)' : 'Processing Duration (ms)'}</label>
                                         
                                         {editingStep.randomnessMode === 'range' ? (
                                             <div className="grid grid-cols-2 gap-4">
@@ -569,13 +1127,23 @@ const App: React.FC = () => {
                                                         className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 font-mono focus:ring-2 focus:ring-purple-500 outline-none"
                                                     />
                                                 </div>
+                                                    <div className="col-span-2">
+                                                      <label className="text-[10px] text-slate-400 uppercase mb-1 block">Unit</label>
+                                                      <select
+                                                        value={editingStep.rangeTimeUnit || editingStep.processingTimeUnit || 'ms'}
+                                                        onChange={e => setEditingStep({...editingStep, rangeTimeUnit: e.target.value as DurationUnit})}
+                                                        className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 focus:ring-2 focus:ring-purple-500 outline-none"
+                                                      >
+                                                        {DURATION_UNITS.map(unit => <option key={unit.value} value={unit.value}>{unit.label}</option>)}
+                                                      </select>
+                                                    </div>
                                                 <div className="col-span-2 text-xs text-slate-500 flex items-center gap-2">
                                                     <Dna size={12} />
-                                                    Each task will take a unique random time between Min and Max.
+                                                      Each task will take a unique random time between Min and Max in the selected unit.
                                                 </div>
                                             </div>
                                         ) : (
-                                            <div className="grid grid-cols-2 gap-4">
+                                                  <div className="grid grid-cols-3 gap-4">
                                                 <div>
                                                     <label className="block text-[10px] text-slate-400 uppercase mb-1">Base Time</label>
                                                     <input 
@@ -585,11 +1153,21 @@ const App: React.FC = () => {
                                                         className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 font-mono focus:ring-2 focus:ring-blue-500 outline-none"
                                                     />
                                                 </div>
+                                                    <div>
+                                                      <label className="block text-[10px] text-slate-400 uppercase mb-1">Unit</label>
+                                                      <select
+                                                        value={editingStep.processingTimeUnit || 'ms'}
+                                                        onChange={e => setEditingStep({...editingStep, processingTimeUnit: e.target.value as DurationUnit})}
+                                                        className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                                                      >
+                                                        {DURATION_UNITS.map(unit => <option key={unit.value} value={unit.value}>{unit.label}</option>)}
+                                                      </select>
+                                                    </div>
                                                 <div>
                                                     <label className="block text-[10px] text-slate-400 uppercase mb-1">Variance (0-1)</label>
                                                     <input 
                                                         type="range" min="0" max="1" step="0.1"
-                                                        value={editingStep.variance ?? 0.1} 
+                                                        value={editingStep.variance ?? 0} 
                                                         onChange={e => setEditingStep({...editingStep, variance: parseFloat(e.target.value)})}
                                                         className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500 mt-3"
                                                     />

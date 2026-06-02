@@ -1,8 +1,7 @@
 
-import React, { forwardRef } from 'react';
+import React, { forwardRef, memo } from 'react';
 import { ProcessStep, StepStats, WorkItem } from '../types';
-import { Users, Clock, AlertCircle, Edit2, Trash2, GripHorizontal, ListFilter, Play, Square, AlertTriangle, CheckCircle2, Ban, XCircle } from 'lucide-react';
-import { WorkItemVisual } from './WorkItemVisual';
+import { Users, Clock, Edit2, Trash2, GripHorizontal, ListFilter, Play, Square, AlertTriangle, CheckCircle2, Ban, XCircle, Timer } from 'lucide-react';
 
 interface Props {
   step: ProcessStep;
@@ -12,42 +11,77 @@ interface Props {
   onRemove: () => void;
   style?: React.CSSProperties;
   onMouseDown?: (e: React.MouseEvent) => void;
-  scale?: number;
+  isDragging?: boolean;
 }
 
-export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, items, onEdit, onRemove, style, onMouseDown, scale = 1 }, ref) => {
+const ARRIVAL_UNIT_LABELS: Record<string, string> = {
+  ms: 'sim ms',
+  s: 'sim sec',
+  min: 'sim min',
+  h: 'sim hour',
+  day: 'sim day',
+  week: 'sim week',
+  month: 'sim month',
+  year: 'sim year',
+};
+
+const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, items, onEdit, onRemove, style, onMouseDown, isDragging = false }, ref) => {
   const queuedItems = items.filter(i => i.status === 'queued');
   const processingItems = items.filter(i => i.status === 'processing');
   
   const isBottleneck = (stats?.queueLength || 0) > 10 && (stats?.utilization || 0) > 0.9;
   const baseColor = step.color || '#64748b';
+  const isDelayMode = step.simulationMode === 'delay';
 
   // --- START NODE RENDERING ---
   if (step.type === 'start') {
-    const rateDisplay = step.randomnessMode === 'range' 
-        ? `${(step.minArrivalRate ?? 0.2).toFixed(1)}-${(step.maxArrivalRate ?? 0.8).toFixed(1)}` 
-        : (step.arrivalRate ?? 0.5).toFixed(1);
+    const arrivalUnitLabel = ARRIVAL_UNIT_LABELS[step.arrivalUnit || 's'] || 'sim sec';
+    const arrivalModeLabel = step.arrivalInputMode === 'interval'
+      ? step.randomnessMode === 'range'
+        ? `Every ${(step.minArrivalRate ?? 0.2).toFixed(2)}-${(step.maxArrivalRate ?? 0.8).toFixed(2)} ${arrivalUnitLabel}`
+        : `Every ${(step.arrivalRate ?? 0.5).toFixed(2)} ${arrivalUnitLabel}`
+      : step.randomnessMode === 'range'
+        ? `${(step.minArrivalRate ?? 0.2).toFixed(2)}-${(step.maxArrivalRate ?? 0.8).toFixed(2)} items / ${arrivalUnitLabel}`
+        : `${(step.arrivalRate ?? 0.5).toFixed(2)} items / ${arrivalUnitLabel}`;
 
     return (
         <div 
           ref={ref}
           data-process-node="true"
-          style={{ ...style }}
-          className="absolute flex flex-col items-center group z-10"
+        style={{ 
+        ...style,
+        borderColor: baseColor,
+        boxShadow: `0 6px 24px ${baseColor}25`
+        }}
+        className={`absolute flex w-[220px] flex-col overflow-hidden rounded-2xl border-2 bg-slate-950 z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
           onMouseDown={onMouseDown}
         >
-            <div 
-              className="w-20 h-20 rounded-full flex flex-col items-center justify-center shadow-lg border-2 bg-slate-950 transition-all hover:scale-105 cursor-grab active:cursor-grabbing ring-4 ring-slate-950"
-                style={{ borderColor: baseColor, boxShadow: `0 0 15px ${baseColor}40` }}
-            >
-                <Play fill={baseColor} className="text-slate-900" size={24} style={{ color: baseColor }} />
-                <span className="text-[10px] text-slate-300 font-mono mt-1">{rateDisplay}/s</span>
+        <div className="flex cursor-grab items-center justify-between border-b border-slate-800 bg-slate-900/80 p-3 active:cursor-grabbing" onMouseDown={onMouseDown}>
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl" style={{ backgroundColor: `${baseColor}20`, color: baseColor }}>
+              <Play fill={baseColor} size={16} style={{ color: baseColor }} />
             </div>
-            
-            <div className="mt-2 bg-slate-950/90 px-2 py-1 rounded-lg text-xs font-bold text-slate-200 border border-slate-700 whitespace-nowrap flex items-center gap-2 shadow-xl">
-                {step.name}
-                <button onClick={onEdit} className="hover:text-blue-400 p-0.5"><Edit2 size={10}/></button>
-                <button onClick={onRemove} className="hover:text-red-400 p-0.5"><Trash2 size={10}/></button>
+            <div className="min-w-0">
+              <div className="truncate text-sm font-bold text-slate-100" title={step.name}>{step.name}</div>
+              <div className="text-[10px] uppercase tracking-wider text-emerald-300/80">Start Point</div>
+            </div>
+          </div>
+          <div className="flex gap-1 shrink-0" onMouseDown={e => e.stopPropagation()}>
+            <button onClick={onEdit} className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"><Edit2 size={12}/></button>
+            <button onClick={onRemove} className="rounded p-1 text-red-400 transition-colors hover:bg-red-900/30 hover:text-red-300"><Trash2 size={12}/></button>
+          </div>
+            </div>
+        <div className="grid grid-cols-2 gap-3 bg-gradient-to-b from-slate-950 to-slate-900 p-4">
+          <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-3">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300/70">Arrival</div>
+            <div className="mt-1 font-mono text-sm font-bold leading-snug text-emerald-200">{arrivalModeLabel}</div>
+            <div className="text-[10px] text-slate-500">Based on selected simulated time unit</div>
+          </div>
+          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Mode</div>
+            <div className="mt-1 text-sm font-semibold text-slate-200">{step.arrivalInputMode === 'interval' ? 'Interval Input' : 'Rate Input'}</div>
+            <div className="text-[10px] text-slate-500">Feeds the first connected step</div>
+          </div>
             </div>
         </div>
     );
@@ -64,27 +98,36 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
              borderColor: baseColor,
              boxShadow: `0 4px 20px ${baseColor}30`
           }}
-          className="absolute flex flex-col w-[200px] bg-slate-950 border-2 rounded-2xl overflow-hidden z-10 select-none transition-all hover:-translate-y-0.5 hover:shadow-2xl"
+            className={`absolute flex w-[220px] flex-col overflow-hidden rounded-2xl border-2 bg-slate-950 z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
           onMouseDown={onMouseDown}
         >
-            <div className="bg-slate-900/80 p-2 flex justify-between items-center border-b border-slate-800">
-                <div className="flex items-center gap-2 text-slate-200 font-bold truncate">
-                    <Square fill={baseColor} className="text-slate-900" size={14} style={{ color: baseColor }} />
-                    <span className="truncate text-sm" title={step.name}>{step.name}</span>
+            <div className="flex cursor-grab items-center justify-between border-b border-slate-800 bg-slate-900/80 p-3 active:cursor-grabbing" onMouseDown={onMouseDown}>
+              <div className="flex min-w-0 items-center gap-2 text-slate-200 font-bold truncate">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl" style={{ backgroundColor: `${baseColor}20`, color: baseColor }}>
+                  <Square fill={baseColor} size={16} style={{ color: baseColor }} />
                 </div>
-                <div className="flex gap-1 shrink-0">
-                    <button onClick={onEdit} className="text-slate-400 hover:text-white p-1 hover:bg-slate-700 rounded transition-colors"><Edit2 size={12}/></button>
-                    <button onClick={onRemove} className="text-red-400 hover:text-red-300 p-1 hover:bg-red-900/30 rounded transition-colors"><Trash2 size={12}/></button>
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-bold text-slate-100" title={step.name}>{step.name}</div>
+                  <div className="text-[10px] uppercase tracking-wider text-rose-300/80">End Point</div>
+                </div>
+                </div>
+              <div className="flex gap-1 shrink-0" onMouseDown={e => e.stopPropagation()}>
+                <button onClick={onEdit} className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"><Edit2 size={12}/></button>
+                <button onClick={onRemove} className="rounded p-1 text-red-400 transition-colors hover:bg-red-900/30 hover:text-red-300"><Trash2 size={12}/></button>
                 </div>
             </div>
 
-            <div className="p-4 flex flex-col items-center justify-center bg-gradient-to-b from-slate-950 to-slate-900">
-                <span className="text-3xl font-mono font-bold text-white mb-1">
-                    {stats?.totalProcessed || 0}
-                </span>
-                <span className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">
-                    Total Items
-                </span>
+            <div className="grid grid-cols-2 gap-3 bg-gradient-to-b from-slate-950 to-slate-900 p-4">
+              <div className="rounded-xl border border-rose-500/20 bg-rose-500/10 p-3">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-rose-300/70">Completed</div>
+                <div className="mt-1 font-mono text-2xl font-bold text-rose-100">{stats?.totalProcessed || 0}</div>
+                <div className="text-[10px] text-slate-500">items delivered</div>
+              </div>
+              <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Role</div>
+                <div className="mt-1 text-sm font-semibold text-slate-200">Final Sink</div>
+                <div className="text-[10px] text-slate-500">Collects completed flow output</div>
+              </div>
             </div>
             
             {/* Visual stacking of finished items */}
@@ -100,8 +143,8 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
   
   // --- PROCESS NODE RENDERING ---
   const timeDisplay = step.randomnessMode === 'range'
-    ? `${step.minProcessingTime ?? 1000}-${step.maxProcessingTime ?? 3000}ms`
-    : `${step.processingTime ?? 2000}ms`;
+    ? `${step.minProcessingTime ?? 1000}-${step.maxProcessingTime ?? 3000}${step.rangeTimeUnit || step.processingTimeUnit || 'ms'}`
+    : `${step.processingTime ?? 2000}${step.processingTimeUnit || 'ms'}`;
 
   return (
     <div 
@@ -113,7 +156,7 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
         boxShadow: isBottleneck ? `0 0 20px rgba(239, 68, 68, 0.4)` : `0 4px 15px ${baseColor}30`,
         backgroundColor: '#0f172a',
       }}
-      className={`absolute flex flex-col w-[280px] border-2 rounded-2xl overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-2xl z-10 select-none`}
+      className={`absolute flex flex-col w-[280px] border-2 rounded-2xl overflow-hidden z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
     >
       {/* Header */}
       <div 
@@ -131,7 +174,9 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
              )}
           </div>
           <div className="flex items-center text-xs text-slate-400 gap-2 mt-1 pl-6">
-            <span className="flex items-center gap-1"><Users size={12}/> {step.capacity}</span>
+            <span className={`flex items-center gap-1 ${isDelayMode ? 'text-cyan-300' : ''}`}>
+              {isDelayMode ? <Timer size={12}/> : <Users size={12}/>} {isDelayMode ? 'Delay' : step.capacity}
+            </span>
             <span className="flex items-center gap-1"><Clock size={12}/> {timeDisplay}</span>
           </div>
         </div>
@@ -150,8 +195,8 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
             style={{ backgroundColor: `${baseColor}10` }}
         >
           <div className="text-xs mb-1 flex justify-between font-medium" style={{ color: baseColor }}>
-            <span>Processing</span>
-            <span>{processingItems.length} / {step.capacity}</span>
+            <span>{isDelayMode ? 'Timed Delay' : 'Processing'}</span>
+            <span>{processingItems.length}{isDelayMode ? ' active' : ` / ${step.capacity}`}</span>
           </div>
           <div className="flex flex-col gap-1 min-h-[2.5rem]">
             {processingItems.length > 0 ? processingItems.map(item => (
@@ -165,13 +210,13 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
                   </span>
                </div>
             )) : (
-                <span className="text-xs text-slate-500 opacity-60 text-center py-2">Resources Idle</span>
+              <span className="text-xs text-slate-500 opacity-60 text-center py-2">{isDelayMode ? 'No active timers' : 'Resources Idle'}</span>
             )}
           </div>
         </div>
 
         {/* Queue List */}
-        <div className="bg-slate-950/70 rounded-xl border border-slate-800 flex flex-col flex-grow overflow-hidden">
+        {!isDelayMode && <div className="bg-slate-950/70 rounded-xl border border-slate-800 flex flex-col flex-grow overflow-hidden">
           <div className="text-xs text-slate-400 p-2 flex justify-between border-b border-slate-800">
             <span className="flex items-center gap-1"><ListFilter size={10}/> Queue</span>
             <span className="font-mono">{queuedItems.length}</span>
@@ -189,15 +234,22 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
                 </div>
              ))}
           </div>
-        </div>
+        </div>}
+
+        {isDelayMode && (
+          <div className="bg-cyan-500/10 rounded-xl border border-cyan-500/20 flex flex-col flex-grow p-3 text-xs text-cyan-100/80">
+            <div className="font-semibold text-cyan-300 mb-1">Time-only mode</div>
+            <p className="leading-relaxed text-slate-400">Items start their timer immediately. No capacity, resource queue, or utilization is used.</p>
+          </div>
+        )}
       </div>
 
       {/* Metrics Footer */}
       <div className="px-3 pb-3 pt-2 border-t border-slate-800 grid grid-cols-2 gap-2 text-xs bg-slate-900/50">
         <div>
-          <div className="text-[10px] text-slate-500 uppercase font-semibold mb-1">Utilization</div>
-          <div className={`font-mono font-bold ${(stats?.utilization || 0) > 0.9 ? 'text-red-400' : 'text-emerald-400'}`}>
-            {((stats?.utilization || 0) * 100).toFixed(0)}%
+          <div className="text-[10px] text-slate-500 uppercase font-semibold mb-1">{isDelayMode ? 'Mode' : 'Utilization'}</div>
+          <div className={`font-mono font-bold ${isDelayMode ? 'text-cyan-300' : (stats?.utilization || 0) > 0.9 ? 'text-red-400' : 'text-emerald-400'}`}>
+            {isDelayMode ? 'Delay' : `${((stats?.utilization || 0) * 100).toFixed(0)}%`}
             {isBottleneck && <span className="text-red-500 ml-1 inline-block animate-pulse">!</span>}
           </div>
         </div>
@@ -222,6 +274,20 @@ export const ProcessNode = forwardRef<HTMLDivElement, Props>(({ step, stats, ite
       </div>
     </div>
   );
+});
+
+ProcessNodeComponent.displayName = 'ProcessNode';
+
+export const ProcessNode = memo(ProcessNodeComponent, (prevProps, nextProps) => {
+  return prevProps.step === nextProps.step
+    && prevProps.stats === nextProps.stats
+    && prevProps.items === nextProps.items
+    && prevProps.onEdit === nextProps.onEdit
+    && prevProps.onRemove === nextProps.onRemove
+    && prevProps.onMouseDown === nextProps.onMouseDown
+    && prevProps.isDragging === nextProps.isDragging
+    && prevProps.style?.left === nextProps.style?.left
+    && prevProps.style?.top === nextProps.style?.top;
 });
 
 ProcessNode.displayName = 'ProcessNode';
