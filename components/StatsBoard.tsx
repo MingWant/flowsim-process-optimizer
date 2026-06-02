@@ -1,16 +1,63 @@
 
 import React from 'react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
-import { SimulationStats, StepStats, ProcessStep } from '../types';
+import { SimulationStats, StepStats, ProcessStep, DurationUnit } from '../types';
 import { XCircle, Ban, CheckCircle2, Gauge, Timer, Activity } from 'lucide-react';
 
 interface Props {
   globalStats: SimulationStats;
   stepStats: StepStats[];
   steps: ProcessStep[];
+  simulationTimeMs: number;
 }
 
-export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps }) => {
+const TIME_UNIT_TO_MS: Record<DurationUnit, number> = {
+  ms: 1,
+  s: 1000,
+  min: 60 * 1000,
+  h: 60 * 60 * 1000,
+  day: 24 * 60 * 60 * 1000,
+  week: 7 * 24 * 60 * 60 * 1000,
+  month: 30 * 24 * 60 * 60 * 1000,
+  year: 365 * 24 * 60 * 60 * 1000,
+};
+
+const UNIT_LABELS: Record<DurationUnit, string> = {
+  ms: 'ms',
+  s: 'sec',
+  min: 'min',
+  h: 'hour',
+  day: 'day',
+  week: 'week',
+  month: 'month',
+  year: 'year',
+};
+
+const getPreferredThroughputUnit = (steps: ProcessStep[]): DurationUnit => {
+  const startUnits = steps.filter(step => step.type === 'start').map(step => step.arrivalUnit || 's');
+  return startUnits[0] || 'min';
+};
+
+const getPreferredCycleTimeUnit = (steps: ProcessStep[]): DurationUnit => {
+  const processUnits = steps
+    .filter(step => step.type === 'process')
+    .map(step => step.randomnessMode === 'range' ? step.rangeTimeUnit || step.processingTimeUnit || 'ms' : step.processingTimeUnit || 'ms');
+
+  if (processUnits.length === 0) {
+    return 's';
+  }
+
+  const counts = processUnits.reduce<Record<string, number>>((acc, unit) => {
+    acc[unit] = (acc[unit] || 0) + 1;
+    return acc;
+  }, {});
+
+  return processUnits.reduce<DurationUnit>((selected, unit) => (
+    (counts[unit] || 0) > (counts[selected] || 0) ? unit : selected
+  ), processUnits[0]);
+};
+
+export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, simulationTimeMs }) => {
   const chartData = stepStats.map(s => {
     const step = steps.find(st => st.id === s.stepId);
     return {
@@ -19,6 +66,15 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps }) =
       active: s.activeProcessing
     };
   });
+
+  const throughputUnit = getPreferredThroughputUnit(steps);
+  const cycleTimeUnit = getPreferredCycleTimeUnit(steps);
+  const throughputUnitMs = TIME_UNIT_TO_MS[throughputUnit];
+  const cycleTimeUnitMs = TIME_UNIT_TO_MS[cycleTimeUnit];
+  const throughputValue = simulationTimeMs > 0
+    ? (globalStats.totalItemsFinished / simulationTimeMs) * throughputUnitMs
+    : 0;
+  const cycleTimeValue = globalStats.avgCycleTime / cycleTimeUnitMs;
 
   const cards = [
     {
@@ -30,17 +86,17 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps }) =
     },
     {
       label: 'Throughput',
-      value: (globalStats.totalItemsFinished / (Math.max(1, globalStats.avgCycleTime) / 1000 / 60)).toFixed(1),
+      value: throughputValue.toFixed(1),
       color: 'text-emerald-400',
       icon: <Gauge size={22} className="text-emerald-400" />,
-      suffix: '/ min'
+      suffix: `/ ${UNIT_LABELS[throughputUnit]}`
     },
     {
       label: 'Avg Cycle Time',
-      value: (globalStats.avgCycleTime / 1000).toFixed(2),
+      value: cycleTimeValue.toFixed(cycleTimeUnit === 'ms' ? 0 : 2),
       color: 'text-blue-400',
       icon: <Timer size={22} className="text-blue-400" />,
-      suffix: 's'
+      suffix: UNIT_LABELS[cycleTimeUnit]
     },
     {
       label: 'Active Work',

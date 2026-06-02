@@ -886,7 +886,7 @@ const App: React.FC = () => {
                   <h2 className="text-lg font-semibold text-slate-100">Live Metrics</h2>
                   <div className="text-xs text-slate-500">Queue: <span className="font-mono text-amber-300">{totalQueue}</span></div>
                 </div>
-                <StatsBoard globalStats={globalStats} stepStats={stepStats} steps={config.steps} />
+                <StatsBoard globalStats={globalStats} stepStats={stepStats} steps={config.steps} simulationTimeMs={simulationTimeMs} />
              </section>
           </div>
           

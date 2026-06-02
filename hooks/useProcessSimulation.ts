@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { ProcessStep, WorkItem, SimulationConfig, StepStats, SimulationStats } from '../types';
 
-const TRANSMISSION_DURATION = 1000; // ms to travel between nodes
+const TRANSMISSION_DURATION = 900; // visual ms to travel between nodes
 const TIME_UNIT_TO_MS = {
   ms: 1,
   s: 1000,
@@ -15,6 +15,8 @@ const TIME_UNIT_TO_MS = {
 } as const;
 
 const MIN_ARRIVAL_RATE = 0.000000001;
+
+const VISUAL_TRANSMISSION_SIM_MS = 1;
 
 export const useProcessSimulation = (config: SimulationConfig) => {
   const [items, setItems] = useState<WorkItem[]>([]);
@@ -166,6 +168,36 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     return Math.max(100, base * speedNoise);
   };
 
+  const beginTransmission = (
+    item: WorkItem,
+    fromStepId: string,
+    toStepId: string | 'finished',
+    currentSimulationMs: number
+  ) => {
+    item.previousStepId = fromStepId;
+    item.targetStepId = toStepId;
+    item.status = 'transmitting';
+    item.transmissionProgress = 0;
+    item.transmissionStartedAtSimulationMs = currentSimulationMs;
+    item.transmissionEndsAtSimulationMs = currentSimulationMs + VISUAL_TRANSMISSION_SIM_MS;
+    item.totalTransmissionTime += VISUAL_TRANSMISSION_SIM_MS;
+  };
+
+  const beginProcessing = (
+    item: WorkItem,
+    step: ProcessStep,
+    currentSimulationMs: number
+  ) => {
+    const duration = calculateProcessingDuration(step, item);
+    const safeDuration = isNaN(duration) || duration < 100 ? 1000 : duration;
+
+    item.status = 'processing';
+    item.progress = 0;
+    item.requiredDuration = safeDuration;
+    item.processingStartedAtSimulationMs = currentSimulationMs;
+    item.processingEndsAtSimulationMs = currentSimulationMs + safeDuration;
+  };
+
   useEffect(() => {
     if (!config.isRunning) {
       lastTickRef.current = Date.now();
@@ -178,7 +210,9 @@ export const useProcessSimulation = (config: SimulationConfig) => {
       const now = Date.now();
       const rawDt = now - lastTickRef.current;
       // Cap dt to prevent massive jumps after lag spikes or background tabs
-      const dt = Math.min(rawDt, 100) * config.speedMultiplier * config.timeCompression; 
+      const clampedRealDt = Math.min(rawDt, 100);
+      const visualDt = clampedRealDt * config.speedMultiplier;
+      const dt = visualDt * config.timeCompression;
       lastTickRef.current = now;
       simulationTimeRef.current += dt;
 
@@ -207,19 +241,30 @@ export const useProcessSimulation = (config: SimulationConfig) => {
               }
 
               if (firstTargetId !== 'finished') {
+                  const firstTarget = stepMap.get(firstTargetId);
                   const newItem: WorkItem = {
                       id: `item-${statsRef.current.totalItemsCreated + 1}`,
-                      currentStepId: startNode.id,
-                      targetStepId: firstTargetId,
-                      status: 'transmitting', 
+                    currentStepId: firstTargetId,
+                    targetStepId: firstTargetId,
+                    status: firstTarget?.type === 'end' ? 'finished' : 'queued',
                       previousStepId: startNode.id,
                       progress: 0,
                       transmissionProgress: 0,
                       createdAt: now, // Wall clock for UI creation
+                      createdAtSimulationMs: simulationTimeRef.current,
+                        completedAtSimulationMs: undefined,
+                      totalTransmissionTime: 0,
                       totalWaitTime: 0,
                       totalProcessingTime: 0,
                       stepEntryTime: now,
                   };
+
+                  beginTransmission(newItem, startNode.id, firstTargetId, simulationTimeRef.current);
+
+                  if (firstTarget?.type === 'process' && firstTarget.simulationMode === 'delay') {
+                    beginProcessing(newItem, firstTarget, simulationTimeRef.current);
+                  }
+
                   itemsRef.current.push(newItem);
                   statsRef.current.totalItemsCreated++;
                   
@@ -260,7 +305,11 @@ export const useProcessSimulation = (config: SimulationConfig) => {
              
              if (item.status === 'finished') {
                 statsRef.current.totalItemsFinished++;
-                const cycleTime = now - item.createdAt;
+                const completedAtSimulationMs = item.completedAtSimulationMs ?? simulationTimeRef.current;
+                const cycleTime = Math.max(
+                  0,
+                  completedAtSimulationMs - item.createdAtSimulationMs - item.totalTransmissionTime
+                );
                 statsRef.current.avgCycleTime = 
                   ((statsRef.current.avgCycleTime * (statsRef.current.totalItemsFinished - 1)) + cycleTime) / statsRef.current.totalItemsFinished;
                 
@@ -278,32 +327,23 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
         // --- TRANSMISSION ---
         if (item.status === 'transmitting') {
-            const increment = dt / TRANSMISSION_DURATION;
-            item.transmissionProgress += increment;
-            
-            if (item.transmissionProgress >= 1) {
-                if (item.targetStepId && stepMap.has(item.targetStepId)) {
-                    const targetStep = stepMap.get(item.targetStepId);
-                    
-                    if (targetStep?.type === 'end') {
-                        // Reached an end node
-                        item.previousStepId = item.currentStepId;
-                        item.currentStepId = targetStep.id;
-                        item.status = 'finished'; // Mark finished immediately
-                    } else {
-                        // Reached a process node
-                        item.previousStepId = item.currentStepId; 
-                        item.currentStepId = item.targetStepId;
-                        item.status = targetStep?.simulationMode === 'delay' ? 'processing' : 'queued';
-                        item.stepEntryTime = now;
-                        item.targetStepId = undefined;
-                        item.requiredDuration = targetStep?.simulationMode === 'delay'
-                          ? calculateProcessingDuration(targetStep, item)
-                          : undefined; 
-                    }
-                } else {
-                    item.status = 'finished';
-                }
+          const startedAt = item.transmissionStartedAtSimulationMs ?? simulationTimeRef.current;
+          const endsAt = item.transmissionEndsAtSimulationMs ?? startedAt;
+          const transmissionDuration = Math.max(0, endsAt - startedAt);
+          const elapsed = Math.max(0, Math.min(simulationTimeRef.current - startedAt, transmissionDuration));
+
+          item.transmissionProgress = transmissionDuration > 0 ? elapsed / transmissionDuration : 1;
+
+          if (simulationTimeRef.current >= endsAt) {
+            item.transmissionProgress = 1;
+            item.targetStepId = undefined;
+            item.transmissionStartedAtSimulationMs = undefined;
+            item.transmissionEndsAtSimulationMs = undefined;
+
+            if (item.status === 'transmitting' && item.currentStepId === 'finished') {
+              item.completedAtSimulationMs = endsAt;
+              item.status = 'finished';
+            }
             }
             continue;
         }
@@ -329,11 +369,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
             const currentUsage = stepUsage.get(item.currentStepId) || 0;
             if (currentStep.simulationMode === 'delay' || currentUsage < currentStep.capacity) {
-                item.status = 'processing';
-                item.progress = 0;
-                
-                const d = calculateProcessingDuration(currentStep, item);
-                item.requiredDuration = isNaN(d) || d < 100 ? 1000 : d;
+                beginProcessing(item, currentStep, simulationTimeRef.current);
                 
               if (currentStep.simulationMode !== 'delay') {
                 stepUsage.set(item.currentStepId, currentUsage + 1);
@@ -344,13 +380,18 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         else if (item.status === 'processing') {
             const duration = item.requiredDuration || 1000;
             const safeDuration = duration > 0 ? duration : 1000;
-            const progressIncrement = dt / safeDuration;
-            
-            item.progress += progressIncrement;
-            item.totalProcessingTime += dt;
+          const startedAt = item.processingStartedAtSimulationMs ?? simulationTimeRef.current;
+          const endsAt = item.processingEndsAtSimulationMs ?? (startedAt + safeDuration);
+          const elapsed = Math.max(0, Math.min(simulationTimeRef.current - startedAt, safeDuration));
+            const eventTime = endsAt;
 
-            if (item.progress >= 1) {
+          item.progress = Math.max(0, Math.min(1, elapsed / safeDuration));
+            item.totalProcessingTime = (item.totalProcessingTime || 0) - elapsed + Math.min(elapsed, safeDuration);
+
+          if (simulationTimeRef.current >= endsAt) {
                 item.progress = 0; 
+            item.processingStartedAtSimulationMs = undefined;
+            item.processingEndsAtSimulationMs = undefined;
                 
                 // EXCEPTION: Failure
                 const failChance = safeNumber(currentStep.failureProbability, 0);
@@ -374,10 +415,27 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                 if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0 };
                 stepCountersRef.current[item.currentStepId].processed++;
 
-                item.previousStepId = item.currentStepId; 
-                item.targetStepId = nextId;
-                item.status = 'transmitting';
-                item.transmissionProgress = 0;
+                if (nextId === 'finished') {
+                  item.currentStepId = 'finished';
+                  beginTransmission(item, currentStep.id, 'finished', eventTime);
+                } else {
+                  const nextStep = stepMap.get(nextId);
+
+                  if (nextStep?.type === 'end') {
+                    item.currentStepId = 'finished';
+                    beginTransmission(item, currentStep.id, nextStep.id, eventTime);
+                  } else if (nextStep) {
+                    item.currentStepId = nextStep.id;
+                    item.stepEntryTime = now;
+                    beginTransmission(item, currentStep.id, nextStep.id, eventTime);
+
+                    if (nextStep.simulationMode === 'delay') {
+                      beginProcessing(item, nextStep, eventTime);
+                    } else {
+                      item.status = 'queued';
+                    }
+                  }
+                }
                 
                 if (currentStep.simulationMode !== 'delay') {
                   const currentUsage = stepUsage.get(item.currentStepId) || 0;
@@ -425,7 +483,15 @@ export const useProcessSimulation = (config: SimulationConfig) => {
       setItems([...itemsRef.current]);
       setStepStats(newStepStats);
       setSimulationTimeMs(simulationTimeRef.current);
-      setGlobalStats({ ...statsRef.current, activeItems: itemsRef.current.filter(i => !['finished', 'error', 'cancelled'].includes(i.status)).length });
+      const simulatedMinutesElapsed = simulationTimeRef.current / (60 * 1000);
+      const avgThroughput = simulatedMinutesElapsed > 0
+        ? statsRef.current.totalItemsFinished / simulatedMinutesElapsed
+        : 0;
+      setGlobalStats({
+        ...statsRef.current,
+        avgThroughput,
+        activeItems: itemsRef.current.filter(i => !['finished', 'error', 'cancelled'].includes(i.status)).length,
+      });
 
       animationFrameId = requestAnimationFrame(tick);
     };

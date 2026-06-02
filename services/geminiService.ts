@@ -91,8 +91,8 @@ export const analyzeBottlenecks = async (
     })),
     global: {
       finished: globalStats.totalItemsFinished,
-      throughput: globalStats.avgThroughput.toFixed(1) + '/min',
-      cycleTime: globalStats.avgCycleTime.toFixed(0) + 'ms'
+      throughput: globalStats.avgThroughput.toFixed(1) + '/sim min',
+      cycleTime: globalStats.avgCycleTime.toFixed(0) + ' sim ms'
     }
   };
 

@@ -55,12 +55,19 @@ export interface WorkItem {
   status: 'queued' | 'processing' | 'transmitting' | 'finished' | 'cancelled' | 'error';
   progress: number; // 0 to 1
   transmissionProgress: number; // 0 to 1
-  createdAt: number;
+  createdAt: number; // Wall clock timestamp for transient UI timing
+  createdAtSimulationMs: number;
+  completedAtSimulationMs?: number;
   finishedAt?: number;
+  totalTransmissionTime: number;
   totalWaitTime: number;
   totalProcessingTime: number;
   stepEntryTime: number;
   requiredDuration?: number; // The specific time calculated for this item instance
+  processingStartedAtSimulationMs?: number;
+  processingEndsAtSimulationMs?: number;
+  transmissionStartedAtSimulationMs?: number;
+  transmissionEndsAtSimulationMs?: number;
 }
 
 export interface SimulationConfig {
