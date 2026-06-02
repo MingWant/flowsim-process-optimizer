@@ -1,0 +1,12 @@
+services:
+  flowsim:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    image: flowsim:latest
+    container_name: flowsim-app
+    ports:
+      - "${FLOWSIM_PORT:-8080}:80"
+    restart: unless-stopped
