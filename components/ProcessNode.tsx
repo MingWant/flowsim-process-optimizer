@@ -26,6 +26,17 @@ const ARRIVAL_UNIT_LABELS: Record<string, string> = {
   year: 'sim year',
 };
 
+const ARRIVAL_UNIT_TO_MS: Record<string, number> = {
+  ms: 1,
+  s: 1000,
+  min: 60 * 1000,
+  h: 60 * 60 * 1000,
+  day: 24 * 60 * 60 * 1000,
+  week: 7 * 24 * 60 * 60 * 1000,
+  month: 30 * 24 * 60 * 60 * 1000,
+  year: 365 * 24 * 60 * 60 * 1000,
+};
+
 const formatMetricTime = (milliseconds: number): string => {
   if (!Number.isFinite(milliseconds) || milliseconds <= 0) {
     return '0s';
@@ -59,13 +70,17 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
   // --- START NODE RENDERING ---
   if (step.type === 'start') {
     const arrivalUnitLabel = ARRIVAL_UNIT_LABELS[step.arrivalUnit || 's'] || 'sim sec';
+    const batchSize = Math.max(1, Math.round(step.arrivalBatchSize ?? 1));
     const arrivalModeLabel = step.arrivalInputMode === 'interval'
       ? step.randomnessMode === 'range'
-        ? `Every ${(step.minArrivalRate ?? 0.2).toFixed(2)}-${(step.maxArrivalRate ?? 0.8).toFixed(2)} ${arrivalUnitLabel}`
-        : `Every ${(step.arrivalRate ?? 0.5).toFixed(2)} ${arrivalUnitLabel}`
+        ? `${batchSize} every ${(step.minArrivalRate ?? 0.2).toFixed(2)}-${(step.maxArrivalRate ?? 0.8).toFixed(2)} ${arrivalUnitLabel}`
+        : `${batchSize} every ${(step.arrivalRate ?? 0.5).toFixed(2)} ${arrivalUnitLabel}`
       : step.randomnessMode === 'range'
         ? `${(step.minArrivalRate ?? 0.2).toFixed(2)}-${(step.maxArrivalRate ?? 0.8).toFixed(2)} items / ${arrivalUnitLabel}`
         : `${(step.arrivalRate ?? 0.5).toFixed(2)} items / ${arrivalUnitLabel}`;
+    const fixedArrivalInterval = step.arrivalInputMode !== 'interval' && step.randomnessMode !== 'range'
+      ? formatMetricTime(((ARRIVAL_UNIT_TO_MS[step.arrivalUnit || 's'] || 1000) * batchSize) / Math.max(0.000000001, step.arrivalRate ?? 0.5))
+      : undefined;
 
     return (
         <div 
@@ -98,7 +113,7 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
           <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-3">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300/70">Arrival</div>
             <div className="mt-1 font-mono text-sm font-bold leading-snug text-emerald-200">{arrivalModeLabel}</div>
-            <div className="text-[10px] text-slate-500">Based on selected simulated time unit</div>
+            <div className="text-[10px] text-slate-500">{fixedArrivalInterval ? `Batch ${batchSize} ≈ every ${fixedArrivalInterval}` : `Batch size ${batchSize}`}</div>
           </div>
           <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Mode</div>
@@ -184,7 +199,7 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
   // --- PROCESS NODE RENDERING ---
   const timeDisplay = step.randomnessMode === 'range'
     ? `${step.minProcessingTime ?? 1000}-${step.maxProcessingTime ?? 3000}${step.rangeTimeUnit || step.processingTimeUnit || 'ms'}`
-    : `${step.processingTime ?? 2000}${step.processingTimeUnit || 'ms'}`;
+    : `${step.processingTime ?? 2000}${step.processingTimeUnit || 'ms'}${step.variance > 0 && !isDelayMode ? ` ±${Math.round(step.variance * 100)}%` : ''}`;
 
   return (
     <div 

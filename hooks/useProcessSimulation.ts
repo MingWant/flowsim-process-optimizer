@@ -21,6 +21,30 @@ const MAX_BUSINESS_EVENTS_PER_TICK = 5000;
 
 const BUSINESS_TRANSMISSION_SIM_MS = 0;
 
+const getSimulationSignature = (steps: ProcessStep[]) => JSON.stringify(steps.map((step) => ({
+  id: step.id,
+  type: step.type,
+  randomnessMode: step.randomnessMode,
+  simulationMode: step.simulationMode,
+  capacity: step.capacity,
+  processingTime: step.processingTime,
+  processingTimeUnit: step.processingTimeUnit,
+  variance: step.variance,
+  minProcessingTime: step.minProcessingTime,
+  maxProcessingTime: step.maxProcessingTime,
+  rangeTimeUnit: step.rangeTimeUnit,
+  arrivalInputMode: step.arrivalInputMode,
+  arrivalUnit: step.arrivalUnit,
+  arrivalRate: step.arrivalRate,
+  minArrivalRate: step.minArrivalRate,
+  maxArrivalRate: step.maxArrivalRate,
+  arrivalBatchSize: step.arrivalBatchSize,
+  failureProbability: step.failureProbability,
+  cancellationProbability: step.cancellationProbability,
+  connections: step.connections,
+  sourceProcessingTimes: step.sourceProcessingTimes,
+})));
+
 export const useProcessSimulation = (config: SimulationConfig) => {
   const [items, setItems] = useState<WorkItem[]>([]);
   const [stepStats, setStepStats] = useState<StepStats[]>([]);
@@ -40,6 +64,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
   const itemsRef = useRef<WorkItem[]>([]);
   const statsRef = useRef<SimulationStats>({ ...globalStats });
   const stepsRef = useRef<ProcessStep[]>(config.steps);
+  const simulationSignatureRef = useRef(getSimulationSignature(config.steps));
   
   // Track the absolute simulated timestamp when the next item should spawn for each start node
   const nextSpawnTimeRef = useRef<Record<string, number>>({});
@@ -48,25 +73,11 @@ export const useProcessSimulation = (config: SimulationConfig) => {
   // We need this because 'stepStats' state is regenerated every frame
   const stepCountersRef = useRef<Record<string, { processed: number; failed: number; cancelled: number; totalCompletionTime: number; totalProcessingTime: number; totalWaitTime: number; totalStarted: number }>>({});
 
-  useEffect(() => {
-    stepsRef.current = config.steps;
-    
-    // Initialize spawn timers for new start nodes if not present
-    config.steps.forEach(s => {
-        if (s.type === 'start' && nextSpawnTimeRef.current[s.id] === undefined) {
-            nextSpawnTimeRef.current[s.id] = 0; // Ready immediately
-        }
-        // Initialize counters
-        if (!stepCountersRef.current[s.id]) {
-          stepCountersRef.current[s.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
-        }
-    });
-  }, [config.steps]);
-
   const resetSimulation = useCallback(() => {
     itemsRef.current = [];
     setItems([]);
     simulationTimeRef.current = 0;
+    lastTickRef.current = Date.now();
     setSimulationTimeMs(0);
     const initialStats = {
       totalItemsCreated: 0,
@@ -86,6 +97,30 @@ export const useProcessSimulation = (config: SimulationConfig) => {
       stepCountersRef.current[s.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
     });
   }, [config.steps]);
+
+  useEffect(() => {
+    const nextSignature = getSimulationSignature(config.steps);
+    const simulationLogicChanged = nextSignature !== simulationSignatureRef.current;
+
+    stepsRef.current = config.steps;
+    simulationSignatureRef.current = nextSignature;
+
+    if (simulationLogicChanged) {
+      resetSimulation();
+      return;
+    }
+
+    // Initialize spawn timers for new start nodes if not present
+    config.steps.forEach(s => {
+        if (s.type === 'start' && nextSpawnTimeRef.current[s.id] === undefined) {
+            nextSpawnTimeRef.current[s.id] = 0; // Ready immediately
+        }
+        // Initialize counters
+        if (!stepCountersRef.current[s.id]) {
+          stepCountersRef.current[s.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
+        }
+    });
+  }, [config.steps, resetSimulation]);
 
   const getNextStepId = (currentStep: ProcessStep): string | 'finished' => {
     if (!currentStep.connections || currentStep.connections.length === 0) {
@@ -115,10 +150,12 @@ export const useProcessSimulation = (config: SimulationConfig) => {
   };
 
   const getArrivalUnitMs = (step: ProcessStep) => TIME_UNIT_TO_MS[step.arrivalUnit || 's'];
+  const getArrivalBatchSize = (step: ProcessStep) => Math.max(1, Math.min(1000, Math.round(safeNumber(step.arrivalBatchSize, 1))));
 
   const calculateNextSpawnDelay = (step: ProcessStep): number => {
     const unitMs = getArrivalUnitMs(step);
     const inputMode = step.arrivalInputMode || 'rate';
+    const batchSize = getArrivalBatchSize(step);
 
     if (step.randomnessMode === 'range') {
         const minValue = safeNumber(step.minArrivalRate, inputMode === 'interval' ? 1 : 0.1);
@@ -133,7 +170,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
         const randomRate = minValue + Math.random() * (maxValue - minValue);
         const safeRate = Math.max(MIN_ARRIVAL_RATE, randomRate);
-        return unitMs / safeRate; 
+        return (unitMs * batchSize) / safeRate; 
     } else {
         const value = safeNumber(step.arrivalRate, inputMode === 'interval' ? 1 : 0.5);
 
@@ -142,7 +179,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         }
 
         const safeRate = Math.max(MIN_ARRIVAL_RATE, value);
-        return unitMs / safeRate;
+        return (unitMs * batchSize) / safeRate;
     }
   };
 
@@ -291,49 +328,52 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           if (isNaN(nextSpawnAt)) nextSpawnAt = frameStartSimulationMs;
           let spawnedThisTick = 0;
           
-          while (nextSpawnAt <= simulationTimeRef.current && spawnedThisTick < MAX_SPAWNS_PER_START_PER_TICK) {
-              // SPAWN
-              // Determine immediate target
-              let firstTargetId: string | 'finished' = 'finished';
-              if (startNode.connections.length > 0) {
-                  firstTargetId = getNextStepId(startNode);
-              }
+            while (nextSpawnAt <= simulationTimeRef.current && spawnedThisTick < MAX_SPAWNS_PER_START_PER_TICK) {
+              const batchSize = getArrivalBatchSize(startNode);
 
-              if (firstTargetId !== 'finished') {
-                  const firstTarget = stepMap.get(firstTargetId);
+              for (let batchIndex = 0; batchIndex < batchSize; batchIndex++) {
+                // SPAWN
+                // Determine immediate target independently for each item
+                let firstTargetId: string | 'finished' = 'finished';
+                if (startNode.connections.length > 0) {
+                  firstTargetId = getNextStepId(startNode);
+                }
+
+                if (firstTargetId !== 'finished') {
                   const newItem: WorkItem = {
-                      id: `item-${statsRef.current.totalItemsCreated + 1}`,
-                    currentStepId: startNode.id,
-                    targetStepId: firstTargetId,
-                    status: 'transmitting',
-                      previousStepId: startNode.id,
-                      progress: 0,
-                      transmissionProgress: 0,
-                      createdAt: now, // Wall clock for UI creation
-                      createdAtSimulationMs: nextSpawnAt,
-                        completedAtSimulationMs: undefined,
-                      totalTransmissionTime: 0,
-                      totalWaitTime: 0,
-                      totalProcessingTime: 0,
-                          stepEntryTime: nextSpawnAt,
-                          queuedAtSimulationMs: undefined,
-                          queueCancellationCheckedAtSimulationMs: undefined,
-                        visualPreviousStepId: undefined,
-                        visualTargetStepId: undefined,
-                        visualTransmissionStartedAtWallMs: undefined,
-                        visualTransmissionEndsAtWallMs: undefined,
-                        visualTransmissionProgress: undefined,
+                    id: `item-${statsRef.current.totalItemsCreated + 1}`,
+                  currentStepId: startNode.id,
+                  targetStepId: firstTargetId,
+                  status: 'transmitting',
+                    previousStepId: startNode.id,
+                    progress: 0,
+                    transmissionProgress: 0,
+                    createdAt: now, // Wall clock for UI creation
+                    createdAtSimulationMs: nextSpawnAt,
+                    completedAtSimulationMs: undefined,
+                    totalTransmissionTime: 0,
+                    totalWaitTime: 0,
+                    totalProcessingTime: 0,
+                      stepEntryTime: nextSpawnAt,
+                      queuedAtSimulationMs: undefined,
+                      queueCancellationCheckedAtSimulationMs: undefined,
+                    visualPreviousStepId: undefined,
+                    visualTargetStepId: undefined,
+                    visualTransmissionStartedAtWallMs: undefined,
+                    visualTransmissionEndsAtWallMs: undefined,
+                    visualTransmissionProgress: undefined,
                   };
 
-                      beginTransmission(newItem, startNode.id, firstTargetId, nextSpawnAt, now);
+                    beginTransmission(newItem, startNode.id, firstTargetId, nextSpawnAt, now);
 
                   itemsRef.current.push(newItem);
                   statsRef.current.totalItemsCreated++;
-                  
+                      
                   // Increment Start Node "Processed" count
                   if (stepCountersRef.current[startNode.id]) {
-                      stepCountersRef.current[startNode.id].processed++;
+                    stepCountersRef.current[startNode.id].processed++;
                   }
+                }
               }
 
                   nextSpawnAt += calculateNextSpawnDelay(startNode);

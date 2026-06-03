@@ -72,12 +72,13 @@ const formatSimulationTime = (totalMs: number) => {
 };
 
 const CUSTOM_CLOCK_VALUE = 'custom';
-const FLOWSIM_EXPORT_VERSION = 1;
+const FLOWSIM_EXPORT_VERSION = 3;
 const FLOWSIM_DRAFT_STORAGE_KEY = 'flowsim-local-draft';
 const VALID_NODE_TYPES: NodeType[] = ['start', 'process', 'end'];
 const VALID_RANDOMNESS_MODES: RandomnessMode[] = ['fixed', 'range'];
 const VALID_SIMULATION_MODES: StepSimulationMode[] = ['resource', 'delay'];
 const VALID_ARRIVAL_INPUT_MODES: ArrivalInputMode[] = ['rate', 'interval'];
+const DEFAULT_ZERO_VARIANCE_STEP_IDS = new Set(['step-1', 'step-2', 'step-3', 'step-4']);
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> => (
   typeof value === 'object' && value !== null
@@ -100,8 +101,13 @@ const getArrivalUnitLabel = (unit?: DurationUnit) => (
 );
 
 const getArrivalMinValue = (mode?: ArrivalInputMode) => mode === 'interval' ? 0.001 : 0.000000001;
+const getBatchSize = (value: unknown) => Math.max(1, Math.min(1000, Math.round(toFiniteNumber(value, 1))));
 
-const sanitizeStep = (rawStep: unknown, index: number): ProcessStep | null => {
+const shouldMigrateDefaultVariance = (payload: Record<string, unknown>) => (
+  !Number.isFinite(Number(payload.version)) || Number(payload.version) < 2
+);
+
+const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = false): ProcessStep | null => {
   if (!isObjectRecord(rawStep)) {
     return null;
   }
@@ -152,9 +158,15 @@ const sanitizeStep = (rawStep: unknown, index: number): ProcessStep | null => {
           .map(([key, value]) => [key, Math.max(0, toFiniteNumber(value, 0))])
       )
     : {};
+  const stepId = typeof rawStep.id === 'string' && rawStep.id.trim() ? rawStep.id : `node-import-${Date.now()}-${index}`;
+  const variance = isProcess
+    ? migrateDefaultVariance && DEFAULT_ZERO_VARIANCE_STEP_IDS.has(stepId)
+      ? 0
+      : Math.max(0, Math.min(1, toFiniteNumber(rawStep.variance, 0)))
+    : 0;
 
   return {
-    id: typeof rawStep.id === 'string' && rawStep.id.trim() ? rawStep.id : `node-import-${Date.now()}-${index}`,
+    id: stepId,
     type,
     name: typeof rawStep.name === 'string' && rawStep.name.trim() ? rawStep.name : isStart ? 'Start Point' : isEnd ? 'End Point' : `Step ${index + 1}`,
     randomnessMode,
@@ -164,13 +176,14 @@ const sanitizeStep = (rawStep: unknown, index: number): ProcessStep | null => {
     capacity: isProcess ? Math.max(1, Math.round(toFiniteNumber(rawStep.capacity, 1))) : 0,
     processingTime: isProcess ? Math.max(0, toFiniteNumber(rawStep.processingTime, 2000)) : 0,
     processingTimeUnit,
-    variance: isProcess ? Math.max(0, Math.min(1, toFiniteNumber(rawStep.variance, 0))) : 0,
+    variance,
     minProcessingTime: isProcess ? Math.max(0, toFiniteNumber(rawStep.minProcessingTime, 1000)) : 0,
     maxProcessingTime: isProcess ? Math.max(0, toFiniteNumber(rawStep.maxProcessingTime, 3000)) : 0,
     rangeTimeUnit,
     arrivalRate: isStart ? toPositiveNumber(rawStep.arrivalRate, 0.5, 0.000000001) : undefined,
     minArrivalRate: isStart ? toPositiveNumber(rawStep.minArrivalRate, 0.2, 0.000000001) : undefined,
     maxArrivalRate: isStart ? toPositiveNumber(rawStep.maxArrivalRate, 0.8, 0.000000001) : undefined,
+    arrivalBatchSize: isStart ? getBatchSize(rawStep.arrivalBatchSize) : undefined,
     failureProbability: Math.max(0, Math.min(1, toFiniteNumber(rawStep.failureProbability, 0))),
     cancellationProbability: Math.max(0, Math.min(1, toFiniteNumber(rawStep.cancellationProbability, 0))),
     color: typeof rawStep.color === 'string' && rawStep.color.trim() ? rawStep.color : isStart ? '#10b981' : isEnd ? '#ef4444' : '#3b82f6',
@@ -181,13 +194,13 @@ const sanitizeStep = (rawStep: unknown, index: number): ProcessStep | null => {
   };
 };
 
-const sanitizeConfig = (rawConfig: unknown): SimulationConfig => {
+const sanitizeConfig = (rawConfig: unknown, migrateDefaultVariance = false): SimulationConfig => {
   if (!isObjectRecord(rawConfig) || !Array.isArray(rawConfig.steps)) {
     throw new Error('Invalid config file: missing steps array.');
   }
 
   const sanitizedSteps = rawConfig.steps
-    .map((step, index) => sanitizeStep(step, index))
+    .map((step, index) => sanitizeStep(step, index, migrateDefaultVariance))
     .filter((step): step is ProcessStep => step !== null);
 
   if (sanitizedSteps.length === 0) {
@@ -214,6 +227,7 @@ const sanitizeConfig = (rawConfig: unknown): SimulationConfig => {
       sourceProcessingTimes: filteredSourceRules,
       minArrivalRate: step.type === 'start' ? Math.min(step.minArrivalRate ?? 0.2, step.maxArrivalRate ?? 0.8) : undefined,
       maxArrivalRate: step.type === 'start' ? Math.max(step.minArrivalRate ?? 0.2, step.maxArrivalRate ?? 0.8) : undefined,
+      arrivalBatchSize: step.type === 'start' ? getBatchSize(step.arrivalBatchSize) : undefined,
       minProcessingTime: step.type === 'process' ? Math.min(step.minProcessingTime ?? 1000, step.maxProcessingTime ?? 3000) : 0,
       maxProcessingTime: step.type === 'process' ? Math.max(step.minProcessingTime ?? 1000, step.maxProcessingTime ?? 3000) : 0,
     };
@@ -229,10 +243,10 @@ const sanitizeConfig = (rawConfig: unknown): SimulationConfig => {
 
 const parseImportedConfig = (payload: unknown): SimulationConfig => {
   if (isObjectRecord(payload) && isObjectRecord(payload.config)) {
-    return sanitizeConfig(payload.config);
+    return sanitizeConfig(payload.config, shouldMigrateDefaultVariance(payload));
   }
 
-  return sanitizeConfig(payload);
+  return sanitizeConfig(payload, isObjectRecord(payload) ? shouldMigrateDefaultVariance(payload) : false);
 };
 
 const loadInitialConfig = (): SimulationConfig => {
@@ -331,6 +345,7 @@ const App: React.FC = () => {
       arrivalRate: isStart ? 12 : undefined,
       minArrivalRate: isStart ? 8 : undefined,
       maxArrivalRate: isStart ? 20 : undefined,
+      arrivalBatchSize: isStart ? 1 : undefined,
       failureProbability: 0,
       cancellationProbability: 0,
       color: isStart ? '#10b981' : isEnd ? '#ef4444' : '#3b82f6',
@@ -974,7 +989,7 @@ const App: React.FC = () => {
                                             onClick={() => setEditingStep({...editingStep, randomnessMode: 'fixed'})}
                                             className={`text-xs px-3 py-1.5 rounded transition-all ${editingStep.randomnessMode === 'fixed' || !editingStep.randomnessMode ? 'bg-slate-700 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
                                         >
-                                            Fixed + Variance
+                                          Fixed
                                         </button>
                                         <button 
                                             onClick={() => setEditingStep({...editingStep, randomnessMode: 'range'})}
@@ -1022,6 +1037,24 @@ const App: React.FC = () => {
                                     ))}
                                   </select>
                                 </div>
+                                <div className="mb-4">
+                                  <label className="block text-xs font-semibold text-emerald-400 uppercase mb-2">Batch Size</label>
+                                  <div className="grid grid-cols-[160px_1fr] gap-3 items-center">
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      max="1000"
+                                      step="1"
+                                      value={editingStep.arrivalBatchSize ?? 1}
+                                      onChange={e => setEditingStep({...editingStep, arrivalBatchSize: getBatchSize(e.target.value)})}
+                                      className="w-full bg-slate-800 border border-emerald-900/50 rounded-lg p-2 text-emerald-100 font-mono focus:ring-2 focus:ring-emerald-500 outline-none"
+                                    />
+                                    <div className="rounded-lg border border-emerald-900/40 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+                                      Creates this many items at the same simulated arrival time.
+                                    </div>
+                                  </div>
+                                </div>
+
                                 <label className="block text-xs font-semibold text-emerald-400 uppercase mb-2">
                                   {(editingStep.arrivalInputMode || 'rate') === 'interval'
                                     ? `Arrival Interval (${getArrivalUnitLabel(editingStep.arrivalUnit)})`
@@ -1050,8 +1083,8 @@ const App: React.FC = () => {
                                             </div>
                                             <div className="col-span-2 text-xs text-slate-500 mt-1">
                                       {(editingStep.arrivalInputMode || 'rate') === 'interval'
-                                        ? `One new item will arrive after a random interval between ${editingStep.minArrivalRate ?? 0} and ${editingStep.maxArrivalRate ?? 0} ${getArrivalUnitLabel(editingStep.arrivalUnit)}.`
-                                        : `Arrivals will randomly fluctuate between ${editingStep.minArrivalRate ?? 0} and ${editingStep.maxArrivalRate ?? 0} items per ${getArrivalUnitLabel(editingStep.arrivalUnit)}.`}
+                                        ? `A batch of ${editingStep.arrivalBatchSize ?? 1} item(s) will arrive after a random interval between ${editingStep.minArrivalRate ?? 0} and ${editingStep.maxArrivalRate ?? 0} ${getArrivalUnitLabel(editingStep.arrivalUnit)}.`
+                                        : `Total arrivals fluctuate between ${editingStep.minArrivalRate ?? 0} and ${editingStep.maxArrivalRate ?? 0} items per ${getArrivalUnitLabel(editingStep.arrivalUnit)}, grouped into batches of ${editingStep.arrivalBatchSize ?? 1}.`}
                                             </div>
                                         </div>
                                     ) : (
@@ -1064,7 +1097,7 @@ const App: React.FC = () => {
                                             />
                                     <span className="font-mono text-sm text-emerald-500 font-bold whitespace-nowrap">
                                       {(editingStep.arrivalInputMode || 'rate') === 'interval'
-                                        ? getArrivalUnitLabel(editingStep.arrivalUnit)
+                                        ? `${getArrivalUnitLabel(editingStep.arrivalUnit)} / batch`
                                         : `items / ${getArrivalUnitLabel(editingStep.arrivalUnit)}`}
                                     </span>
                                         </div>
@@ -1144,7 +1177,7 @@ const App: React.FC = () => {
                                                 </div>
                                             </div>
                                         ) : (
-                                                  <div className="grid grid-cols-3 gap-4">
+                                                  <div className="grid grid-cols-2 gap-4">
                                                 <div>
                                                     <label className="block text-[10px] text-slate-400 uppercase mb-1">Base Time</label>
                                                     <input 
@@ -1164,16 +1197,27 @@ const App: React.FC = () => {
                                                         {DURATION_UNITS.map(unit => <option key={unit.value} value={unit.value}>{unit.label}</option>)}
                                                       </select>
                                                     </div>
-                                                <div>
-                                                    <label className="block text-[10px] text-slate-400 uppercase mb-1">Variance (0-1)</label>
+                                                {editingStep.simulationMode !== 'delay' && <div className="col-span-2 min-w-0">
+                                                  <label className="block text-[10px] text-slate-400 uppercase mb-1">Variance (0 = exact)</label>
+                                                  <div className="grid grid-cols-[76px_minmax(0,1fr)] items-center gap-3">
                                                     <input 
-                                                        type="range" min="0" max="1" step="0.1"
-                                                        value={editingStep.variance ?? 0} 
-                                                        onChange={e => setEditingStep({...editingStep, variance: parseFloat(e.target.value)})}
-                                                        className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500 mt-3"
+                                                      type="number" min="0" max="1" step="0.01"
+                                                      value={editingStep.variance ?? 0} 
+                                                      onChange={e => {
+                                                      const val = parseFloat(e.target.value);
+                                                      setEditingStep({...editingStep, variance: isNaN(val) ? 0 : Math.min(1, Math.max(0, val))});
+                                                      }}
+                                                      className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 font-mono focus:ring-2 focus:ring-blue-500 outline-none"
                                                     />
-                                                    <div className="text-right text-xs text-slate-500 font-mono mt-1">{editingStep.variance}</div>
-                                                </div>
+                                                    <input 
+                                                      type="range" min="0" max="1" step="0.01"
+                                                      value={editingStep.variance ?? 0} 
+                                                      onChange={e => setEditingStep({...editingStep, variance: parseFloat(e.target.value)})}
+                                                      className="min-w-0 w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                                                    />
+                                                  </div>
+                                                  <div className="text-xs text-slate-500 mt-1">0 keeps this step deterministic; values above 0 add random noise.</div>
+                                                </div>}
                                             </div>
                                         )}
                                     </div>

@@ -35,6 +35,7 @@ export interface ProcessStep {
   arrivalRate?: number; // Items per selected simulated unit (Fixed Mode)
   minArrivalRate?: number; // Items per selected simulated unit (Range Mode)
   maxArrivalRate?: number; // Items per selected simulated unit (Range Mode)
+  arrivalBatchSize?: number; // Number of items created at each arrival event
 
   // Exception Config
   failureProbability: number; // 0-1, chance of error upon completion
