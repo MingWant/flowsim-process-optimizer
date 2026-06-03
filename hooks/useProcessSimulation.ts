@@ -15,6 +15,9 @@ const TIME_UNIT_TO_MS = {
 } as const;
 
 const MIN_ARRIVAL_RATE = 0.000000001;
+const MIN_PROCESSING_DURATION_MS = 1;
+const MAX_SPAWNS_PER_START_PER_TICK = 1000;
+const MAX_BUSINESS_EVENTS_PER_TICK = 5000;
 
 const BUSINESS_TRANSMISSION_SIM_MS = 0;
 
@@ -151,7 +154,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     if (step.randomnessMode === 'fixed' && item.previousStepId && step.sourceProcessingTimes && step.sourceProcessingTimes[item.previousStepId]) {
         const base = safeNumber(step.sourceProcessingTimes[item.previousStepId], 1000) * fixedUnitMultiplier;
          const speedNoise = 1 + (Math.random() * 2 - 1) * safeNumber(step.variance, 0);
-         return Math.max(100, base * speedNoise);
+         return Math.max(MIN_PROCESSING_DURATION_MS, base * speedNoise);
     }
 
     // 2. Range Mode
@@ -165,7 +168,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     // 3. Default Fixed Mode
     const base = safeNumber(step.processingTime, 1000) * fixedUnitMultiplier;
     const speedNoise = 1 + (Math.random() * 2 - 1) * safeNumber(step.variance, 0);
-    return Math.max(100, base * speedNoise);
+    return Math.max(MIN_PROCESSING_DURATION_MS, base * speedNoise);
   };
 
   const beginTransmission = (
@@ -197,18 +200,19 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     currentSimulationMs: number
   ) => {
     const queuedAtSimulationMs = item.queuedAtSimulationMs;
-    if (typeof queuedAtSimulationMs === 'number') {
-      const waitTime = Math.max(0, currentSimulationMs - queuedAtSimulationMs);
-      item.totalWaitTime += waitTime;
-      if (!stepCountersRef.current[step.id]) {
-        stepCountersRef.current[step.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
-      }
-      stepCountersRef.current[step.id].totalWaitTime += waitTime;
-      stepCountersRef.current[step.id].totalStarted++;
+    const waitTime = typeof queuedAtSimulationMs === 'number'
+      ? Math.max(0, currentSimulationMs - queuedAtSimulationMs)
+      : 0;
+
+    item.totalWaitTime += waitTime;
+    if (!stepCountersRef.current[step.id]) {
+      stepCountersRef.current[step.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
     }
+    stepCountersRef.current[step.id].totalWaitTime += waitTime;
+    stepCountersRef.current[step.id].totalStarted++;
 
     const duration = calculateProcessingDuration(step, item);
-    const safeDuration = isNaN(duration) || duration < 100 ? 1000 : duration;
+    const safeDuration = Number.isFinite(duration) ? Math.max(MIN_PROCESSING_DURATION_MS, duration) : 1000;
 
     item.status = 'processing';
     item.progress = 0;
@@ -278,8 +282,9 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           
           let nextSpawnAt = nextSpawnTimeRef.current[startNode.id];
           if (isNaN(nextSpawnAt)) nextSpawnAt = frameStartSimulationMs;
+          let spawnedThisTick = 0;
           
-          while (nextSpawnAt <= simulationTimeRef.current) {
+          while (nextSpawnAt <= simulationTimeRef.current && spawnedThisTick < MAX_SPAWNS_PER_START_PER_TICK) {
               // SPAWN
               // Determine immediate target
               let firstTargetId: string | 'finished' = 'finished';
@@ -324,6 +329,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
               }
 
                   nextSpawnAt += calculateNextSpawnDelay(startNode);
+                    spawnedThisTick++;
           }
           
                 nextSpawnTimeRef.current[startNode.id] = nextSpawnAt;
@@ -403,15 +409,114 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         }
       };
 
+      const settleTerminalItem = (item: WorkItem) => {
+        const isTerminal = item.status === 'finished' || item.status === 'cancelled' || item.status === 'error';
+        if (!isTerminal || item.finishedAt) {
+          return;
+        }
+
+        item.finishedAt = now;
+
+        if (item.status === 'finished') {
+          statsRef.current.totalItemsFinished++;
+          const completedAtSimulationMs = item.completedAtSimulationMs ?? simulationTimeRef.current;
+          const cycleTime = Math.max(
+            0,
+            completedAtSimulationMs - item.createdAtSimulationMs - item.totalTransmissionTime
+          );
+          statsRef.current.avgCycleTime =
+            ((statsRef.current.avgCycleTime * (statsRef.current.totalItemsFinished - 1)) + cycleTime) / statsRef.current.totalItemsFinished;
+
+          // Track stats for End Nodes
+          if (item.currentStepId && stepMap.get(item.currentStepId)?.type === 'end') {
+            if (!stepCountersRef.current[item.currentStepId]) {
+              stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
+            }
+            stepCountersRef.current[item.currentStepId].processed++;
+            stepCountersRef.current[item.currentStepId].totalCompletionTime += cycleTime;
+          }
+        }
+      };
+
+      const completeProcessingItem = (item: WorkItem, currentStep: ProcessStep, eventTime: number, safeDuration: number) => {
+        item.progress = 0;
+        item.processingStartedAtSimulationMs = undefined;
+        item.processingEndsAtSimulationMs = undefined;
+        item.totalProcessingTime += safeDuration;
+
+        // EXCEPTION: Failure
+        const failChance = Math.min(1, safeNumber(currentStep.failureProbability, 0));
+        if (Math.random() < failChance) {
+          item.status = 'error';
+          statsRef.current.totalItemsFailed++;
+          if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
+          stepCountersRef.current[item.currentStepId].failed++;
+
+          if (currentStep.simulationMode !== 'delay') {
+            const currentUsage = stepUsage.get(item.currentStepId) || 0;
+            stepUsage.set(item.currentStepId, Math.max(0, currentUsage - 1));
+            startQueuedItemsForStep(item.currentStepId, eventTime);
+          }
+          return;
+        }
+
+        // Normal Success
+        const nextId = getNextStepId(currentStep);
+
+        // Increment Processed Count for this step
+        if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
+        stepCountersRef.current[item.currentStepId].processed++;
+
+        const completedStepId = item.currentStepId;
+
+        if (nextId === 'finished') {
+          beginTransmission(item, currentStep.id, 'finished', eventTime, now);
+          completeBusinessTransmission(item, 'finished', eventTime + BUSINESS_TRANSMISSION_SIM_MS);
+        } else {
+          const nextStep = stepMap.get(nextId);
+
+          if (nextStep?.type === 'end') {
+            beginTransmission(item, currentStep.id, nextStep.id, eventTime, now);
+            completeBusinessTransmission(item, nextStep.id, eventTime + BUSINESS_TRANSMISSION_SIM_MS);
+          } else if (nextStep) {
+            beginTransmission(item, currentStep.id, nextStep.id, eventTime, now);
+            completeBusinessTransmission(item, nextStep.id, eventTime + BUSINESS_TRANSMISSION_SIM_MS);
+          }
+        }
+
+        if (currentStep.simulationMode !== 'delay') {
+          const currentUsage = stepUsage.get(completedStepId) || 0;
+          stepUsage.set(completedStepId, Math.max(0, currentUsage - 1));
+          startQueuedItemsForStep(completedStepId, eventTime);
+        }
+      };
+
       for (const step of steps) {
         if (step.type === 'process' && step.simulationMode !== 'delay') {
           startQueuedItemsForStep(step.id, frameStartSimulationMs);
         }
       }
 
-      // Pass 2: Process Items
-      for (let i = 0; i < currentItems.length; i++) {
-        const item = currentItems[i];
+      const itemsInEventOrder = [...currentItems].sort((a: WorkItem, b: WorkItem) => {
+        const getEventTime = (item: WorkItem) => {
+          if (item.status === 'processing') {
+            return item.processingEndsAtSimulationMs ?? Number.POSITIVE_INFINITY;
+          }
+          if (item.status === 'transmitting') {
+            return item.transmissionEndsAtSimulationMs ?? Number.POSITIVE_INFINITY;
+          }
+          if (item.status === 'queued') {
+            return item.queuedAtSimulationMs ?? item.stepEntryTime ?? Number.POSITIVE_INFINITY;
+          }
+          return Number.POSITIVE_INFINITY;
+        };
+
+        return getEventTime(a) - getEventTime(b);
+      });
+
+      // Pass 2: Process Items in simulated event order
+      for (let i = 0; i < itemsInEventOrder.length; i++) {
+        const item = itemsInEventOrder[i];
 
         if (typeof item.visualTransmissionStartedAtWallMs === 'number' && typeof item.visualTransmissionEndsAtWallMs === 'number') {
           const visualDuration = Math.max(0, item.visualTransmissionEndsAtWallMs - item.visualTransmissionStartedAtWallMs);
@@ -429,29 +534,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         
         // --- HANDLE TERMINAL STATES ---
         if (item.status === 'finished' || item.status === 'cancelled' || item.status === 'error') {
-           if (!item.finishedAt) {
-             item.finishedAt = now;
-             
-             if (item.status === 'finished') {
-                statsRef.current.totalItemsFinished++;
-                const completedAtSimulationMs = item.completedAtSimulationMs ?? simulationTimeRef.current;
-                const cycleTime = Math.max(
-                  0,
-                  completedAtSimulationMs - item.createdAtSimulationMs - item.totalTransmissionTime
-                );
-                statsRef.current.avgCycleTime = 
-                  ((statsRef.current.avgCycleTime * (statsRef.current.totalItemsFinished - 1)) + cycleTime) / statsRef.current.totalItemsFinished;
-                
-                // Track stats for End Nodes
-                if (item.currentStepId && stepMap.get(item.currentStepId)?.type === 'end') {
-                    if (!stepCountersRef.current[item.currentStepId]) {
-                      stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
-                    }
-                    stepCountersRef.current[item.currentStepId].processed++;
-                    stepCountersRef.current[item.currentStepId].totalCompletionTime += cycleTime;
-                }
-             }
-           }
+           settleTerminalItem(item);
            continue;
         }
 
@@ -480,7 +563,9 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         if (item.status === 'queued') {
             // EXCEPTION: Cancellation
             if (currentStep.cancellationProbability > 0) {
-                const cancelChance = currentStep.cancellationProbability * (dt / 1000);
+              const queuedAt = item.queuedAtSimulationMs ?? frameStartSimulationMs;
+              const cancellationWindowMs = Math.max(0, simulationTimeRef.current - Math.max(frameStartSimulationMs, queuedAt));
+              const cancelChance = Math.min(1, currentStep.cancellationProbability * (cancellationWindowMs / 1000));
                 if (Math.random() < cancelChance) {
                     item.status = 'cancelled';
                     statsRef.current.totalItemsCancelled++;
@@ -502,59 +587,53 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           item.progress = Math.max(0, Math.min(1, elapsed / safeDuration));
 
           if (simulationTimeRef.current >= endsAt) {
-                item.progress = 0; 
-            item.processingStartedAtSimulationMs = undefined;
-            item.processingEndsAtSimulationMs = undefined;
-            item.totalProcessingTime += safeDuration;
-                
-                // EXCEPTION: Failure
-                const failChance = safeNumber(currentStep.failureProbability, 0);
-                if (Math.random() < failChance) {
-                    item.status = 'error';
-                    statsRef.current.totalItemsFailed++;
-                    if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
-                    stepCountersRef.current[item.currentStepId].failed++;
-
-                    if (currentStep.simulationMode !== 'delay') {
-                      const currentUsage = stepUsage.get(item.currentStepId) || 0;
-                      stepUsage.set(item.currentStepId, Math.max(0, currentUsage - 1));
-                      startQueuedItemsForStep(item.currentStepId, eventTime);
-                    }
-                    continue;
-                }
-
-                // Normal Success
-                const nextId = getNextStepId(currentStep);
-                
-                // Increment Processed Count for this step
-                if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
-                stepCountersRef.current[item.currentStepId].processed++;
-
-                const completedStepId = item.currentStepId;
-
-                if (nextId === 'finished') {
-                  beginTransmission(item, currentStep.id, 'finished', eventTime, now);
-                  completeBusinessTransmission(item, 'finished', eventTime + BUSINESS_TRANSMISSION_SIM_MS);
-                } else {
-                  const nextStep = stepMap.get(nextId);
-
-                  if (nextStep?.type === 'end') {
-                    beginTransmission(item, currentStep.id, nextStep.id, eventTime, now);
-                    completeBusinessTransmission(item, nextStep.id, eventTime + BUSINESS_TRANSMISSION_SIM_MS);
-                  } else if (nextStep) {
-                    beginTransmission(item, currentStep.id, nextStep.id, eventTime, now);
-                    completeBusinessTransmission(item, nextStep.id, eventTime + BUSINESS_TRANSMISSION_SIM_MS);
-                  }
-                }
-                
-                if (currentStep.simulationMode !== 'delay') {
-                  const currentUsage = stepUsage.get(completedStepId) || 0;
-                  stepUsage.set(completedStepId, Math.max(0, currentUsage - 1));
-                  startQueuedItemsForStep(completedStepId, eventTime);
-                }
+            completeProcessingItem(item, currentStep, eventTime, safeDuration);
             }
         }
       }
+
+      let businessEventsProcessed = 0;
+      while (businessEventsProcessed < MAX_BUSINESS_EVENTS_PER_TICK) {
+        const nextDueItem = itemsRef.current
+          .filter((item: WorkItem) => {
+            if (item.status === 'transmitting') {
+              return (item.transmissionEndsAtSimulationMs ?? Number.POSITIVE_INFINITY) <= simulationTimeRef.current;
+            }
+            if (item.status === 'processing') {
+              return (item.processingEndsAtSimulationMs ?? Number.POSITIVE_INFINITY) <= simulationTimeRef.current;
+            }
+            return false;
+          })
+          .sort((a: WorkItem, b: WorkItem) => {
+            const aEventTime = a.status === 'processing'
+              ? a.processingEndsAtSimulationMs ?? Number.POSITIVE_INFINITY
+              : a.transmissionEndsAtSimulationMs ?? Number.POSITIVE_INFINITY;
+            const bEventTime = b.status === 'processing'
+              ? b.processingEndsAtSimulationMs ?? Number.POSITIVE_INFINITY
+              : b.transmissionEndsAtSimulationMs ?? Number.POSITIVE_INFINITY;
+            return aEventTime - bEventTime;
+          })[0];
+
+        if (!nextDueItem) {
+          break;
+        }
+
+        if (nextDueItem.status === 'transmitting') {
+          completeBusinessTransmission(nextDueItem, nextDueItem.targetStepId, nextDueItem.transmissionEndsAtSimulationMs ?? simulationTimeRef.current);
+        } else if (nextDueItem.status === 'processing') {
+          const currentStep = stepMap.get(nextDueItem.currentStepId);
+          if (!currentStep || currentStep.type === 'start' || currentStep.type === 'end') {
+            break;
+          }
+
+          const safeDuration = nextDueItem.requiredDuration && nextDueItem.requiredDuration > 0 ? nextDueItem.requiredDuration : 1000;
+          completeProcessingItem(nextDueItem, currentStep, nextDueItem.processingEndsAtSimulationMs ?? simulationTimeRef.current, safeDuration);
+        }
+
+        businessEventsProcessed++;
+      }
+
+      itemsRef.current.forEach(settleTerminalItem);
 
       // Cleanup items
       itemsRef.current = itemsRef.current.filter((item: WorkItem) => {
