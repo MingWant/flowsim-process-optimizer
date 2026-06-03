@@ -218,6 +218,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     item.progress = 0;
     item.requiredDuration = safeDuration;
     item.queuedAtSimulationMs = undefined;
+    item.queueCancellationCheckedAtSimulationMs = undefined;
     item.processingStartedAtSimulationMs = currentSimulationMs;
     item.processingEndsAtSimulationMs = currentSimulationMs + safeDuration;
   };
@@ -249,6 +250,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
     item.status = 'queued';
     item.queuedAtSimulationMs = currentSimulationMs;
+    item.queueCancellationCheckedAtSimulationMs = currentSimulationMs;
   };
 
   useEffect(() => {
@@ -310,6 +312,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                       totalProcessingTime: 0,
                           stepEntryTime: nextSpawnAt,
                           queuedAtSimulationMs: undefined,
+                          queueCancellationCheckedAtSimulationMs: undefined,
                         visualPreviousStepId: undefined,
                         visualTargetStepId: undefined,
                         visualTransmissionStartedAtWallMs: undefined,
@@ -348,6 +351,36 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         }
       }
 
+      const cancelQueuedItem = (item: WorkItem, step: ProcessStep) => {
+        item.status = 'cancelled';
+        item.queueCancellationCheckedAtSimulationMs = undefined;
+        statsRef.current.totalItemsCancelled++;
+        if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
+        stepCountersRef.current[item.currentStepId].cancelled++;
+      };
+
+      const applyQueueCancellationThrough = (item: WorkItem, step: ProcessStep, throughSimulationMs: number): boolean => {
+        if (item.status !== 'queued' || step.cancellationProbability <= 0) {
+          return false;
+        }
+
+        const lastCheckedAt = item.queueCancellationCheckedAtSimulationMs ?? item.queuedAtSimulationMs ?? item.stepEntryTime ?? throughSimulationMs;
+        const exposureMs = Math.max(0, throughSimulationMs - lastCheckedAt);
+        if (exposureMs <= 0) {
+          item.queueCancellationCheckedAtSimulationMs = Math.max(lastCheckedAt, throughSimulationMs);
+          return false;
+        }
+
+        const cancelChance = Math.min(1, step.cancellationProbability * (exposureMs / 1000));
+        item.queueCancellationCheckedAtSimulationMs = throughSimulationMs;
+        if (Math.random() < cancelChance) {
+          cancelQueuedItem(item, step);
+          return true;
+        }
+
+        return false;
+      };
+
       const startQueuedItemsForStep = (stepId: string, availableAtSimulationMs: number) => {
         const step = stepMap.get(stepId);
         if (!step || step.type !== 'process' || step.simulationMode === 'delay') {
@@ -378,6 +411,10 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
           const queuedAt = queuedItem.queuedAtSimulationMs ?? queuedItem.stepEntryTime ?? availableAtSimulationMs;
           const startAt = Math.max(availableAtSimulationMs, queuedAt);
+          if (applyQueueCancellationThrough(queuedItem, step, startAt)) {
+            continue;
+          }
+
           beginProcessing(queuedItem, step, startAt);
           currentUsage++;
         }
@@ -561,19 +598,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
         // --- QUEUED STATE ---
         if (item.status === 'queued') {
-            // EXCEPTION: Cancellation
-            if (currentStep.cancellationProbability > 0) {
-              const queuedAt = item.queuedAtSimulationMs ?? frameStartSimulationMs;
-              const cancellationWindowMs = Math.max(0, simulationTimeRef.current - Math.max(frameStartSimulationMs, queuedAt));
-              const cancelChance = Math.min(1, currentStep.cancellationProbability * (cancellationWindowMs / 1000));
-                if (Math.random() < cancelChance) {
-                    item.status = 'cancelled';
-                    statsRef.current.totalItemsCancelled++;
-                    if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
-                    stepCountersRef.current[item.currentStepId].cancelled++;
-                    continue; 
-                }
-            }
+          continue;
         } 
         // --- PROCESSING STATE ---
         else if (item.status === 'processing') {
@@ -631,6 +656,21 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         }
 
         businessEventsProcessed++;
+      }
+
+      itemsRef.current.forEach(settleTerminalItem);
+
+      for (const item of itemsRef.current) {
+        if (item.status !== 'queued') {
+          continue;
+        }
+
+        const currentStep = stepMap.get(item.currentStepId);
+        if (!currentStep || currentStep.type !== 'process' || currentStep.simulationMode === 'delay') {
+          continue;
+        }
+
+        applyQueueCancellationThrough(item, currentStep, simulationTimeRef.current);
       }
 
       itemsRef.current.forEach(settleTerminalItem);
