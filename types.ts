@@ -63,6 +63,7 @@ export interface WorkItem {
   totalWaitTime: number;
   totalProcessingTime: number;
   stepEntryTime: number;
+  queuedAtSimulationMs?: number;
   requiredDuration?: number; // The specific time calculated for this item instance
   processingStartedAtSimulationMs?: number;
   processingEndsAtSimulationMs?: number;
