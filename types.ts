@@ -37,6 +37,9 @@ export interface ProcessStep {
   maxArrivalRate?: number; // Items per selected simulated unit (Range Mode)
   arrivalBatchSize?: number; // Number of items created at each arrival event
 
+  // End Node Fields
+  endTimeUnit?: DurationUnit;
+
   // Exception Config
   failureProbability: number; // 0-1, chance of error upon completion
   cancellationProbability: number; // 0-1, chance of leaving queue per second

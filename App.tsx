@@ -136,6 +136,9 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
   const arrivalUnit = isStart && typeof rawStep.arrivalUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.arrivalUnit)
     ? rawStep.arrivalUnit as DurationUnit
     : isStart ? 's' : undefined;
+  const endTimeUnit = isEnd && typeof rawStep.endTimeUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.endTimeUnit)
+    ? rawStep.endTimeUnit as DurationUnit
+    : isEnd ? 'min' : undefined;
   const processingTimeUnit = typeof rawStep.processingTimeUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.processingTimeUnit)
     ? rawStep.processingTimeUnit as DurationUnit
     : 'ms';
@@ -172,6 +175,7 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
     randomnessMode,
     arrivalInputMode,
     arrivalUnit,
+    endTimeUnit,
     simulationMode,
     capacity: isProcess ? Math.max(1, Math.round(toFiniteNumber(rawStep.capacity, 1))) : 0,
     processingTime: isProcess ? Math.max(0, toFiniteNumber(rawStep.processingTime, 2000)) : 0,
@@ -276,6 +280,7 @@ const App: React.FC = () => {
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isDesktopSidebarCollapsed, setIsDesktopSidebarCollapsed] = useState(false);
   const [importExportNotice, setImportExportNotice] = useState<string | null>(null);
   const [draftStatus, setDraftStatus] = useState<'restored' | 'saved' | 'save-failed' | null>(() => {
     if (typeof window === 'undefined') {
@@ -334,6 +339,7 @@ const App: React.FC = () => {
       randomnessMode: 'fixed',
       arrivalInputMode: isStart ? 'rate' : undefined,
       arrivalUnit: isStart ? 'h' : undefined,
+      endTimeUnit: isEnd ? 'min' : undefined,
       simulationMode: type === 'process' ? 'resource' : undefined,
       capacity: isStart || isEnd ? 0 : 1,
       processingTime: isStart || isEnd ? 0 : 2000,
@@ -570,7 +576,7 @@ const App: React.FC = () => {
         onChange={handleImportFile}
       />
       {/* Header */}
-      <header className="h-16 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md flex items-center justify-between px-4 md:px-6 sticky top-0 z-50">
+      <header className="h-14 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md flex items-center justify-between px-4 md:px-6 sticky top-0 z-50">
         <div className="flex items-center gap-3">
           <div className="bg-blue-600 p-2 rounded-xl shadow-lg shadow-blue-900/20">
             <Zap size={20} className="text-white" />
@@ -621,9 +627,10 @@ const App: React.FC = () => {
       <div className="flex flex-1 flex-col lg:flex-row relative overflow-hidden">
         {/* Sidebar */}
         <aside className={`
-            fixed inset-y-0 left-0 z-40 w-80 bg-slate-950/95 backdrop-blur-xl border-r border-slate-800 
-            transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:bg-slate-900/70 lg:backdrop-blur-none
-            flex flex-col h-[calc(100vh-4rem)] overflow-y-auto
+        fixed inset-y-0 left-0 z-40 w-80 bg-slate-950/95 backdrop-blur-xl border-r border-slate-800 
+        transform transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:bg-slate-900/70 lg:backdrop-blur-none
+        flex flex-col h-[calc(100vh-3.5rem)] overflow-hidden
+        ${isDesktopSidebarCollapsed ? 'lg:w-0 lg:border-r-0' : 'lg:w-80'}
             ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
         `}>
           <div className="p-4 flex items-center justify-between lg:hidden border-b border-slate-800">
@@ -631,7 +638,7 @@ const App: React.FC = () => {
              <button onClick={() => setIsSidebarOpen(false)} className="text-slate-400"><X size={20}/></button>
           </div>
 
-          <div className="p-5 space-y-6">
+          <div className="custom-scrollbar h-full overflow-y-auto p-5 space-y-6">
             <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 space-y-4">
               <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
                 <Settings size={14}/> Quick Controls
@@ -802,14 +809,23 @@ const App: React.FC = () => {
            />
         )}
 
+        <button
+          onClick={() => setIsDesktopSidebarCollapsed((value) => !value)}
+          className="fixed left-4 top-[4.25rem] z-40 hidden items-center gap-2 rounded-full border border-slate-700 bg-slate-950/90 px-3 py-2 text-xs font-semibold text-slate-300 shadow-2xl backdrop-blur transition hover:border-blue-500/50 hover:bg-slate-900 lg:flex"
+          title={isDesktopSidebarCollapsed ? 'Show sidebar' : 'Hide sidebar for presentation'}
+        >
+          {isDesktopSidebarCollapsed ? <Menu size={15} /> : <X size={15} />}
+          {isDesktopSidebarCollapsed ? 'Show controls' : 'Hide controls'}
+        </button>
+
         {/* Main Content */}
-        <main className="flex-1 overflow-y-auto h-[calc(100vh-4rem)] p-4 lg:p-6 scroll-smooth relative bg-[radial-gradient(circle_at_top_right,rgba(37,99,235,0.10),transparent_35%),radial-gradient(circle_at_bottom_left,rgba(16,185,129,0.08),transparent_30%)]">
-          <div className="max-w-[1920px] mx-auto space-y-5">
-             <section className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3 md:p-4 shadow-2xl shadow-black/20">
-               <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between mb-4">
+        <main className="flex-1 overflow-y-auto h-[calc(100vh-3.5rem)] p-3 lg:p-4 scroll-smooth relative bg-[radial-gradient(circle_at_top_right,rgba(37,99,235,0.10),transparent_35%),radial-gradient(circle_at_bottom_left,rgba(16,185,129,0.08),transparent_30%)]">
+          <div className="max-w-none mx-auto space-y-4">
+             <section className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3 shadow-2xl shadow-black/20">
+               <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between mb-3 pl-0 lg:pl-24">
                  <div>
                    <h2 className="text-lg font-semibold text-slate-100">Process Map</h2>
-                   <p className="text-xs text-slate-500">Zoom, pan, drag nodes, or pick a step from the left panel. Sim time: {simulationClockLabel}</p>
+                   <p className="text-xs text-slate-500">Presentation canvas · Sim time: {simulationClockLabel} · Scroll to zoom, drag to pan.</p>
                    {importExportNotice && <p className="mt-1 text-xs text-cyan-300">{importExportNotice}</p>}
                    {draftStatusMessage && <p className={`mt-1 text-xs ${draftStatus === 'save-failed' ? 'text-rose-300' : 'text-emerald-300'}`}>{draftStatusMessage}</p>}
                  </div>
@@ -858,24 +874,6 @@ const App: React.FC = () => {
                         <option value={CUSTOM_CLOCK_VALUE}>Custom</option>
                       </select>
                     </div>
-                    <button 
-                        onClick={() => addStep('start')}
-                        className="flex items-center gap-1 text-xs bg-emerald-900/30 hover:bg-emerald-800/50 text-emerald-400 px-3 py-2 rounded-lg border border-emerald-800/50 transition-colors"
-                    >
-                        <PlayCircle size={14}/> Add Start
-                    </button>
-                    <button 
-                        onClick={() => addStep('process')}
-                        className="flex items-center gap-1 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-2 rounded-lg border border-slate-700 transition-colors"
-                    >
-                        <Box size={14}/> Add Process
-                    </button>
-                     <button 
-                        onClick={() => addStep('end')}
-                        className="flex items-center gap-1 text-xs bg-red-900/30 hover:bg-red-800/50 text-red-400 px-3 py-2 rounded-lg border border-red-800/50 transition-colors"
-                    >
-                        <StopCircle size={14}/> Add End
-                    </button>
                  </div>
                </div>
 
@@ -890,7 +888,7 @@ const App: React.FC = () => {
                 onAddStep={addStep}
                 onPositionChange={updateStepPosition}
                />
-               <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-500">
+               <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
                  <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Scroll = Zoom</span>
                  <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Drag background = Pan</span>
                  <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Drag node header = Move</span>
@@ -902,7 +900,7 @@ const App: React.FC = () => {
                   <h2 className="text-lg font-semibold text-slate-100">Live Metrics</h2>
                   <div className="text-xs text-slate-500">Queue: <span className="font-mono text-amber-300">{totalQueue}</span></div>
                 </div>
-                <StatsBoard globalStats={globalStats} stepStats={stepStats} steps={config.steps} simulationTimeMs={simulationTimeMs} />
+                 <StatsBoard globalStats={globalStats} stepStats={stepStats} steps={config.steps} items={items} simulationTimeMs={simulationTimeMs} />
              </section>
           </div>
           
@@ -1102,6 +1100,26 @@ const App: React.FC = () => {
                                     </span>
                                         </div>
                                     )}
+                                </div>
+                            )}
+
+                            {editingStep.type === 'end' && (
+                                <div className="p-4 bg-rose-900/20 border border-rose-900/50 rounded-lg">
+                                  <label className="block text-xs font-semibold text-rose-400 uppercase mb-2">Average Time Display Unit</label>
+                                  <div className="grid grid-cols-[180px_1fr] gap-3 items-center">
+                                    <select
+                                      value={editingStep.endTimeUnit || 'min'}
+                                      onChange={(e) => setEditingStep({ ...editingStep, endTimeUnit: e.target.value as DurationUnit })}
+                                      className="rounded-lg border border-rose-900/50 bg-slate-800 px-3 py-2 text-sm text-rose-100 outline-none focus:ring-2 focus:ring-rose-500"
+                                    >
+                                      {DURATION_UNITS.map((unit) => (
+                                        <option key={unit.value} value={unit.value}>{unit.label}</option>
+                                      ))}
+                                    </select>
+                                    <div className="rounded-lg border border-rose-900/40 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+                                      Controls how the End Point card displays average end-to-end cycle time. Internal simulation stats remain in milliseconds.
+                                    </div>
+                                  </div>
                                 </div>
                             )}
 

@@ -1,9 +1,9 @@
 
-import React, { useRef, useState, useEffect, useMemo } from 'react';
+import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import { flushSync } from 'react-dom';
 import { ProcessStep, StepStats, WorkItem } from '../types';
 import { ProcessNode } from './ProcessNode';
-import { Move, ZoomIn, ZoomOut, Maximize, PlayCircle, Box, StopCircle, MousePointer2 } from 'lucide-react';
+import { Move, ZoomIn, ZoomOut, Maximize, PlayCircle, Box, StopCircle, MousePointer2, Minimize2, PanelsTopLeft } from 'lucide-react';
 
 interface Props {
   steps: ProcessStep[];
@@ -27,6 +27,9 @@ const NODE_HEIGHT = 300;
 const START_END_WIDTH = 280;
 const START_HEIGHT = 118;
 const END_HEIGHT = 186;
+const COLLAPSED_PROCESS_HEIGHT = 104;
+const COLLAPSED_START_HEIGHT = 104;
+const COLLAPSED_END_HEIGHT = 104;
 const NODE_SPAWN_OFFSETS: Position[] = [
   { x: 0, y: 0 },
   { x: 48, y: 36 },
@@ -49,6 +52,21 @@ const getPointOnBezier = (t: number, p0: Position, p1: Position, p2: Position, p
     return { x, y };
 };
 
+const getStepDimensions = (type?: ProcessStep['type'], collapsed = false) => ({
+  width: type === 'process' ? NODE_WIDTH : type === 'start' ? 260 : START_END_WIDTH,
+  height: collapsed
+    ? type === 'process'
+      ? COLLAPSED_PROCESS_HEIGHT
+      : type === 'start'
+        ? COLLAPSED_START_HEIGHT
+        : COLLAPSED_END_HEIGHT
+    : type === 'process'
+      ? NODE_HEIGHT
+      : type === 'start'
+        ? START_HEIGHT
+        : END_HEIGHT,
+});
+
 export const ProcessMap: React.FC<Props> = ({ 
   steps, 
   stepStats, 
@@ -68,6 +86,7 @@ export const ProcessMap: React.FC<Props> = ({
   const [positions, setPositions] = useState<Record<string, Position>>({});
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [settlingId, setSettlingId] = useState<string | null>(null);
+  const [collapsedStepIds, setCollapsedStepIds] = useState<Record<string, boolean>>({});
   const [dragPreview, setDragPreview] = useState<{ id: string; offsetX: number; offsetY: number } | null>(null);
   const dragDeltaRef = useRef({ x: 0, y: 0 });
   const dragFrameRef = useRef<number | null>(null);
@@ -107,6 +126,91 @@ export const ProcessMap: React.FC<Props> = ({
       return hasChanges ? newPos : prev;
     });
   }, [steps]);
+
+  useEffect(() => {
+    setCollapsedStepIds((prev) => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+
+      steps.forEach((step) => {
+        next[step.id] = prev[step.id] ?? false;
+        if (!(step.id in prev)) {
+          changed = true;
+        }
+      });
+
+      if (Object.keys(prev).length !== steps.length) {
+        changed = true;
+      }
+
+      return changed ? next : prev;
+    });
+  }, [steps]);
+
+  const fitViewToProcess = useCallback(() => {
+    const container = containerRef.current;
+    if (!container || steps.length === 0) {
+      setScale(1);
+      setPan({ x: 0, y: 0 });
+      return;
+    }
+
+    const positionedSteps = steps
+      .map((step) => ({
+        step,
+        collapsed: collapsedStepIds[step.id] || false,
+        position: positions[step.id] || (typeof step.x === 'number' && typeof step.y === 'number' ? { x: step.x, y: step.y } : null),
+      }))
+      .filter((entry): entry is { step: ProcessStep; collapsed: boolean; position: Position } => entry.position !== null);
+
+    if (positionedSteps.length === 0) {
+      setScale(1);
+      setPan({ x: 0, y: 0 });
+      return;
+    }
+
+    const bounds = positionedSteps.reduce(
+      (acc, { step, collapsed, position }) => {
+        const { width, height } = getStepDimensions(step.type, collapsed);
+        return {
+          minX: Math.min(acc.minX, position.x),
+          minY: Math.min(acc.minY, position.y),
+          maxX: Math.max(acc.maxX, position.x + width),
+          maxY: Math.max(acc.maxY, position.y + height),
+        };
+      },
+      { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+    );
+
+    const rect = container.getBoundingClientRect();
+    const padding = 96;
+    const contentWidth = Math.max(1, bounds.maxX - bounds.minX);
+    const contentHeight = Math.max(1, bounds.maxY - bounds.minY);
+    const nextScale = Math.max(
+      0.22,
+      Math.min((rect.width - padding) / contentWidth, (rect.height - padding) / contentHeight, 1.25)
+    );
+    const centerX = bounds.minX + contentWidth / 2;
+    const centerY = bounds.minY + contentHeight / 2;
+
+    setScale(nextScale);
+    setPan({
+      x: Math.round(rect.width / 2 - centerX * nextScale),
+      y: Math.round(rect.height / 2 - centerY * nextScale),
+    });
+  }, [collapsedStepIds, positions, steps]);
+
+  const hasAutoFitRef = useRef(false);
+
+  useEffect(() => {
+    if (hasAutoFitRef.current || steps.length === 0 || Object.keys(positions).length < steps.length) {
+      return;
+    }
+
+    hasAutoFitRef.current = true;
+    const frameId = window.requestAnimationFrame(fitViewToProcess);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [fitViewToProcess, positions, steps.length]);
 
     const handlePanStart = (e: React.MouseEvent) => {
       const target = e.target as HTMLElement;
@@ -158,6 +262,19 @@ export const ProcessMap: React.FC<Props> = ({
   const handleAddStep = (type: 'process' | 'start' | 'end') => {
     onAddStep(type, getViewportSpawnPosition(type));
   };
+
+  const toggleStepCollapse = useCallback((stepId: string) => {
+    setCollapsedStepIds((prev) => ({
+      ...prev,
+      [stepId]: !prev[stepId],
+    }));
+  }, []);
+
+  const setAllStepsCollapsed = useCallback((collapsed: boolean) => {
+    setCollapsedStepIds(
+      Object.fromEntries(steps.map((step) => [step.id, collapsed]))
+    );
+  }, [steps]);
 
   const handleNodeDragStart = (e: React.MouseEvent, id: string) => {
     e.preventDefault();
@@ -345,10 +462,8 @@ export const ProcessMap: React.FC<Props> = ({
         const toPos = effectivePositions[toId] || {x:0, y:0};
         
         // Dimensions vary by node type
-          const w1 = fromStep?.type === 'process' ? NODE_WIDTH : START_END_WIDTH;
-          const h1 = fromStep?.type === 'process' ? NODE_HEIGHT : fromStep?.type === 'start' ? START_HEIGHT : END_HEIGHT;
-          const w2 = toStep?.type === 'process' ? NODE_WIDTH : START_END_WIDTH;
-          const h2 = toStep?.type === 'process' ? NODE_HEIGHT : toStep?.type === 'start' ? START_HEIGHT : END_HEIGHT;
+          const { width: w1, height: h1 } = getStepDimensions(fromStep?.type, fromStep ? (collapsedStepIds[fromStep.id] || false) : false);
+          const { width: w2, height: h2 } = getStepDimensions(toStep?.type, toStep ? (collapsedStepIds[toStep.id] || false) : false);
 
         const fromCenter = { x: fromPos.x + w1/2, y: fromPos.y + h1/2 };
         const toCenter = { x: toPos.x + w2/2, y: toPos.y + h2/2 };
@@ -390,8 +505,7 @@ export const ProcessMap: React.FC<Props> = ({
         const getOutwardDir = (pos: Position, id: string) => {
         const rectPos = effectivePositions[id] || {x:0,y:0};
       const s = stepById.get(id);
-            const w = s?.type === 'process' ? NODE_WIDTH : START_END_WIDTH;
-            const h = s?.type === 'process' ? NODE_HEIGHT : s?.type === 'start' ? START_HEIGHT : END_HEIGHT;
+            const { width: w, height: h } = getStepDimensions(s?.type, s ? (collapsedStepIds[s.id] || false) : false);
             
             // Simple proximity check
             if (Math.abs(pos.x - (rectPos.x + w)) < 2) return { x: 1, y: 0 }; // Right
@@ -432,7 +546,7 @@ export const ProcessMap: React.FC<Props> = ({
         });
     });
     return lines;
-  }, [effectivePositions, stepById, steps]);
+  }, [collapsedStepIds, effectivePositions, stepById, steps]);
 
   const connectionByRoute = useMemo(() => {
     const map = new Map<string, (typeof connections)[number]>();
@@ -477,24 +591,27 @@ export const ProcessMap: React.FC<Props> = ({
   }, [steps]);
 
     return (
-     <div className="relative w-full h-[72vh] min-h-[560px] bg-slate-950 overflow-hidden border border-slate-800 rounded-2xl select-none group shadow-inner">
+     <div className="relative w-full h-[calc(100vh-15rem)] min-h-[620px] bg-slate-950 overflow-hidden border border-slate-800 rounded-2xl select-none group shadow-inner xl:h-[calc(100vh-13rem)]">
        <div className="absolute left-4 top-4 z-50 flex flex-wrap gap-2 rounded-2xl border border-slate-800 bg-slate-950/85 p-2 shadow-2xl backdrop-blur-sm">
          <button onClick={() => handleAddStep('start')} className="flex items-center gap-1.5 rounded-xl bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 transition-colors"><PlayCircle size={14}/> Start</button>
          <button onClick={() => handleAddStep('process')} className="flex items-center gap-1.5 rounded-xl bg-blue-500/10 px-3 py-2 text-xs font-semibold text-blue-300 hover:bg-blue-500/20 transition-colors"><Box size={14}/> Process</button>
          <button onClick={() => handleAddStep('end')} className="flex items-center gap-1.5 rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 transition-colors"><StopCircle size={14}/> End</button>
+         <div className="mx-1 hidden h-8 w-px bg-slate-800 lg:block" />
+         <button onClick={() => setAllStepsCollapsed(true)} className="hidden items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors lg:flex"><Minimize2 size={14}/> Compact all</button>
+         <button onClick={() => setAllStepsCollapsed(false)} className="hidden items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors lg:flex"><PanelsTopLeft size={14}/> Expand all</button>
        </div>
 
        <div className="absolute top-4 right-4 z-50 flex flex-col gap-2 bg-slate-950/85 p-2 rounded-2xl backdrop-blur-sm border border-slate-800 shadow-2xl">
          <button title="Zoom in" onClick={() => setScale(s => Math.min(s + 0.1, 3))} className="p-2 hover:bg-slate-800 rounded-xl text-slate-300 transition-colors"><ZoomIn size={18}/></button>
          <button title="Zoom out" onClick={() => setScale(s => Math.max(s - 0.1, 0.2))} className="p-2 hover:bg-slate-800 rounded-xl text-slate-300 transition-colors"><ZoomOut size={18}/></button>
-         <button title="Reset view" onClick={() => { setScale(1); setPan({x:0,y:0}); }} className="p-2 hover:bg-slate-800 rounded-xl text-slate-300 transition-colors"><Maximize size={18}/></button>
+         <button title="Fit full process" onClick={fitViewToProcess} className="p-2 hover:bg-slate-800 rounded-xl text-slate-300 transition-colors"><Maximize size={18}/></button>
          <div className="h-px bg-slate-700 my-1"/>
          <div className="p-2 text-slate-500 cursor-move flex justify-center" title="Drag canvas to pan"><Move size={18}/></div>
        </div>
 
        <div className="absolute bottom-4 left-4 z-50 hidden md:flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/85 px-3 py-2 text-xs text-slate-400 backdrop-blur-sm">
          <MousePointer2 size={14} className="text-blue-300" />
-         <span>Tip: use edit icons to configure routing and processing rules.</span>
+         <span>Presentation tip: use Fit to keep the full flow in frame.</span>
        </div>
 
        <div className="absolute bottom-4 right-4 z-50 rounded-full border border-slate-800 bg-slate-950/85 px-3 py-2 text-xs font-mono text-slate-400 backdrop-blur-sm">
@@ -629,9 +746,11 @@ export const ProcessMap: React.FC<Props> = ({
                         simulationTimeMs={simulationTimeMs}
                         onEdit={editHandlersByStepId.get(step.id) || (() => onEditStep(step))}
                         onRemove={removeHandlersByStepId.get(step.id) || (() => onRemoveStep(step.id))}
+                        onToggleCollapse={() => toggleStepCollapse(step.id)}
                         style={{ left: pos.x, top: pos.y }}
                         onMouseDown={dragHandlersByStepId.get(step.id)}
                         isDragging={draggingId === step.id || settlingId === step.id}
+                        isCollapsed={collapsedStepIds[step.id] || false}
                       />
                   );
               })}

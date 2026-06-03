@@ -1,7 +1,7 @@
 
 import React, { forwardRef, memo } from 'react';
 import { ProcessStep, StepStats, WorkItem } from '../types';
-import { Users, Clock, Edit2, Trash2, GripHorizontal, ListFilter, Play, Square, AlertTriangle, CheckCircle2, Ban, XCircle, Timer } from 'lucide-react';
+import { Users, Clock, Edit2, Trash2, GripHorizontal, ListFilter, Play, Square, AlertTriangle, CheckCircle2, Ban, XCircle, Timer, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface Props {
   step: ProcessStep;
@@ -10,9 +10,11 @@ interface Props {
   simulationTimeMs: number;
   onEdit: () => void;
   onRemove: () => void;
+  onToggleCollapse: () => void;
   style?: React.CSSProperties;
   onMouseDown?: (e: React.MouseEvent) => void;
   isDragging?: boolean;
+  isCollapsed?: boolean;
 }
 
 const ARRIVAL_UNIT_LABELS: Record<string, string> = {
@@ -37,6 +39,17 @@ const ARRIVAL_UNIT_TO_MS: Record<string, number> = {
   year: 365 * 24 * 60 * 60 * 1000,
 };
 
+const DURATION_UNIT_LABELS: Record<string, string> = {
+  ms: 'ms',
+  s: 's',
+  min: 'min',
+  h: 'h',
+  day: 'day',
+  week: 'week',
+  month: 'month',
+  year: 'year',
+};
+
 const formatMetricTime = (milliseconds: number): string => {
   if (!Number.isFinite(milliseconds) || milliseconds <= 0) {
     return '0s';
@@ -57,15 +70,124 @@ const formatMetricTime = (milliseconds: number): string => {
   return `${Math.round(milliseconds)}ms`;
 };
 
-const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, items, simulationTimeMs, onEdit, onRemove, style, onMouseDown, isDragging = false }, ref) => {
+const formatMetricTimeInUnit = (milliseconds: number, unit: string): string => {
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) {
+    return `0${DURATION_UNIT_LABELS[unit] || unit}`;
+  }
+
+  const divisor = ARRIVAL_UNIT_TO_MS[unit] || 1000;
+  const value = milliseconds / divisor;
+  const precision = unit === 'ms' ? 0 : value >= 100 ? 0 : value >= 10 ? 1 : 2;
+
+  return `${value.toFixed(precision)}${DURATION_UNIT_LABELS[unit] || unit}`;
+};
+
+const formatCompactDuration = (step: ProcessStep, isDelayMode: boolean) => {
+  if (step.type === 'start') {
+    const unit = ARRIVAL_UNIT_LABELS[step.arrivalUnit || 's'] || 'sim sec';
+    if (step.arrivalInputMode === 'interval') {
+      return step.randomnessMode === 'range'
+        ? `${step.minArrivalRate ?? 0}-${step.maxArrivalRate ?? 0} ${unit}`
+        : `${step.arrivalRate ?? 0} ${unit}`;
+    }
+
+    return step.randomnessMode === 'range'
+      ? `${step.minArrivalRate ?? 0}-${step.maxArrivalRate ?? 0}/${unit}`
+      : `${step.arrivalRate ?? 0}/${unit}`;
+  }
+
+  if (step.randomnessMode === 'range') {
+    return `${step.minProcessingTime ?? 0}-${step.maxProcessingTime ?? 0}${step.rangeTimeUnit || step.processingTimeUnit || 'ms'}`;
+  }
+
+  return `${step.processingTime ?? 0}${step.processingTimeUnit || 'ms'}${step.variance > 0 && !isDelayMode ? ` ±${Math.round(step.variance * 100)}%` : ''}`;
+};
+
+const CompactStatChip: React.FC<{ label: string; value: string | number; tone?: string }> = ({ label, value, tone = 'text-slate-200' }) => (
+  <div className="min-w-0 rounded-xl border border-slate-800 bg-slate-950/75 px-2.5 py-2 text-center">
+    <div className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-500">{label}</div>
+    <div className={`mt-1 truncate font-mono text-sm font-bold ${tone}`}>{value}</div>
+  </div>
+);
+
+const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, items, simulationTimeMs, onEdit, onRemove, onToggleCollapse, style, onMouseDown, isDragging = false, isCollapsed = false }, ref) => {
   const queuedItems = items.filter(i => i.status === 'queued');
   const processingItems = items.filter(i => i.status === 'processing');
   const totalCompleted = stats?.totalProcessed || 0;
   const avgCompletedTime = stats?.avgCompletionTime || 0;
+  const endTimeUnit = step.endTimeUnit || 'min';
   
   const isBottleneck = (stats?.queueLength || 0) > 10 && (stats?.utilization || 0) > 0.9;
   const baseColor = step.color || '#64748b';
   const isDelayMode = step.simulationMode === 'delay';
+  const compactDuration = formatCompactDuration(step, isDelayMode);
+
+  if (isCollapsed) {
+    const compactWidth = step.type === 'process' ? 'w-[320px]' : step.type === 'start' ? 'w-[260px]' : 'w-[280px]';
+    const accentTone = step.type === 'start' ? 'text-emerald-300' : step.type === 'end' ? 'text-rose-300' : isBottleneck ? 'text-red-300' : 'text-blue-300';
+    const headerLabel = step.type === 'start' ? 'Start' : step.type === 'end' ? 'End' : isDelayMode ? 'Delay' : 'Step';
+
+    return (
+      <div
+        ref={ref}
+        data-process-node="true"
+        style={{
+          ...style,
+          borderColor: isBottleneck ? '#ef4444' : baseColor,
+          boxShadow: isBottleneck ? `0 0 20px rgba(239, 68, 68, 0.3)` : `0 4px 18px ${baseColor}28`,
+          backgroundColor: '#0f172a',
+        }}
+        className={`absolute ${compactWidth} overflow-hidden rounded-2xl border-2 z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
+      >
+        <div className="flex cursor-grab items-start justify-between gap-3 border-b border-slate-800/80 bg-slate-900/85 p-3 active:cursor-grabbing" onMouseDown={onMouseDown}>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <GripHorizontal size={15} className="shrink-0 text-slate-600" />
+              <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{headerLabel}</span>
+              {(step.failureProbability > 0 || step.cancellationProbability > 0) && <AlertTriangle size={12} className="shrink-0 text-amber-400" />}
+            </div>
+            <div className="mt-1 truncate text-sm font-bold text-slate-100" title={step.name}>{step.name}</div>
+            <div className="mt-1 flex items-center gap-2 text-xs text-slate-400">
+              <span className={`font-mono ${accentTone}`}>{compactDuration}</span>
+              {step.type === 'process' && !isDelayMode && <span className="font-mono">R{step.capacity}</span>}
+            </div>
+          </div>
+          <div className="flex shrink-0 gap-1" onMouseDown={e => e.stopPropagation()}>
+            <button onClick={onToggleCollapse} className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white" title="Expand card"><ChevronDown size={14} /></button>
+            <button onClick={onEdit} className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white" title="Edit"><Edit2 size={13}/></button>
+            <button onClick={onRemove} className="rounded p-1 text-red-400 transition-colors hover:bg-red-900/30 hover:text-red-300" title="Delete"><Trash2 size={13}/></button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-4 gap-2 bg-gradient-to-b from-slate-950 to-slate-900 p-3">
+          {step.type === 'start' && (
+            <>
+              <CompactStatChip label="Out" value={totalCompleted} tone="text-emerald-300" />
+              <CompactStatChip label="Batch" value={Math.max(1, Math.round(step.arrivalBatchSize ?? 1))} />
+              <CompactStatChip label="Err" value={stats?.totalFailed || 0} tone="text-red-300" />
+              <CompactStatChip label="Can" value={stats?.totalCancelled || 0} tone="text-slate-300" />
+            </>
+          )}
+          {step.type === 'end' && (
+            <>
+              <CompactStatChip label="Done" value={totalCompleted} tone="text-rose-300" />
+              <CompactStatChip label="Avg" value={formatMetricTimeInUnit(avgCompletedTime, endTimeUnit)} tone="text-blue-300" />
+              <CompactStatChip label="Fail" value={stats?.totalFailed || 0} tone="text-red-300" />
+              <CompactStatChip label="Live" value={items.filter(item => !['finished', 'cancelled', 'error'].includes(item.status)).length} />
+            </>
+          )}
+          {step.type === 'process' && (
+            <>
+              <CompactStatChip label="Q" value={queuedItems.length} tone={queuedItems.length > 0 ? 'text-amber-300' : 'text-slate-300'} />
+              <CompactStatChip label={isDelayMode ? 'A' : 'P'} value={processingItems.length} tone={isDelayMode ? 'text-cyan-300' : 'text-blue-300'} />
+              <CompactStatChip label="U" value={isDelayMode ? 'Delay' : `${((stats?.utilization || 0) * 100).toFixed(0)}%`} tone={isDelayMode ? 'text-cyan-300' : isBottleneck ? 'text-red-300' : 'text-emerald-300'} />
+              <CompactStatChip label="Out" value={totalCompleted} tone="text-emerald-300" />
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   // --- START NODE RENDERING ---
   if (step.type === 'start') {
@@ -105,6 +227,7 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
             </div>
           </div>
           <div className="flex gap-1 shrink-0" onMouseDown={e => e.stopPropagation()}>
+            <button onClick={onToggleCollapse} className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white" title="Collapse card"><ChevronUp size={12}/></button>
             <button onClick={onEdit} className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"><Edit2 size={12}/></button>
             <button onClick={onRemove} className="rounded p-1 text-red-400 transition-colors hover:bg-red-900/30 hover:text-red-300"><Trash2 size={12}/></button>
           </div>
@@ -150,6 +273,7 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
                 </div>
               </div>
               <div className="flex gap-1 shrink-0" onMouseDown={e => e.stopPropagation()}>
+                <button onClick={onToggleCollapse} className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white" title="Collapse card"><ChevronUp size={12}/></button>
                 <button onClick={onEdit} className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white"><Edit2 size={12}/></button>
                 <button onClick={onRemove} className="rounded p-1 text-red-400 transition-colors hover:bg-red-900/30 hover:text-red-300"><Trash2 size={12}/></button>
                 </div>
@@ -164,8 +288,8 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
               </div>
               <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
                 <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Avg Time</div>
-                <div className="mt-1 font-mono text-xl font-bold text-slate-100">{formatMetricTime(avgCompletedTime)}</div>
-                <div className="text-[10px] text-slate-500">average end-to-end flow time</div>
+                <div className="mt-1 font-mono text-xl font-bold text-slate-100">{formatMetricTimeInUnit(avgCompletedTime, endTimeUnit)}</div>
+                <div className="text-[10px] text-slate-500">average end-to-end flow time · {DURATION_UNIT_LABELS[endTimeUnit] || endTimeUnit}</div>
               </div>
             </div>
 
@@ -236,6 +360,7 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
           </div>
         </div>
         <div className="flex gap-1 shrink-0" onMouseDown={e => e.stopPropagation()}>
+          <button onClick={onToggleCollapse} className="text-slate-400 hover:text-white p-1 hover:bg-slate-700 rounded transition-colors" title="Collapse card"><ChevronUp size={14}/></button>
             <button onClick={onEdit} className="text-slate-400 hover:text-white p-1 hover:bg-slate-700 rounded transition-colors"><Edit2 size={14}/></button>
             <button onClick={onRemove} className="text-red-400 hover:text-red-300 p-1 hover:bg-red-900/30 rounded transition-colors"><Trash2 size={14}/></button>
         </div>
@@ -340,8 +465,10 @@ export const ProcessNode = memo(ProcessNodeComponent, (prevProps, nextProps) => 
     && prevProps.simulationTimeMs === nextProps.simulationTimeMs
     && prevProps.onEdit === nextProps.onEdit
     && prevProps.onRemove === nextProps.onRemove
+    && prevProps.onToggleCollapse === nextProps.onToggleCollapse
     && prevProps.onMouseDown === nextProps.onMouseDown
     && prevProps.isDragging === nextProps.isDragging
+    && prevProps.isCollapsed === nextProps.isCollapsed
     && prevProps.style?.left === nextProps.style?.left
     && prevProps.style?.top === nextProps.style?.top;
 });
