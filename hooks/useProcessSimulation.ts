@@ -46,7 +46,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
   // Persistent Counters for Steps (Map<StepId, Counts>)
   // We need this because 'stepStats' state is regenerated every frame
-  const stepCountersRef = useRef<Record<string, { processed: number; failed: number; cancelled: number; totalCompletionTime: number; totalWaitTime: number; totalStarted: number }>>({});
+  const stepCountersRef = useRef<Record<string, { processed: number; failed: number; cancelled: number; totalCompletionTime: number; totalProcessingTime: number; totalWaitTime: number; totalStarted: number }>>({});
 
   useEffect(() => {
     stepsRef.current = config.steps;
@@ -58,7 +58,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         }
         // Initialize counters
         if (!stepCountersRef.current[s.id]) {
-          stepCountersRef.current[s.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
+          stepCountersRef.current[s.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
         }
     });
   }, [config.steps]);
@@ -83,7 +83,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     nextSpawnTimeRef.current = {};
     stepCountersRef.current = {}; 
     config.steps.forEach(s => {
-      stepCountersRef.current[s.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
+      stepCountersRef.current[s.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
     });
   }, [config.steps]);
 
@@ -149,9 +149,10 @@ export const useProcessSimulation = (config: SimulationConfig) => {
   const calculateProcessingDuration = (step: ProcessStep, item: WorkItem): number => {
       const fixedUnitMultiplier = TIME_UNIT_TO_MS[step.processingTimeUnit || 'ms'];
       const rangeUnitMultiplier = TIME_UNIT_TO_MS[step.rangeTimeUnit || step.processingTimeUnit || 'ms'];
+      const isDelayMode = step.simulationMode === 'delay';
 
     // 1. Check Source Rule Override (Fixed Mode only usually, but applies generally)
-    if (step.randomnessMode === 'fixed' && item.previousStepId && step.sourceProcessingTimes && step.sourceProcessingTimes[item.previousStepId]) {
+    if (!isDelayMode && step.randomnessMode === 'fixed' && item.previousStepId && step.sourceProcessingTimes && step.sourceProcessingTimes[item.previousStepId]) {
         const base = safeNumber(step.sourceProcessingTimes[item.previousStepId], 1000) * fixedUnitMultiplier;
          const speedNoise = 1 + (Math.random() * 2 - 1) * safeNumber(step.variance, 0);
          return Math.max(MIN_PROCESSING_DURATION_MS, base * speedNoise);
@@ -167,6 +168,10 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
     // 3. Default Fixed Mode
     const base = safeNumber(step.processingTime, 1000) * fixedUnitMultiplier;
+    if (isDelayMode) {
+      return Math.max(MIN_PROCESSING_DURATION_MS, base);
+    }
+
     const speedNoise = 1 + (Math.random() * 2 - 1) * safeNumber(step.variance, 0);
     return Math.max(MIN_PROCESSING_DURATION_MS, base * speedNoise);
   };
@@ -206,7 +211,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
     item.totalWaitTime += waitTime;
     if (!stepCountersRef.current[step.id]) {
-      stepCountersRef.current[step.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
+      stepCountersRef.current[step.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
     }
     stepCountersRef.current[step.id].totalWaitTime += waitTime;
     stepCountersRef.current[step.id].totalStarted++;
@@ -355,7 +360,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         item.status = 'cancelled';
         item.queueCancellationCheckedAtSimulationMs = undefined;
         statsRef.current.totalItemsCancelled++;
-        if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
+        if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
         stepCountersRef.current[item.currentStepId].cancelled++;
       };
 
@@ -467,7 +472,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           // Track stats for End Nodes
           if (item.currentStepId && stepMap.get(item.currentStepId)?.type === 'end') {
             if (!stepCountersRef.current[item.currentStepId]) {
-              stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
+              stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
             }
             stepCountersRef.current[item.currentStepId].processed++;
             stepCountersRef.current[item.currentStepId].totalCompletionTime += cycleTime;
@@ -486,7 +491,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         if (Math.random() < failChance) {
           item.status = 'error';
           statsRef.current.totalItemsFailed++;
-          if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
+          if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
           stepCountersRef.current[item.currentStepId].failed++;
 
           if (currentStep.simulationMode !== 'delay') {
@@ -501,8 +506,9 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         const nextId = getNextStepId(currentStep);
 
         // Increment Processed Count for this step
-        if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
+        if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
         stepCountersRef.current[item.currentStepId].processed++;
+        stepCountersRef.current[item.currentStepId].totalProcessingTime += safeDuration;
 
         const completedStepId = item.currentStepId;
 
@@ -686,7 +692,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
       // Construct Step Stats for UI
         const newStepStats: StepStats[] = steps.map((s: ProcessStep) => {
-          const counters = stepCountersRef.current[s.id] || { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalWaitTime: 0, totalStarted: 0 };
+          const counters = stepCountersRef.current[s.id] || { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
           const stepActiveItems = itemsRef.current.filter((i: WorkItem) => i.currentStepId === s.id);
           const queueLength = stepActiveItems.filter((i: WorkItem) => i.status === 'queued').length;
           const activeProcessing = stepActiveItems.filter((i: WorkItem) => i.status === 'processing').length;
@@ -704,7 +710,11 @@ export const useProcessSimulation = (config: SimulationConfig) => {
               activeProcessing,
               utilization,
               avgWaitTime: counters.totalStarted > 0 ? counters.totalWaitTime / counters.totalStarted : 0,
-              avgCompletionTime: counters.processed > 0 ? counters.totalCompletionTime / counters.processed : 0,
+              avgCompletionTime: counters.processed > 0
+                ? s.type === 'end'
+                  ? counters.totalCompletionTime / counters.processed
+                  : counters.totalProcessingTime / counters.processed
+                : 0,
               totalProcessed: counters.processed,
               totalFailed: counters.failed,
               totalCancelled: counters.cancelled
