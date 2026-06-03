@@ -95,45 +95,6 @@ const toPositiveNumber = (value: unknown, fallback: number, min = 0.001) => {
 
 const clampProbability = (value: number) => Math.max(0, Math.min(1, value));
 
-const normalizeConnections = (connections: ProcessStep['connections']) => {
-  if (connections.length === 0) {
-    return [];
-  }
-
-  const probabilityTotal = connections.reduce((sum, connection) => sum + connection.probability, 0);
-
-  if (probabilityTotal > 0) {
-    return connections.map((connection) => ({
-      ...connection,
-      probability: connection.probability / probabilityTotal,
-    }));
-  }
-
-  const fallbackProbability = 1 / connections.length;
-  return connections.map((connection) => ({
-    ...connection,
-    probability: fallbackProbability,
-  }));
-};
-
-const removeSourceProcessingRule = (rules: Record<string, number> | undefined, removedStepId: string) => (
-  Object.fromEntries(
-    Object.entries(rules || {}).filter(([sourceId]) => sourceId !== removedStepId)
-  )
-);
-
-const removeStepReferences = (steps: ProcessStep[], removedStepId: string) => (
-  steps
-    .filter((step) => step.id !== removedStepId)
-    .map((step) => ({
-      ...step,
-      connections: normalizeConnections(
-        step.connections.filter((connection) => connection.targetId !== removedStepId)
-      ),
-      sourceProcessingTimes: removeSourceProcessingRule(step.sourceProcessingTimes, removedStepId),
-    }))
-);
-
 const getArrivalUnitLabel = (unit?: DurationUnit) => (
   ARRIVAL_UNITS.find((option) => option.value === unit)?.label || 'sim second'
 );
@@ -236,7 +197,12 @@ const sanitizeConfig = (rawConfig: unknown): SimulationConfig => {
   const validIds = new Set(sanitizedSteps.map((step) => step.id));
   const normalizedSteps = sanitizedSteps.map((step) => {
     const validConnections = step.connections.filter((connection) => validIds.has(connection.targetId) && connection.targetId !== step.id);
-    const normalizedConnections = normalizeConnections(validConnections);
+    const probabilityTotal = validConnections.reduce((sum, connection) => sum + connection.probability, 0);
+    const normalizedConnections = validConnections.length === 0
+      ? []
+      : probabilityTotal > 0
+        ? validConnections.map((connection) => ({ ...connection, probability: connection.probability / probabilityTotal }))
+        : validConnections.map((connection) => ({ ...connection, probability: 1 / validConnections.length }));
 
     const filteredSourceRules = Object.fromEntries(
       Object.entries(step.sourceProcessingTimes || {}).filter(([sourceId]) => validIds.has(sourceId))
@@ -330,27 +296,10 @@ const App: React.FC = () => {
   };
 
   const removeStep = (id: string) => {
-    setConfig((p) => ({
+    setConfig(p => ({
       ...p,
-      steps: removeStepReferences(p.steps, id),
+      steps: p.steps.filter(s => s.id !== id)
     }));
-    setEditingStep((current) => {
-      if (!current) {
-        return null;
-      }
-
-      if (current.id === id) {
-        return null;
-      }
-
-      return {
-        ...current,
-        connections: normalizeConnections(
-          current.connections.filter((connection) => connection.targetId !== id)
-        ),
-        sourceProcessingTimes: removeSourceProcessingRule(current.sourceProcessingTimes, id),
-      };
-    });
   };
 
   const updateStepPosition = (id: string, position: CanvasSpawnPosition) => {
@@ -919,6 +868,7 @@ const App: React.FC = () => {
                   steps={config.steps} 
                   stepStats={stepStats} 
                   items={items}
+                simulationTimeMs={simulationTimeMs}
                   isRunning={config.isRunning}
                   onEditStep={(s) => { setEditingStep(s); setActiveTab('basic'); }}
                   onRemoveStep={removeStep}

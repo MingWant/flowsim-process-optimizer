@@ -9,6 +9,7 @@ interface Props {
   steps: ProcessStep[];
   stepStats: StepStats[];
   items: WorkItem[];
+  simulationTimeMs: number;
   isRunning: boolean;
   onEditStep: (step: ProcessStep) => void;
   onRemoveStep: (id: string) => void;
@@ -52,6 +53,7 @@ export const ProcessMap: React.FC<Props> = ({
   steps, 
   stepStats, 
   items, 
+  simulationTimeMs,
   isRunning,
   onEditStep, 
   onRemoveStep,
@@ -303,7 +305,7 @@ export const ProcessMap: React.FC<Props> = ({
   }, [items]);
 
   const transmittingItems = useMemo(
-    () => items.filter((item) => item.status === 'transmitting'),
+    () => items.filter((item) => item.status === 'transmitting' || typeof item.visualTransmissionProgress === 'number'),
     [items]
   );
 
@@ -572,15 +574,16 @@ export const ProcessMap: React.FC<Props> = ({
 
                 {/* Render Transmitting Items as Dots */}
                 {transmittingItems.map(item => {
-                    const fromId = item.previousStepId || 'start'; // Fallback
-                    const toId = item.targetStepId;
+                    const fromId = item.visualPreviousStepId || item.previousStepId || 'start'; // Fallback
+                    const toId = item.visualTargetStepId || item.targetStepId;
 
                   const conn = toId ? connectionByRoute.get(`${fromId}->${toId}`) : undefined;
                     
                     if (!conn) return null;
 
                     // Calculate position based on progress
-                    const pos = getPointOnBezier(item.transmissionProgress, conn.p0, conn.p1, conn.p2, conn.p3);
+                    const progress = item.visualTransmissionProgress ?? item.transmissionProgress;
+                    const pos = getPointOnBezier(progress, conn.p0, conn.p1, conn.p2, conn.p3);
 
                     return (
                         <circle 
@@ -623,6 +626,7 @@ export const ProcessMap: React.FC<Props> = ({
                         step={step}
                         stats={stats}
                         items={stepItems}
+                        simulationTimeMs={simulationTimeMs}
                         onEdit={editHandlersByStepId.get(step.id) || (() => onEditStep(step))}
                         onRemove={removeHandlersByStepId.get(step.id) || (() => onRemoveStep(step.id))}
                         style={{ left: pos.x, top: pos.y }}

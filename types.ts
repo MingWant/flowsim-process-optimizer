@@ -71,6 +71,11 @@ export interface WorkItem {
   transmissionEndsAtSimulationMs?: number;
   transmissionStartedAtWallMs?: number;
   transmissionEndsAtWallMs?: number;
+  visualPreviousStepId?: string;
+  visualTargetStepId?: string | 'finished';
+  visualTransmissionStartedAtWallMs?: number;
+  visualTransmissionEndsAtWallMs?: number;
+  visualTransmissionProgress?: number;
 }
 
 export interface SimulationConfig {

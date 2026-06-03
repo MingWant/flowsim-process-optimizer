@@ -16,7 +16,7 @@ const TIME_UNIT_TO_MS = {
 
 const MIN_ARRIVAL_RATE = 0.000000001;
 
-const VISUAL_TRANSMISSION_SIM_MS = TRANSMISSION_DURATION;
+const BUSINESS_TRANSMISSION_SIM_MS = 0;
 
 export const useProcessSimulation = (config: SimulationConfig) => {
   const [items, setItems] = useState<WorkItem[]>([]);
@@ -38,7 +38,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
   const statsRef = useRef<SimulationStats>({ ...globalStats });
   const stepsRef = useRef<ProcessStep[]>(config.steps);
   
-  // Track when the next item should spawn for each start node
+  // Track the absolute simulated timestamp when the next item should spawn for each start node
   const nextSpawnTimeRef = useRef<Record<string, number>>({});
 
   // Persistent Counters for Steps (Map<StepId, Counts>)
@@ -180,10 +180,15 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     item.status = 'transmitting';
     item.transmissionProgress = 0;
     item.transmissionStartedAtSimulationMs = currentSimulationMs;
-    item.transmissionEndsAtSimulationMs = currentSimulationMs + VISUAL_TRANSMISSION_SIM_MS;
+    item.transmissionEndsAtSimulationMs = currentSimulationMs + BUSINESS_TRANSMISSION_SIM_MS;
     item.transmissionStartedAtWallMs = currentWallMs;
     item.transmissionEndsAtWallMs = currentWallMs + TRANSMISSION_DURATION;
-    item.totalTransmissionTime += VISUAL_TRANSMISSION_SIM_MS;
+    item.visualPreviousStepId = fromStepId;
+    item.visualTargetStepId = toStepId;
+    item.visualTransmissionStartedAtWallMs = currentWallMs;
+    item.visualTransmissionEndsAtWallMs = currentWallMs + TRANSMISSION_DURATION;
+    item.visualTransmissionProgress = 0;
+    item.totalTransmissionTime += BUSINESS_TRANSMISSION_SIM_MS;
   };
 
   const beginProcessing = (
@@ -264,20 +269,17 @@ export const useProcessSimulation = (config: SimulationConfig) => {
       const steps: ProcessStep[] = stepsRef.current;
       const stepMap = new Map<string, ProcessStep>(steps.map((s: ProcessStep) => [s.id, s]));
 
-      // 1. Arrival Logic (Timer Based)
-      // We reduce the 'time until next spawn' by dt
+        // 1. Arrival Logic (Absolute Simulated Event Time)
       for (const startNode of steps.filter((s: ProcessStep) => s.type === 'start')) {
           // Initialize if missing
           if (nextSpawnTimeRef.current[startNode.id] === undefined) {
              nextSpawnTimeRef.current[startNode.id] = 0; 
           }
           
-          let remaining = nextSpawnTimeRef.current[startNode.id];
-          if (isNaN(remaining)) remaining = 0;
+          let nextSpawnAt = nextSpawnTimeRef.current[startNode.id];
+          if (isNaN(nextSpawnAt)) nextSpawnAt = frameStartSimulationMs;
           
-          remaining -= dt;
-
-          if (remaining <= 0) {
+          while (nextSpawnAt <= simulationTimeRef.current) {
               // SPAWN
               // Determine immediate target
               let firstTargetId: string | 'finished' = 'finished';
@@ -296,16 +298,21 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                       progress: 0,
                       transmissionProgress: 0,
                       createdAt: now, // Wall clock for UI creation
-                      createdAtSimulationMs: simulationTimeRef.current,
+                      createdAtSimulationMs: nextSpawnAt,
                         completedAtSimulationMs: undefined,
                       totalTransmissionTime: 0,
                       totalWaitTime: 0,
                       totalProcessingTime: 0,
-                          stepEntryTime: simulationTimeRef.current,
+                          stepEntryTime: nextSpawnAt,
                           queuedAtSimulationMs: undefined,
+                        visualPreviousStepId: undefined,
+                        visualTargetStepId: undefined,
+                        visualTransmissionStartedAtWallMs: undefined,
+                        visualTransmissionEndsAtWallMs: undefined,
+                        visualTransmissionProgress: undefined,
                   };
 
-                  beginTransmission(newItem, startNode.id, firstTargetId, simulationTimeRef.current, now);
+                      beginTransmission(newItem, startNode.id, firstTargetId, nextSpawnAt, now);
 
                   itemsRef.current.push(newItem);
                   statsRef.current.totalItemsCreated++;
@@ -316,11 +323,10 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                   }
               }
 
-              // Reset Timer
-              remaining = calculateNextSpawnDelay(startNode);
+                  nextSpawnAt += calculateNextSpawnDelay(startNode);
           }
           
-          nextSpawnTimeRef.current[startNode.id] = remaining;
+                nextSpawnTimeRef.current[startNode.id] = nextSpawnAt;
       }
 
       // 2. Resource Tracking Setup
@@ -373,6 +379,30 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         stepUsage.set(stepId, currentUsage);
       };
 
+      const completeBusinessTransmission = (item: WorkItem, arrivalStepId: string | 'finished' | undefined, eventTime: number) => {
+        item.transmissionProgress = 1;
+        item.transmissionStartedAtSimulationMs = undefined;
+        item.transmissionEndsAtSimulationMs = undefined;
+        item.transmissionStartedAtWallMs = undefined;
+        item.transmissionEndsAtWallMs = undefined;
+
+        if (arrivalStepId === 'finished') {
+          item.completedAtSimulationMs = eventTime;
+          item.status = 'finished';
+          item.currentStepId = 'finished';
+          item.targetStepId = undefined;
+          return;
+        }
+
+        const arrivalStep = arrivalStepId ? stepMap.get(arrivalStepId) : undefined;
+        if (arrivalStep) {
+          beginArrivalAtStep(item, arrivalStep, eventTime);
+          if (arrivalStep.type === 'process' && arrivalStep.simulationMode !== 'delay') {
+            startQueuedItemsForStep(arrivalStep.id, eventTime);
+          }
+        }
+      };
+
       for (const step of steps) {
         if (step.type === 'process' && step.simulationMode !== 'delay') {
           startQueuedItemsForStep(step.id, frameStartSimulationMs);
@@ -382,6 +412,20 @@ export const useProcessSimulation = (config: SimulationConfig) => {
       // Pass 2: Process Items
       for (let i = 0; i < currentItems.length; i++) {
         const item = currentItems[i];
+
+        if (typeof item.visualTransmissionStartedAtWallMs === 'number' && typeof item.visualTransmissionEndsAtWallMs === 'number') {
+          const visualDuration = Math.max(0, item.visualTransmissionEndsAtWallMs - item.visualTransmissionStartedAtWallMs);
+          const visualElapsed = Math.max(0, Math.min(now - item.visualTransmissionStartedAtWallMs, visualDuration));
+          item.visualTransmissionProgress = visualDuration > 0 ? visualElapsed / visualDuration : 1;
+
+          if (now >= item.visualTransmissionEndsAtWallMs) {
+            item.visualPreviousStepId = undefined;
+            item.visualTargetStepId = undefined;
+            item.visualTransmissionStartedAtWallMs = undefined;
+            item.visualTransmissionEndsAtWallMs = undefined;
+            item.visualTransmissionProgress = undefined;
+          }
+        }
         
         // --- HANDLE TERMINAL STATES ---
         if (item.status === 'finished' || item.status === 'cancelled' || item.status === 'error') {
@@ -423,27 +467,8 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
           item.transmissionProgress = transmissionDuration > 0 ? elapsed / transmissionDuration : 1;
 
-          if (now >= wallEndsAt) {
-            item.transmissionProgress = 1;
-            item.transmissionStartedAtSimulationMs = undefined;
-            item.transmissionEndsAtSimulationMs = undefined;
-            item.transmissionStartedAtWallMs = undefined;
-            item.transmissionEndsAtWallMs = undefined;
-
-            if (arrivalStepId === 'finished') {
-              item.completedAtSimulationMs = endsAt;
-              item.status = 'finished';
-              item.currentStepId = 'finished';
-              item.targetStepId = undefined;
-            } else {
-              const arrivalStep = arrivalStepId ? stepMap.get(arrivalStepId) : undefined;
-              if (arrivalStep) {
-                beginArrivalAtStep(item, arrivalStep, endsAt);
-                if (arrivalStep.type === 'process' && arrivalStep.simulationMode !== 'delay') {
-                  startQueuedItemsForStep(arrivalStep.id, endsAt);
-                }
-              }
-            }
+          if (simulationTimeRef.current >= endsAt) {
+            completeBusinessTransmission(item, arrivalStepId, endsAt);
           }
           continue;
         }
@@ -475,12 +500,12 @@ export const useProcessSimulation = (config: SimulationConfig) => {
             const eventTime = endsAt;
 
           item.progress = Math.max(0, Math.min(1, elapsed / safeDuration));
-            item.totalProcessingTime = (item.totalProcessingTime || 0) - elapsed + Math.min(elapsed, safeDuration);
 
           if (simulationTimeRef.current >= endsAt) {
                 item.progress = 0; 
             item.processingStartedAtSimulationMs = undefined;
             item.processingEndsAtSimulationMs = undefined;
+            item.totalProcessingTime += safeDuration;
                 
                 // EXCEPTION: Failure
                 const failChance = safeNumber(currentStep.failureProbability, 0);
@@ -509,13 +534,16 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
                 if (nextId === 'finished') {
                   beginTransmission(item, currentStep.id, 'finished', eventTime, now);
+                  completeBusinessTransmission(item, 'finished', eventTime + BUSINESS_TRANSMISSION_SIM_MS);
                 } else {
                   const nextStep = stepMap.get(nextId);
 
                   if (nextStep?.type === 'end') {
                     beginTransmission(item, currentStep.id, nextStep.id, eventTime, now);
+                    completeBusinessTransmission(item, nextStep.id, eventTime + BUSINESS_TRANSMISSION_SIM_MS);
                   } else if (nextStep) {
                     beginTransmission(item, currentStep.id, nextStep.id, eventTime, now);
+                    completeBusinessTransmission(item, nextStep.id, eventTime + BUSINESS_TRANSMISSION_SIM_MS);
                   }
                 }
                 

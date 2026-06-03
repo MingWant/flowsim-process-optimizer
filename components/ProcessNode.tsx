@@ -7,6 +7,7 @@ interface Props {
   step: ProcessStep;
   stats: StepStats;
   items: WorkItem[];
+  simulationTimeMs: number;
   onEdit: () => void;
   onRemove: () => void;
   style?: React.CSSProperties;
@@ -45,7 +46,7 @@ const formatMetricTime = (milliseconds: number): string => {
   return `${Math.round(milliseconds)}ms`;
 };
 
-const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, items, onEdit, onRemove, style, onMouseDown, isDragging = false }, ref) => {
+const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, items, simulationTimeMs, onEdit, onRemove, style, onMouseDown, isDragging = false }, ref) => {
   const queuedItems = items.filter(i => i.status === 'queued');
   const processingItems = items.filter(i => i.status === 'processing');
   const totalCompleted = stats?.totalProcessed || 0;
@@ -268,7 +269,7 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
              {queuedItems.map((item, idx) => (
                 <div key={item.id} className="flex items-center justify-between text-[10px] bg-slate-900 px-2 py-1 rounded-lg text-slate-300 border border-slate-800">
                     <span className="font-mono text-slate-500">#{item.id.split('-')[1]}</span>
-                    <span className="text-slate-400">Wait: {(item.totalWaitTime/1000).toFixed(1)}s</span>
+                <span className="text-slate-400">Wait: {((item.totalWaitTime + Math.max(0, simulationTimeMs - (item.queuedAtSimulationMs ?? simulationTimeMs))) / 1000).toFixed(1)}s</span>
                     <div className={`w-2 h-2 rounded-full ${item.status === 'queued' ? 'bg-amber-500' : 'bg-slate-500'}`}></div>
                 </div>
              ))}
@@ -321,6 +322,7 @@ export const ProcessNode = memo(ProcessNodeComponent, (prevProps, nextProps) => 
   return prevProps.step === nextProps.step
     && prevProps.stats === nextProps.stats
     && prevProps.items === nextProps.items
+    && prevProps.simulationTimeMs === nextProps.simulationTimeMs
     && prevProps.onEdit === nextProps.onEdit
     && prevProps.onRemove === nextProps.onRemove
     && prevProps.onMouseDown === nextProps.onMouseDown
