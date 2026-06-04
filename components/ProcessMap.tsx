@@ -3,7 +3,7 @@ import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react'
 import { flushSync } from 'react-dom';
 import { ProcessStep, StepStats, WorkItem } from '../types';
 import { ProcessNode } from './ProcessNode';
-import { Move, ZoomIn, ZoomOut, Maximize, PlayCircle, Box, StopCircle, MousePointer2, Minimize2, PanelsTopLeft } from 'lucide-react';
+import { Move, ZoomIn, ZoomOut, Maximize, PlayCircle, Box, StopCircle, MousePointer2, Minimize2, PanelsTopLeft, Hand, Copy, ScanSearch, Trash2 } from 'lucide-react';
 
 interface Props {
   steps: ProcessStep[];
@@ -15,11 +15,24 @@ interface Props {
   onRemoveStep: (id: string) => void;
   onAddStep: (type: 'process' | 'start' | 'end', position?: Position) => void;
   onPositionChange: (id: string, position: Position) => void;
+  selectedStepIds: string[];
+  onSelectionChange: (stepIds: string[]) => void;
+  onCopySelected: () => void;
+  onDeleteSelected: () => void;
 }
 
 interface Position {
   x: number;
   y: number;
+}
+
+type InteractionMode = 'mixed' | 'pan' | 'select' | 'move';
+
+interface SelectionBox {
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
 }
 
 const NODE_WIDTH = 320;
@@ -77,10 +90,16 @@ export const ProcessMap: React.FC<Props> = ({
   onRemoveStep,
   onAddStep,
   onPositionChange,
+  selectedStepIds,
+  onSelectionChange,
+  onCopySelected,
+  onDeleteSelected,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [isControlPressed, setIsControlPressed] = useState(false);
   const [scale, setScale] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>('mixed');
   const [isPanning, setIsPanning] = useState(false);
   const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
   const [positions, setPositions] = useState<Record<string, Position>>({});
@@ -88,6 +107,8 @@ export const ProcessMap: React.FC<Props> = ({
   const [settlingId, setSettlingId] = useState<string | null>(null);
   const [collapsedStepIds, setCollapsedStepIds] = useState<Record<string, boolean>>({});
   const [dragPreview, setDragPreview] = useState<{ id: string; offsetX: number; offsetY: number } | null>(null);
+  const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
+  const selectionBaseIdsRef = useRef<string[]>([]);
   const dragDeltaRef = useRef({ x: 0, y: 0 });
   const dragFrameRef = useRef<number | null>(null);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
@@ -212,31 +233,262 @@ export const ProcessMap: React.FC<Props> = ({
     return () => window.cancelAnimationFrame(frameId);
   }, [fitViewToProcess, positions, steps.length]);
 
-    const handlePanStart = (e: React.MouseEvent) => {
-      const target = e.target as HTMLElement;
-      const isInteractiveElement = !!target.closest('button, input, textarea, select, [data-process-node]');
+  const viewportSelectionRect = useMemo(() => {
+    if (!selectionBox) {
+      return null;
+    }
 
-      if (!isInteractiveElement) {
-        setIsPanning(true);
-        setLastMousePos({ x: e.clientX, y: e.clientY });
-      }
+    return {
+      left: Math.min(selectionBox.startX, selectionBox.currentX),
+      top: Math.min(selectionBox.startY, selectionBox.currentY),
+      width: Math.abs(selectionBox.currentX - selectionBox.startX),
+      height: Math.abs(selectionBox.currentY - selectionBox.startY),
     };
+  }, [selectionBox]);
+
+  const computeSelectionInWorld = useCallback((box: SelectionBox) => {
+    const left = Math.min(box.startX, box.currentX);
+    const top = Math.min(box.startY, box.currentY);
+    const right = Math.max(box.startX, box.currentX);
+    const bottom = Math.max(box.startY, box.currentY);
+
+    const worldLeft = (left - pan.x) / scale;
+    const worldTop = (top - pan.y) / scale;
+    const worldRight = (right - pan.x) / scale;
+    const worldBottom = (bottom - pan.y) / scale;
+
+    return steps.filter((step) => {
+      const pos = positions[step.id] || (typeof step.x === 'number' && typeof step.y === 'number' ? { x: step.x, y: step.y } : null);
+      if (!pos) {
+        return false;
+      }
+
+      const { width, height } = getStepDimensions(step.type, collapsedStepIds[step.id] || false);
+      const stepLeft = pos.x;
+      const stepTop = pos.y;
+      const stepRight = pos.x + width;
+      const stepBottom = pos.y + height;
+
+      return stepLeft < worldRight && stepRight > worldLeft && stepTop < worldBottom && stepBottom > worldTop;
+    }).map((step) => step.id);
+  }, [collapsedStepIds, pan.x, pan.y, positions, scale, steps]);
+
+  const canPanCanvas = interactionMode === 'pan' || interactionMode === 'mixed';
+  const canMoveNodes = interactionMode === 'move' || interactionMode === 'mixed';
+  const isTemporarySelectActive = interactionMode === 'mixed' && isControlPressed;
+
+  const canvasCursor = useMemo(() => {
+    if (selectionBox) {
+      return 'crosshair';
+    }
+
+    if (isPanning) {
+      return 'grabbing';
+    }
+
+    if (draggingId) {
+      return 'default';
+    }
+
+    if (interactionMode === 'select' || isTemporarySelectActive) {
+      return 'crosshair';
+    }
+
+    if (interactionMode === 'pan') {
+      return 'grab';
+    }
+
+    if (interactionMode === 'move') {
+      return 'default';
+    }
+
+    if (interactionMode === 'mixed') {
+      return 'default';
+    }
+
+    return 'default';
+  }, [draggingId, interactionMode, isPanning, isTemporarySelectActive, selectionBox]);
+
+  const nodeDragHandleCursor = useMemo(() => {
+    if (draggingId) {
+      return 'move';
+    }
+
+    if (interactionMode === 'move') {
+      return 'move';
+    }
+
+    if (interactionMode === 'mixed') {
+      return isTemporarySelectActive ? 'crosshair' : 'move';
+    }
+
+    return 'default';
+  }, [draggingId, interactionMode, isTemporarySelectActive]);
+
+  const zoomAtClientPoint = useCallback((clientX: number, clientY: number, deltaY: number) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) {
+      return;
+    }
+
+    const mouseX = clientX - rect.left;
+    const mouseY = clientY - rect.top;
+    const delta = -deltaY * 0.001;
+
+    setScale((previousScale) => {
+      const nextScale = Math.min(Math.max(0.2, previousScale + delta), 3);
+
+      setPan((previousPan) => {
+        const worldX = (mouseX - previousPan.x) / previousScale;
+        const worldY = (mouseY - previousPan.y) / previousScale;
+
+        return {
+          x: mouseX - worldX * nextScale,
+          y: mouseY - worldY * nextScale,
+        };
+      });
+
+      return nextScale;
+    });
+  }, []);
+
+  const handlePanStart = (e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    const isInteractiveElement = !!target.closest('button, input, textarea, select, [data-process-node]');
+    const isTemporarySelectGesture = interactionMode === 'mixed' && e.ctrlKey;
+    const isSelectionGesture = interactionMode === 'select' || isTemporarySelectGesture;
+
+    if (isSelectionGesture) {
+      if (isInteractiveElement) {
+        return;
+      }
+
+      e.preventDefault();
+
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) {
+        return;
+      }
+
+      const nextBox = {
+        startX: e.clientX - rect.left,
+        startY: e.clientY - rect.top,
+        currentX: e.clientX - rect.left,
+        currentY: e.clientY - rect.top,
+      };
+
+      const isAdditiveSelection = isTemporarySelectGesture
+        ? e.metaKey || e.shiftKey
+        : e.metaKey || e.ctrlKey || e.shiftKey;
+      selectionBaseIdsRef.current = isAdditiveSelection ? selectedStepIds : [];
+
+      if (!isAdditiveSelection) {
+        onSelectionChange([]);
+      }
+
+      setSelectionBox(nextBox);
+      return;
+    }
+
+    if (!isInteractiveElement && canPanCanvas) {
+      setIsPanning(true);
+      setLastMousePos({ x: e.clientX, y: e.clientY });
+    }
+  };
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    if (interactionMode === 'mixed' && e.ctrlKey) {
+      e.preventDefault();
+    }
+  };
 
   const handlePanMove = (e: React.MouseEvent) => {
+    if (interactionMode === 'mixed') {
+      setIsControlPressed(e.ctrlKey);
+    }
+
     if (isPanning) {
         const dx = e.clientX - lastMousePos.x;
         const dy = e.clientY - lastMousePos.y;
         setPan(p => ({ x: p.x + dx, y: p.y + dy }));
         setLastMousePos({ x: e.clientX, y: e.clientY });
     }
+
+    if (selectionBox) {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) {
+        return;
+      }
+
+      const nextBox = {
+        ...selectionBox,
+        currentX: e.clientX - rect.left,
+        currentY: e.clientY - rect.top,
+      };
+      const nextSelectedIds = computeSelectionInWorld(nextBox);
+      const mergedSelection = Array.from(new Set([...selectionBaseIdsRef.current, ...nextSelectedIds]));
+
+      setSelectionBox(nextBox);
+      onSelectionChange(mergedSelection);
+    }
   };
 
-  const handlePanEnd = () => setIsPanning(false);
-  
-  const handleWheel = (e: React.WheelEvent) => {
-      const delta = -e.deltaY * 0.001;
-      setScale(s => Math.min(Math.max(0.2, s + delta), 3));
+  const handlePanEnd = () => {
+    setIsPanning(false);
+    setSelectionBox(null);
+    selectionBaseIdsRef.current = [];
   };
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Control') {
+        setIsControlPressed(true);
+      }
+    };
+
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key === 'Control') {
+        setIsControlPressed(false);
+      }
+    };
+
+    const handleBlur = () => {
+      setIsControlPressed(false);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, []);
+  
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const handleNativeWheel = (event: WheelEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      zoomAtClientPoint(event.clientX, event.clientY, event.deltaY);
+    };
+
+    container.addEventListener('wheel', handleNativeWheel, { passive: false });
+
+    return () => {
+      container.removeEventListener('wheel', handleNativeWheel);
+    };
+  }, [zoomAtClientPoint]);
 
   const getViewportSpawnPosition = (type: 'process' | 'start' | 'end'): Position => {
     const container = containerRef.current;
@@ -277,6 +529,10 @@ export const ProcessMap: React.FC<Props> = ({
   }, [steps]);
 
   const handleNodeDragStart = (e: React.MouseEvent, id: string) => {
+    if (!canMoveNodes) {
+      return;
+    }
+
     e.preventDefault();
     e.stopPropagation();
     if (settleTimerRef.current !== null) {
@@ -597,6 +853,12 @@ export const ProcessMap: React.FC<Props> = ({
          <button onClick={() => handleAddStep('process')} className="flex items-center gap-1.5 rounded-xl bg-blue-500/10 px-3 py-2 text-xs font-semibold text-blue-300 hover:bg-blue-500/20 transition-colors"><Box size={14}/> Process</button>
          <button onClick={() => handleAddStep('end')} className="flex items-center gap-1.5 rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 transition-colors"><StopCircle size={14}/> End</button>
          <div className="mx-1 hidden h-8 w-px bg-slate-800 lg:block" />
+         <button onClick={() => setInteractionMode('mixed')} className={`hidden items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors lg:flex ${interactionMode === 'mixed' ? 'bg-emerald-500/20 text-emerald-200' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}><MousePointer2 size={14}/> Mixed</button>
+         <button onClick={() => setInteractionMode('pan')} className={`hidden items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors lg:flex ${interactionMode === 'pan' ? 'bg-cyan-500/20 text-cyan-200' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}><Hand size={14}/> Pan</button>
+         <button onClick={() => setInteractionMode('select')} className={`hidden items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors lg:flex ${interactionMode === 'select' ? 'bg-blue-500/20 text-blue-200' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}><ScanSearch size={14}/> Select</button>
+         <button onClick={() => setInteractionMode('move')} className={`hidden items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors lg:flex ${interactionMode === 'move' ? 'bg-violet-500/20 text-violet-200' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}><Move size={14}/> Move</button>
+         <button onClick={onCopySelected} disabled={selectedStepIds.length === 0} className="hidden items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed lg:flex"><Copy size={14}/> Copy selected{selectedStepIds.length > 0 ? ` (${selectedStepIds.length})` : ''}</button>
+         <button onClick={onDeleteSelected} disabled={selectedStepIds.length === 0} className="hidden items-center gap-1.5 rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed lg:flex"><Trash2 size={14}/> Delete selected{selectedStepIds.length > 0 ? ` (${selectedStepIds.length})` : ''}</button>
          <button onClick={() => setAllStepsCollapsed(true)} className="hidden items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors lg:flex"><Minimize2 size={14}/> Compact all</button>
          <button onClick={() => setAllStepsCollapsed(false)} className="hidden items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors lg:flex"><PanelsTopLeft size={14}/> Expand all</button>
        </div>
@@ -611,7 +873,7 @@ export const ProcessMap: React.FC<Props> = ({
 
        <div className="absolute bottom-4 left-4 z-50 hidden md:flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/85 px-3 py-2 text-xs text-slate-400 backdrop-blur-sm">
          <MousePointer2 size={14} className="text-blue-300" />
-         <span>Presentation tip: use Fit to keep the full flow in frame.</span>
+         <span>{interactionMode === 'select' ? 'Drag on empty canvas to box-select nodes like draw.io. Hold Ctrl/Cmd + wheel to zoom.' : interactionMode === 'pan' ? 'Pan mode: drag empty canvas to move around. Hold Ctrl/Cmd + wheel to zoom.' : interactionMode === 'move' ? 'Move mode: drag node headers to reposition steps. Hold Ctrl/Cmd + wheel to zoom.' : isTemporarySelectActive ? 'Mixed mode: Control held, box-select is active. Release Control to return to pan/move.' : 'Mixed mode: drag empty canvas to pan, drag node headers to move steps, or hold Control to box-select. Hold Ctrl/Cmd + wheel to zoom.'}</span>
        </div>
 
        <div className="absolute bottom-4 right-4 z-50 rounded-full border border-slate-800 bg-slate-950/85 px-3 py-2 text-xs font-mono text-slate-400 backdrop-blur-sm">
@@ -620,12 +882,13 @@ export const ProcessMap: React.FC<Props> = ({
 
        <div 
           ref={containerRef}
-         className="w-full h-full cursor-grab active:cursor-grabbing bg-[linear-gradient(rgba(30,41,59,.45)_1px,transparent_1px),linear-gradient(90deg,rgba(30,41,59,.45)_1px,transparent_1px),radial-gradient(circle_at_center,rgba(59,130,246,.08),transparent_45%)] [background-size:40px_40px,40px_40px,100%_100%]"
+         className="w-full h-full overscroll-none bg-[linear-gradient(rgba(30,41,59,.45)_1px,transparent_1px),linear-gradient(90deg,rgba(30,41,59,.45)_1px,transparent_1px),radial-gradient(circle_at_center,rgba(59,130,246,.08),transparent_45%)] [background-size:40px_40px,40px_40px,100%_100%]"
+          style={{ cursor: canvasCursor }}
           onMouseDown={handlePanStart}
           onMouseMove={handlePanMove}
           onMouseUp={handlePanEnd}
           onMouseLeave={handlePanEnd}
-          onWheel={handleWheel}
+           onContextMenu={handleContextMenu}
        >
           <div 
             style={{ 
@@ -751,10 +1014,25 @@ export const ProcessMap: React.FC<Props> = ({
                         onMouseDown={dragHandlersByStepId.get(step.id)}
                         isDragging={draggingId === step.id || settlingId === step.id}
                         isCollapsed={collapsedStepIds[step.id] || false}
+                        isSelected={selectedStepIds.includes(step.id)}
+                        dragHandleCursor={nodeDragHandleCursor}
                       />
                   );
               })}
+
           </div>
+
+          {viewportSelectionRect && (
+            <div
+              className="pointer-events-none absolute z-20 border border-blue-400/80 bg-blue-500/10 shadow-[0_0_0_1px_rgba(59,130,246,0.2)]"
+              style={{
+                left: viewportSelectionRect.left,
+                top: viewportSelectionRect.top,
+                width: viewportSelectionRect.width,
+                height: viewportSelectionRect.height,
+              }}
+            />
+          )}
        </div>
     </div>
   );

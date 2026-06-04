@@ -6,7 +6,7 @@ import { ProcessStep, SimulationConfig, NodeType, DurationUnit, RandomnessMode, 
 import { ProcessMap } from './components/ProcessMap';
 import { StatsBoard } from './components/StatsBoard';
 import { generateScenario, analyzeBottlenecks } from './services/geminiService';
-import { Play, Pause, RotateCcw, Download, Upload, Zap, MessageSquare, Loader2, Sparkles, Menu, X, Settings, BarChart3, ArrowRight, ArrowDownUp, Clock, PlayCircle, StopCircle, Box, Shuffle, AlertTriangle, Palette, Users, Dna } from 'lucide-react';
+import { Play, Pause, RotateCcw, Download, Upload, Zap, MessageSquare, Loader2, Sparkles, Menu, X, Settings, BarChart3, ArrowRight, ArrowDownUp, Clock, PlayCircle, StopCircle, Box, Shuffle, AlertTriangle, Palette, Users, Dna, Copy, ClipboardPaste, Trash2 } from 'lucide-react';
 
 interface CanvasSpawnPosition {
   x: number;
@@ -74,6 +74,7 @@ const formatSimulationTime = (totalMs: number) => {
 const CUSTOM_CLOCK_VALUE = 'custom';
 const FLOWSIM_EXPORT_VERSION = 3;
 const FLOWSIM_DRAFT_STORAGE_KEY = 'flowsim-local-draft';
+const FLOWSIM_METRICS_CYCLE_UNIT_KEY = 'flowsim-metrics-cycle-unit';
 const VALID_NODE_TYPES: NodeType[] = ['start', 'process', 'end'];
 const VALID_RANDOMNESS_MODES: RandomnessMode[] = ['fixed', 'range'];
 const VALID_SIMULATION_MODES: StepSimulationMode[] = ['resource', 'delay'];
@@ -102,6 +103,84 @@ const getArrivalUnitLabel = (unit?: DurationUnit) => (
 
 const getArrivalMinValue = (mode?: ArrivalInputMode) => mode === 'interval' ? 0.001 : 0.000000001;
 const getBatchSize = (value: unknown) => Math.max(1, Math.min(1000, Math.round(toFiniteNumber(value, 1))));
+
+const cloneStep = (step: ProcessStep): ProcessStep => ({
+  ...step,
+  connections: step.connections.map((connection) => ({ ...connection })),
+  sourceProcessingTimes: { ...(step.sourceProcessingTimes || {}) },
+});
+
+const buildClipboardSteps = (steps: ProcessStep[]) => {
+  const includedIds = new Set(steps.map((step) => step.id));
+
+  return steps.map((step) => ({
+    ...cloneStep(step),
+    connections: step.connections.filter((connection) => includedIds.has(connection.targetId)).map((connection) => ({ ...connection })),
+    sourceProcessingTimes: Object.fromEntries(
+      Object.entries(step.sourceProcessingTimes || {}).filter(([sourceId]) => includedIds.has(sourceId))
+    ),
+  }));
+};
+
+const normalizeConnections = (connections: ProcessStep['connections']) => {
+  const validConnections = connections.filter((connection) => connection.targetId);
+
+  if (validConnections.length === 0) {
+    return [];
+  }
+
+  const probabilityTotal = validConnections.reduce((sum, connection) => sum + connection.probability, 0);
+
+  if (probabilityTotal > 0) {
+    return validConnections.map((connection) => ({
+      ...connection,
+      probability: connection.probability / probabilityTotal,
+    }));
+  }
+
+  return validConnections.map((connection) => ({
+    ...connection,
+    probability: 1 / validConnections.length,
+  }));
+};
+
+const getStepWidth = (type: NodeType) => type === 'process' ? 320 : 280;
+
+const getStepBounds = (steps: ProcessStep[]) => {
+  if (steps.length === 0) {
+    return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  }
+
+  return steps.reduce((bounds, step) => {
+    const x = typeof step.x === 'number' ? step.x : 0;
+    const y = typeof step.y === 'number' ? step.y : 0;
+    return {
+      minX: Math.min(bounds.minX, x),
+      minY: Math.min(bounds.minY, y),
+      maxX: Math.max(bounds.maxX, x + getStepWidth(step.type)),
+      maxY: Math.max(bounds.maxY, y + 300),
+    };
+  }, {
+    minX: Number.POSITIVE_INFINITY,
+    minY: Number.POSITIVE_INFINITY,
+    maxX: Number.NEGATIVE_INFINITY,
+    maxY: Number.NEGATIVE_INFINITY,
+  });
+};
+
+const buildUniqueCopyName = (name: string, usedNames: Set<string>) => {
+  const baseName = `${name} Copy`;
+  let candidate = baseName;
+  let index = 2;
+
+  while (usedNames.has(candidate)) {
+    candidate = `${baseName} ${index}`;
+    index += 1;
+  }
+
+  usedNames.add(candidate);
+  return candidate;
+};
 
 const shouldMigrateDefaultVariance = (payload: Record<string, unknown>) => (
   !Number.isFinite(Number(payload.version)) || Number(payload.version) < 2
@@ -293,6 +372,16 @@ const App: React.FC = () => {
     const savedTheme = localStorage.getItem('flowsim-ui-theme') as UiTheme | null;
     return savedTheme && UI_THEMES.some(theme => theme.id === savedTheme) ? savedTheme : 'dark';
   });
+  const [metricsCycleTimeUnit, setMetricsCycleTimeUnit] = useState<DurationUnit>(() => {
+    if (typeof window === 'undefined') {
+      return 'min';
+    }
+
+    const savedUnit = window.localStorage.getItem(FLOWSIM_METRICS_CYCLE_UNIT_KEY);
+    return DURATION_UNITS.some((unit) => unit.value === savedUnit) ? savedUnit as DurationUnit : 'min';
+  });
+  const [flowClipboard, setFlowClipboard] = useState<ProcessStep[] | null>(null);
+  const [selectedStepIds, setSelectedStepIds] = useState<string[]>([]);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   
   // Edit Modal State
@@ -314,11 +403,43 @@ const App: React.FC = () => {
     setEditingStep(null);
   };
 
-  const removeStep = (id: string) => {
-    setConfig(p => ({
-      ...p,
-      steps: p.steps.filter(s => s.id !== id)
+  const removeSteps = (stepIds: string[], label = 'selected steps') => {
+    const uniqueIds = Array.from(new Set(stepIds));
+    if (uniqueIds.length === 0) {
+      return;
+    }
+
+    const removedIds = new Set(uniqueIds);
+
+    setConfig((previous) => ({
+      ...previous,
+      isRunning: false,
+      steps: previous.steps
+        .filter((step) => !removedIds.has(step.id))
+        .map((step) => ({
+          ...step,
+          connections: normalizeConnections(
+            step.connections.filter((connection) => !removedIds.has(connection.targetId))
+          ),
+          sourceProcessingTimes: Object.fromEntries(
+            Object.entries(step.sourceProcessingTimes || {}).filter(([sourceId]) => !removedIds.has(sourceId))
+          ),
+        })),
     }));
+
+    setSelectedStepIds((current) => current.filter((id) => !removedIds.has(id)));
+    setEditingStep((current) => current && removedIds.has(current.id) ? null : current);
+    setAiAnalysis(null);
+    resetSimulation();
+    setImportExportNotice(`Deleted ${uniqueIds.length} ${label}.`);
+  };
+
+  const removeStep = (id: string) => {
+    removeSteps([id], 'step');
+  };
+
+  const removeSelectedSteps = () => {
+    removeSteps(selectedStepIds, 'selected steps');
   };
 
   const updateStepPosition = (id: string, position: CanvasSpawnPosition) => {
@@ -361,6 +482,76 @@ const App: React.FC = () => {
       y: position?.y ?? 100
     };
     setConfig(p => ({ ...p, steps: [...p.steps, newStep] }));
+  };
+
+  const copyFlow = (stepsToCopy: ProcessStep[] = config.steps, label = 'flow') => {
+    if (stepsToCopy.length === 0) {
+      setImportExportNotice('Nothing to copy yet. Add at least one step first.');
+      return;
+    }
+
+    const clipboardSteps = buildClipboardSteps(stepsToCopy);
+    setFlowClipboard(clipboardSteps);
+    setImportExportNotice(`Copied ${clipboardSteps.length} steps from the ${label}. Paste to duplicate it.`);
+  };
+
+  const copySelectedFlow = () => {
+    const selectedSteps = config.steps.filter((step) => selectedStepIds.includes(step.id));
+    copyFlow(selectedSteps, 'selected area');
+  };
+
+  const pasteFlow = () => {
+    if (!flowClipboard || flowClipboard.length === 0) {
+      setImportExportNotice('Copy a flow first, then paste it onto the canvas.');
+      return;
+    }
+
+    const clipboardSnapshot = flowClipboard.map(cloneStep);
+    const sourceBounds = getStepBounds(clipboardSnapshot);
+    const existingBounds = getStepBounds(config.steps);
+    const offsetX = config.steps.length === 0
+      ? 80 - sourceBounds.minX
+      : existingBounds.maxX + 180 - sourceBounds.minX;
+    const offsetY = config.steps.length === 0 ? 80 - sourceBounds.minY : 0;
+    const copiedAt = Date.now();
+    const idMap = new Map<string, string>();
+    const usedNames = new Set(config.steps.map((step) => step.name));
+
+    const duplicatedSteps = clipboardSnapshot.map((step, index) => {
+      const nextId = `node-${copiedAt}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+      idMap.set(step.id, nextId);
+
+      return {
+        ...step,
+        id: nextId,
+        name: buildUniqueCopyName(step.name, usedNames),
+        x: (step.x ?? 0) + offsetX,
+        y: (step.y ?? 0) + offsetY,
+      };
+    }).map((step) => ({
+      ...step,
+      connections: step.connections
+        .map((connection) => ({
+          ...connection,
+          targetId: idMap.get(connection.targetId) || '',
+        }))
+        .filter((connection) => connection.targetId),
+      sourceProcessingTimes: Object.fromEntries(
+        Object.entries(step.sourceProcessingTimes || {})
+          .map(([sourceId, time]) => [idMap.get(sourceId) || '', time])
+          .filter(([sourceId]) => sourceId)
+      ),
+    }));
+
+    setConfig((previous) => ({
+      ...previous,
+      isRunning: false,
+      steps: [...previous.steps, ...duplicatedSteps],
+    }));
+    setEditingStep(null);
+    setAiAnalysis(null);
+    resetSimulation();
+    setImportExportNotice(`Pasted ${duplicatedSteps.length} copied steps to the right of the current flow.`);
   };
 
   const toggleConnection = (targetId: string, checked: boolean) => {
@@ -429,6 +620,10 @@ const App: React.FC = () => {
   useEffect(() => {
     localStorage.setItem('flowsim-ui-theme', uiTheme);
   }, [uiTheme]);
+
+  useEffect(() => {
+    window.localStorage.setItem(FLOWSIM_METRICS_CYCLE_UNIT_KEY, metricsCycleTimeUnit);
+  }, [metricsCycleTimeUnit]);
 
   useEffect(() => {
     try {
@@ -508,6 +703,7 @@ const App: React.FC = () => {
 
       setConfig(importedConfig);
       setEditingStep(null);
+      setSelectedStepIds([]);
       setAiAnalysis(null);
       resetSimulation();
       setDraftStatus('saved');
@@ -535,6 +731,51 @@ const App: React.FC = () => {
     const timeoutId = window.setTimeout(() => setDraftStatus(null), draftStatus === 'save-failed' ? 5000 : 2500);
     return () => window.clearTimeout(timeoutId);
   }, [draftStatus]);
+
+  useEffect(() => {
+    const validIds = new Set(config.steps.map((step) => step.id));
+    setSelectedStepIds((current) => current.filter((id) => validIds.has(id)));
+  }, [config.steps]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTypingTarget = !!target?.closest('input, textarea, select, [contenteditable="true"]');
+
+      if (isTypingTarget) {
+        return;
+      }
+
+      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedStepIds.length > 0) {
+        event.preventDefault();
+        removeSelectedSteps();
+        return;
+      }
+
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+
+      if (key === 'c') {
+        event.preventDefault();
+        if (selectedStepIds.length > 0) {
+          copySelectedFlow();
+        } else {
+          copyFlow();
+        }
+      }
+
+      if (key === 'v' && flowClipboard && flowClipboard.length > 0) {
+        event.preventDefault();
+        pasteFlow();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [flowClipboard, selectedStepIds]);
 
   const runningLabel = config.isRunning ? 'Running' : 'Paused';
   const totalQueue = stepStats.reduce((sum, s) => sum + s.queueLength, 0);
@@ -831,6 +1072,37 @@ const App: React.FC = () => {
                  </div>
                  <div className="flex flex-wrap items-center gap-2">
                     <button
+                      onClick={copySelectedFlow}
+                      disabled={selectedStepIds.length === 0}
+                      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Copy only the selected nodes"
+                    >
+                      <Copy size={16}/> Copy Selected{selectedStepIds.length > 0 ? ` (${selectedStepIds.length})` : ''}
+                    </button>
+                    <button
+                      onClick={removeSelectedSteps}
+                      disabled={selectedStepIds.length === 0}
+                      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 text-sm text-rose-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Delete only the selected nodes"
+                    >
+                      <Trash2 size={16}/> Delete Selected{selectedStepIds.length > 0 ? ` (${selectedStepIds.length})` : ''}
+                    </button>
+                    <button
+                      onClick={copyFlow}
+                      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors"
+                      title="Copy the full current flow graph"
+                    >
+                      <Copy size={16}/> Copy Flow
+                    </button>
+                    <button
+                      onClick={pasteFlow}
+                      disabled={!flowClipboard || flowClipboard.length === 0}
+                      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Paste the copied flow to the right"
+                    >
+                      <ClipboardPaste size={16}/> Paste Flow
+                    </button>
+                    <button
                       onClick={triggerImport}
                       className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors"
                     >
@@ -887,6 +1159,10 @@ const App: React.FC = () => {
                   onRemoveStep={removeStep}
                 onAddStep={addStep}
                 onPositionChange={updateStepPosition}
+                  selectedStepIds={selectedStepIds}
+                  onSelectionChange={setSelectedStepIds}
+                  onCopySelected={copySelectedFlow}
+                onDeleteSelected={removeSelectedSteps}
                />
                <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
                  <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Scroll = Zoom</span>
@@ -898,9 +1174,23 @@ const App: React.FC = () => {
              <section>
                 <div className="mb-3 flex items-center justify-between">
                   <h2 className="text-lg font-semibold text-slate-100">Live Metrics</h2>
-                  <div className="text-xs text-slate-500">Queue: <span className="font-mono text-amber-300">{totalQueue}</span></div>
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-2 text-xs text-slate-500">
+                      <span>Cycle Unit</span>
+                      <select
+                        value={metricsCycleTimeUnit}
+                        onChange={(e) => setMetricsCycleTimeUnit(e.target.value as DurationUnit)}
+                        className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-blue-300 outline-none focus:border-blue-500"
+                      >
+                        {DURATION_UNITS.map((unit) => (
+                          <option key={unit.value} value={unit.value}>{unit.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="text-xs text-slate-500">Queue: <span className="font-mono text-amber-300">{totalQueue}</span></div>
+                  </div>
                 </div>
-                 <StatsBoard globalStats={globalStats} stepStats={stepStats} steps={config.steps} items={items} simulationTimeMs={simulationTimeMs} />
+                 <StatsBoard globalStats={globalStats} stepStats={stepStats} steps={config.steps} items={items} simulationTimeMs={simulationTimeMs} cycleTimeUnit={metricsCycleTimeUnit} />
              </section>
           </div>
           

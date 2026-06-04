@@ -10,6 +10,7 @@ interface Props {
   steps: ProcessStep[];
   items?: WorkItem[];
   simulationTimeMs: number;
+  cycleTimeUnit: DurationUnit;
 }
 
 interface FlowGroup {
@@ -45,25 +46,6 @@ const UNIT_LABELS: Record<DurationUnit, string> = {
 const getPreferredThroughputUnit = (steps: ProcessStep[]): DurationUnit => {
   const startUnits = steps.filter(step => step.type === 'start').map(step => step.arrivalUnit || 's');
   return startUnits[0] || 'min';
-};
-
-const getPreferredCycleTimeUnit = (steps: ProcessStep[]): DurationUnit => {
-  const processUnits = steps
-    .filter(step => step.type === 'process')
-    .map(step => step.randomnessMode === 'range' ? step.rangeTimeUnit || step.processingTimeUnit || 'ms' : step.processingTimeUnit || 'ms');
-
-  if (processUnits.length === 0) {
-    return 's';
-  }
-
-  const counts = processUnits.reduce<Record<string, number>>((acc, unit) => {
-    acc[unit] = (acc[unit] || 0) + 1;
-    return acc;
-  }, {});
-
-  return processUnits.reduce<DurationUnit>((selected, unit) => (
-    (counts[unit] || 0) > (counts[selected] || 0) ? unit : selected
-  ), processUnits[0]);
 };
 
 const getFlowGroups = (steps: ProcessStep[]): FlowGroup[] => {
@@ -141,7 +123,7 @@ const getFlowGroups = (steps: ProcessStep[]): FlowGroup[] => {
   return flowGroups;
 };
 
-export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, items = [], simulationTimeMs }) => {
+export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, items = [], simulationTimeMs, cycleTimeUnit }) => {
   const flowGroups = getFlowGroups(steps);
   const stepStatsById = new Map(stepStats.map(stats => [stats.stepId, stats]));
 
@@ -156,7 +138,6 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, ite
   });
 
   const throughputUnit = getPreferredThroughputUnit(steps);
-  const cycleTimeUnit = getPreferredCycleTimeUnit(steps);
   const throughputUnitMs = TIME_UNIT_TO_MS[throughputUnit];
   const cycleTimeUnitMs = TIME_UNIT_TO_MS[cycleTimeUnit];
   const throughputValue = simulationTimeMs > 0
@@ -191,7 +172,6 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, ite
       : 0;
     const unit = getPreferredThroughputUnit(flow.steps);
     const flowThroughput = simulationTimeMs > 0 ? (finished / simulationTimeMs) * TIME_UNIT_TO_MS[unit] : 0;
-    const cycleUnit = getPreferredCycleTimeUnit(flow.steps);
 
     return {
       ...flow,
@@ -207,8 +187,7 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, ite
       averageCycleTime,
       throughputUnit: unit,
       throughput: flowThroughput,
-      cycleUnit,
-      cycleTimeValue: averageCycleTime / TIME_UNIT_TO_MS[cycleUnit],
+      cycleTimeValue: averageCycleTime / TIME_UNIT_TO_MS[cycleTimeUnit],
     };
   });
 
@@ -325,7 +304,7 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, ite
                 <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
                   <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Avg Cycle</div>
                   <div className="mt-1 font-mono text-xl font-bold text-blue-300">
-                    {flow.cycleTimeValue.toFixed(flow.cycleUnit === 'ms' ? 0 : 2)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[flow.cycleUnit]}</span>
+                    {flow.cycleTimeValue.toFixed(cycleTimeUnit === 'ms' ? 0 : 2)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
                   </div>
                 </div>
                 <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">

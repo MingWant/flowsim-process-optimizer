@@ -15,6 +15,8 @@ interface Props {
   onMouseDown?: (e: React.MouseEvent) => void;
   isDragging?: boolean;
   isCollapsed?: boolean;
+  isSelected?: boolean;
+  dragHandleCursor?: React.CSSProperties['cursor'];
 }
 
 const ARRIVAL_UNIT_LABELS: Record<string, string> = {
@@ -110,7 +112,7 @@ const CompactStatChip: React.FC<{ label: string; value: string | number; tone?: 
   </div>
 );
 
-const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, items, simulationTimeMs, onEdit, onRemove, onToggleCollapse, style, onMouseDown, isDragging = false, isCollapsed = false }, ref) => {
+const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, items, simulationTimeMs, onEdit, onRemove, onToggleCollapse, style, onMouseDown, isDragging = false, isCollapsed = false, isSelected = false, dragHandleCursor = 'grab' }, ref) => {
   const queuedItems = items.filter(i => i.status === 'queued');
   const processingItems = items.filter(i => i.status === 'processing');
   const totalCompleted = stats?.totalProcessed || 0;
@@ -134,12 +136,12 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
         style={{
           ...style,
           borderColor: isBottleneck ? '#ef4444' : baseColor,
-          boxShadow: isBottleneck ? `0 0 20px rgba(239, 68, 68, 0.3)` : `0 4px 18px ${baseColor}28`,
+          boxShadow: isSelected ? `0 0 0 2px rgba(96, 165, 250, 0.95), 0 0 26px rgba(59, 130, 246, 0.35)` : isBottleneck ? `0 0 20px rgba(239, 68, 68, 0.3)` : `0 4px 18px ${baseColor}28`,
           backgroundColor: '#0f172a',
         }}
         className={`absolute ${compactWidth} overflow-hidden rounded-2xl border-2 z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
       >
-        <div className="flex cursor-grab items-start justify-between gap-3 border-b border-slate-800/80 bg-slate-900/85 p-3 active:cursor-grabbing" onMouseDown={onMouseDown}>
+        <div className="flex items-start justify-between gap-3 border-b border-slate-800/80 bg-slate-900/85 p-3" style={{ cursor: dragHandleCursor }} onMouseDown={onMouseDown}>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <GripHorizontal size={15} className="shrink-0 text-slate-600" />
@@ -211,12 +213,12 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
         style={{ 
         ...style,
         borderColor: baseColor,
-        boxShadow: `0 6px 24px ${baseColor}25`
+        boxShadow: isSelected ? `0 0 0 2px rgba(96, 165, 250, 0.95), 0 0 26px rgba(59, 130, 246, 0.35)` : `0 6px 24px ${baseColor}25`
         }}
         className={`absolute flex w-[260px] flex-col overflow-hidden rounded-2xl border-2 bg-slate-950 z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
           onMouseDown={onMouseDown}
         >
-        <div className="flex cursor-grab items-center justify-between border-b border-slate-800 bg-slate-900/80 p-3 active:cursor-grabbing" onMouseDown={onMouseDown}>
+        <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/80 p-3" style={{ cursor: dragHandleCursor }} onMouseDown={onMouseDown}>
           <div className="flex min-w-0 items-start gap-2">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl" style={{ backgroundColor: `${baseColor}20`, color: baseColor }}>
               <Play fill={baseColor} size={16} style={{ color: baseColor }} />
@@ -257,12 +259,12 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
           style={{ 
              ...style,
              borderColor: baseColor,
-             boxShadow: `0 4px 20px ${baseColor}30`
+             boxShadow: isSelected ? `0 0 0 2px rgba(96, 165, 250, 0.95), 0 0 26px rgba(59, 130, 246, 0.35)` : `0 4px 20px ${baseColor}30`
           }}
             className={`absolute flex w-[280px] flex-col overflow-hidden rounded-2xl border-2 bg-slate-950 z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
           onMouseDown={onMouseDown}
         >
-            <div className="flex cursor-grab items-center justify-between border-b border-slate-800 bg-slate-900/80 p-3 active:cursor-grabbing" onMouseDown={onMouseDown}>
+            <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/80 p-3" style={{ cursor: dragHandleCursor }} onMouseDown={onMouseDown}>
               <div className="flex min-w-0 items-start gap-2 text-slate-200 font-bold">
                 <div className="flex h-9 w-9 items-center justify-center rounded-xl" style={{ backgroundColor: `${baseColor}20`, color: baseColor }}>
                   <Square fill={baseColor} size={16} style={{ color: baseColor }} />
@@ -332,14 +334,15 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
       style={{
         ...style,
         borderColor: isBottleneck ? '#ef4444' : baseColor,
-        boxShadow: isBottleneck ? `0 0 20px rgba(239, 68, 68, 0.4)` : `0 4px 15px ${baseColor}30`,
+        boxShadow: isSelected ? `0 0 0 2px rgba(96, 165, 250, 0.95), 0 0 26px rgba(59, 130, 246, 0.35)` : isBottleneck ? `0 0 20px rgba(239, 68, 68, 0.4)` : `0 4px 15px ${baseColor}30`,
         backgroundColor: '#0f172a',
       }}
       className={`absolute flex flex-col w-[320px] border-2 rounded-2xl overflow-hidden z-10 select-none ${isDragging ? '' : 'transition-all hover:-translate-y-0.5 hover:shadow-2xl'}`}
     >
       {/* Header */}
       <div 
-        className="flex justify-between items-start p-4 pb-2 cursor-grab active:cursor-grabbing group bg-slate-900/80 border-b border-slate-800/80"
+        className="flex justify-between items-start p-4 pb-2 group bg-slate-900/80 border-b border-slate-800/80"
+        style={{ cursor: dragHandleCursor }}
         onMouseDown={onMouseDown}
       >
           <div className="flex-1 mr-2 overflow-hidden">
@@ -469,6 +472,7 @@ export const ProcessNode = memo(ProcessNodeComponent, (prevProps, nextProps) => 
     && prevProps.onMouseDown === nextProps.onMouseDown
     && prevProps.isDragging === nextProps.isDragging
     && prevProps.isCollapsed === nextProps.isCollapsed
+    && prevProps.isSelected === nextProps.isSelected
     && prevProps.style?.left === nextProps.style?.left
     && prevProps.style?.top === nextProps.style?.top;
 });
