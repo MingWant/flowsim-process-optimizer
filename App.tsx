@@ -5,6 +5,7 @@ import { useProcessSimulation } from './hooks/useProcessSimulation';
 import { ProcessStep, SimulationConfig, NodeType, DurationUnit, RandomnessMode, StepSimulationMode, ArrivalInputMode } from './types';
 import { ProcessMap } from './components/ProcessMap';
 import { StatsBoard } from './components/StatsBoard';
+import { MetroDemoBoard } from './components/MetroDemoBoard';
 import { generateScenario, analyzeBottlenecks } from './services/geminiService';
 import { Play, Pause, RotateCcw, Download, Upload, Zap, MessageSquare, Loader2, Sparkles, Menu, X, Settings, BarChart3, ArrowRight, ArrowDownUp, Clock, PlayCircle, StopCircle, Box, Shuffle, AlertTriangle, Palette, Users, Dna, Copy, ClipboardPaste, Trash2 } from 'lucide-react';
 
@@ -14,6 +15,7 @@ interface CanvasSpawnPosition {
 }
 
 type UiTheme = 'dark' | 'light' | 'ocean' | 'warm';
+type CanvasViewMode = 'map' | 'metro';
 
 const DURATION_UNITS = [
   { value: 'ms', label: 'ms' },
@@ -380,6 +382,7 @@ const App: React.FC = () => {
     const savedUnit = window.localStorage.getItem(FLOWSIM_METRICS_CYCLE_UNIT_KEY);
     return DURATION_UNITS.some((unit) => unit.value === savedUnit) ? savedUnit as DurationUnit : 'min';
   });
+  const [canvasViewMode, setCanvasViewMode] = useState<CanvasViewMode>('map');
   const [flowClipboard, setFlowClipboard] = useState<ProcessStep[] | null>(null);
   const [selectedStepIds, setSelectedStepIds] = useState<string[]>([]);
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -1066,11 +1069,31 @@ const App: React.FC = () => {
                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between mb-3 pl-0 lg:pl-24">
                  <div>
                    <h2 className="text-lg font-semibold text-slate-100">Process Map</h2>
-                   <p className="text-xs text-slate-500">Presentation canvas · Sim time: {simulationClockLabel} · Scroll to zoom, drag to pan.</p>
+                   <p className="text-xs text-slate-500">
+                     {canvasViewMode === 'map'
+                       ? `Presentation canvas · Sim time: ${simulationClockLabel} · Ctrl/Cmd + wheel to zoom, drag to pan.`
+                       : `Metro demo mode · Sim time: ${simulationClockLabel} · Compact horizontal presentation lane with focus, zoom, and bottleneck highlights.`}
+                   </p>
                    {importExportNotice && <p className="mt-1 text-xs text-cyan-300">{importExportNotice}</p>}
                    {draftStatusMessage && <p className={`mt-1 text-xs ${draftStatus === 'save-failed' ? 'text-rose-300' : 'text-emerald-300'}`}>{draftStatusMessage}</p>}
                  </div>
                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1 rounded-xl border border-slate-800 bg-slate-900 p-1">
+                      <button
+                        onClick={() => setCanvasViewMode('map')}
+                        className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${canvasViewMode === 'map' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'}`}
+                        title="Classic editable process map"
+                      >
+                        <Box size={16} /> Map
+                      </button>
+                      <button
+                        onClick={() => setCanvasViewMode('metro')}
+                        className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${canvasViewMode === 'metro' ? 'bg-cyan-600 text-white shadow' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'}`}
+                        title="Compact subway-style demo view"
+                      >
+                        <Dna size={16} /> Metro Demo
+                      </button>
+                    </div>
                     <button
                       onClick={copySelectedFlow}
                       disabled={selectedStepIds.length === 0}
@@ -1149,26 +1172,47 @@ const App: React.FC = () => {
                  </div>
                </div>
 
-               <ProcessMap 
-                  steps={config.steps} 
-                  stepStats={stepStats} 
-                  items={items}
-                simulationTimeMs={simulationTimeMs}
-                  isRunning={config.isRunning}
-                  onEditStep={(s) => { setEditingStep(s); setActiveTab('basic'); }}
-                  onRemoveStep={removeStep}
-                onAddStep={addStep}
-                onPositionChange={updateStepPosition}
-                  selectedStepIds={selectedStepIds}
-                  onSelectionChange={setSelectedStepIds}
-                  onCopySelected={copySelectedFlow}
-                onDeleteSelected={removeSelectedSteps}
-               />
-               <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
-                 <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Scroll = Zoom</span>
-                 <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Drag background = Pan</span>
-                 <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Drag node header = Move</span>
-               </div>
+               {canvasViewMode === 'map' ? (
+                 <>
+                   <ProcessMap 
+                      steps={config.steps} 
+                      stepStats={stepStats} 
+                      items={items}
+                    simulationTimeMs={simulationTimeMs}
+                      isRunning={config.isRunning}
+                      onEditStep={(s) => { setEditingStep(s); setActiveTab('basic'); }}
+                      onRemoveStep={removeStep}
+                    onAddStep={addStep}
+                    onPositionChange={updateStepPosition}
+                      selectedStepIds={selectedStepIds}
+                      onSelectionChange={setSelectedStepIds}
+                      onCopySelected={copySelectedFlow}
+                    onDeleteSelected={removeSelectedSteps}
+                   />
+                   <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
+                     <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Ctrl/Cmd + Wheel = Zoom</span>
+                     <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Drag background = Pan</span>
+                     <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Drag node header = Move</span>
+                     <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Ctrl in Mixed Mode = Select</span>
+                   </div>
+                 </>
+               ) : (
+                 <MetroDemoBoard
+                   steps={config.steps}
+                   stepStats={stepStats}
+                   items={items}
+                   simulationTimeMs={simulationTimeMs}
+                 />
+               )}
+
+               {canvasViewMode === 'metro' && (
+                 <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
+                   <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Compare All / Focus Single Flow</span>
+                   <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Zoom In / Out</span>
+                   <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Fullscreen Demo</span>
+                   <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Bottleneck Highlight</span>
+                 </div>
+               )}
              </section>
 
              <section>
