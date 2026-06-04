@@ -115,6 +115,43 @@ const CompactStatChip: React.FC<{ label: string; value: string | number; tone?: 
   </div>
 );
 
+const getExecutionModeLabel = (step: ProcessStep, isDelayMode: boolean) => {
+  if (isDelayMode) {
+    return 'Delay';
+  }
+
+  if ((step.resourceExecutionMode || 'single') === 'collaborative') {
+    return step.teamAllocationMode === 'explicit' ? 'Explicit Teams' : 'Auto Teams';
+  }
+
+  if (step.resourceExecutionMode === 'multitask') {
+    return 'Multitask';
+  }
+
+  return 'Single';
+};
+
+const getExecutionModeHint = (step: ProcessStep, isDelayMode: boolean) => {
+  if (isDelayMode) {
+    return 'No resource constraints';
+  }
+
+  if ((step.resourceExecutionMode || 'single') === 'collaborative') {
+    if (step.teamAllocationMode === 'explicit') {
+      const teamCount = step.collaborativeTeams?.length || 0;
+      return `${teamCount} explicit team${teamCount === 1 ? '' : 's'}`;
+    }
+
+    return `Default team size ${step.targetResourcesPerItem ?? 1}`;
+  }
+
+  if (step.resourceExecutionMode === 'multitask') {
+    return `${step.maxConcurrentItemsPerResource ?? 1} items/resource`;
+  }
+
+  return '1 resource/item';
+};
+
 const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, items, simulationTimeMs, onEdit, onRemove, onToggleCollapse, style, onMouseDown, isDragging = false, isCollapsed = false, isSelected = false, dragHandleCursor = 'grab' }, ref) => {
   const queuedItems = items.filter(i => i.status === 'queued');
   const processingItems = items.filter(i => i.status === 'processing');
@@ -130,6 +167,12 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
   const baseColor = step.color || '#64748b';
   const isDelayMode = step.simulationMode === 'delay';
   const compactDuration = formatCompactDuration(step, isDelayMode);
+  const executionModeLabel = getExecutionModeLabel(step, isDelayMode);
+  const executionModeHint = getExecutionModeHint(step, isDelayMode);
+  const resourceUsage = stats?.resourceUsage ?? (isDelayMode ? 0 : processingCount);
+  const totalResources = stats?.totalResources ?? (isDelayMode ? 0 : step.capacity);
+  const avgResourcesPerItem = stats?.avgResourcesPerItem ?? 0;
+  const avgResourceLoadFactor = stats?.avgResourceLoadFactor ?? 0;
 
   if (isCollapsed) {
     const compactWidth = step.type === 'process' ? 'w-[320px]' : step.type === 'start' ? 'w-[260px]' : 'w-[280px]';
@@ -158,7 +201,7 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
             <div className="mt-1 truncate text-sm font-bold text-slate-100" title={step.name}>{step.name}</div>
             <div className="mt-1 flex items-center gap-2 text-xs text-slate-400">
               <span className={`font-mono ${accentTone}`}>{compactDuration}</span>
-              {step.type === 'process' && !isDelayMode && <span className="font-mono">R{step.capacity}</span>}
+              {step.type === 'process' && !isDelayMode && <span className="font-mono">{executionModeLabel} · R{resourceUsage}/{totalResources || step.capacity}</span>}
             </div>
           </div>
           <div className="flex shrink-0 gap-1" onMouseDown={e => e.stopPropagation()}>
@@ -189,7 +232,7 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
             <>
               <CompactStatChip label="Q" value={queueCount} tone={queueCount > 0 ? 'text-amber-300' : 'text-slate-300'} />
               <CompactStatChip label={isDelayMode ? 'A' : 'P'} value={processingCount} tone={isDelayMode ? 'text-cyan-300' : 'text-blue-300'} />
-              <CompactStatChip label="U" value={isDelayMode ? 'Delay' : `${((stats?.utilization || 0) * 100).toFixed(0)}%`} tone={isDelayMode ? 'text-cyan-300' : isBottleneck ? 'text-red-300' : 'text-emerald-300'} />
+              <CompactStatChip label="Res" value={isDelayMode ? 'Delay' : `${resourceUsage}/${totalResources || step.capacity}`} tone={isDelayMode ? 'text-cyan-300' : isBottleneck ? 'text-red-300' : 'text-emerald-300'} />
               <CompactStatChip label="Out" value={totalCompleted} tone="text-emerald-300" />
             </>
           )}
@@ -368,6 +411,13 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
             </span>
             <span className="flex items-center gap-1"><Clock size={12}/> {timeDisplay}</span>
           </div>
+          {!isDelayMode && (
+            <div className="mt-2 ml-6 flex flex-wrap gap-1.5 text-[10px]">
+              <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 font-semibold text-blue-200">{executionModeLabel}</span>
+              <span className="rounded-full border border-slate-700 bg-slate-950/70 px-2 py-0.5 font-mono text-slate-300">Res {resourceUsage}/{totalResources || step.capacity}</span>
+              <span className="rounded-full border border-purple-500/20 bg-purple-500/10 px-2 py-0.5 text-purple-200">{executionModeHint}</span>
+            </div>
+          )}
         </div>
         <div className="flex gap-1 shrink-0" onMouseDown={e => e.stopPropagation()}>
           <button onClick={onToggleCollapse} className="text-slate-400 hover:text-white p-1 hover:bg-slate-700 rounded transition-colors" title="Collapse card"><ChevronUp size={14}/></button>
@@ -386,17 +436,17 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
         >
           <div className="text-xs mb-1 flex justify-between font-medium" style={{ color: baseColor }}>
             <span>{isDelayMode ? 'Timed Delay' : 'Processing'}</span>
-            <span>{processingCount}{isDelayMode ? ' active' : ` / ${step.capacity}`}</span>
+            <span>{processingCount}{isDelayMode ? ' active' : ` active · R ${resourceUsage}/${totalResources || step.capacity}`}</span>
           </div>
           <div className="flex flex-col gap-1 min-h-[2.5rem]">
             {visibleProcessingItems.length > 0 ? visibleProcessingItems.map(item => (
                <div key={item.id} className="w-full relative h-3 bg-slate-900 rounded-full overflow-hidden">
                   <div 
                     className="h-full transition-all duration-75 ease-linear"
-                    style={{ width: `${item.progress * 100}%`, backgroundColor: baseColor }}
+                    style={{ width: `${item.progress * 100}%`, backgroundColor: item.itemProfileColor || baseColor }}
                   />
                   <span className="absolute inset-0 flex items-center justify-center text-[8px] text-white/70 font-mono">
-                      Item {item.id.split('-')[1]}
+                      Item {item.id.split('-')[1]}{item.itemProfileName ? ` · ${item.itemProfileName}` : ''}
                   </span>
                </div>
             )) : (
@@ -421,7 +471,10 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
              )}
              {visibleQueuedItems.map((item) => (
                 <div key={item.id} className="flex items-center justify-between text-[10px] bg-slate-900 px-2 py-1 rounded-lg text-slate-300 border border-slate-800">
-                    <span className="font-mono text-slate-500">#{item.id.split('-')[1]}</span>
+                    <span className="flex min-w-0 items-center gap-1 font-mono text-slate-500">
+                      <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: item.itemProfileColor || '#64748b' }} />
+                      #{item.id.split('-')[1]}{item.itemProfileName ? ` ${item.itemProfileName}` : ''}
+                    </span>
                 <span className="text-slate-400">Wait: {((item.totalWaitTime + Math.max(0, simulationTimeMs - (item.queuedAtSimulationMs ?? simulationTimeMs))) / 1000).toFixed(1)}s</span>
                     <div className={`w-2 h-2 rounded-full ${item.status === 'queued' ? 'bg-amber-500' : 'bg-slate-500'}`}></div>
                 </div>
@@ -438,6 +491,23 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
           <div className="bg-cyan-500/10 rounded-xl border border-cyan-500/20 flex flex-col flex-grow p-3 text-xs text-cyan-100/80">
             <div className="font-semibold text-cyan-300 mb-1">Time-only mode</div>
             <p className="leading-relaxed text-slate-400">Items start their timer immediately. No capacity, resource queue, or utilization is used.</p>
+          </div>
+        )}
+
+        {!isDelayMode && (
+          <div className="grid grid-cols-3 gap-2 rounded-xl border border-slate-800 bg-slate-950/70 p-2 text-xs">
+            <div>
+              <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-500">Mode</div>
+              <div className="mt-1 truncate font-semibold text-blue-200" title={executionModeHint}>{executionModeLabel}</div>
+            </div>
+            <div>
+              <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-500">Avg Team</div>
+              <div className="mt-1 font-mono font-semibold text-purple-200">{avgResourcesPerItem > 0 ? avgResourcesPerItem.toFixed(1) : '-'}</div>
+            </div>
+            <div>
+              <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-500">Avg Load</div>
+              <div className="mt-1 font-mono font-semibold text-cyan-200">{avgResourceLoadFactor > 0 ? avgResourceLoadFactor.toFixed(1) : '-'}</div>
+            </div>
           </div>
         )}
       </div>

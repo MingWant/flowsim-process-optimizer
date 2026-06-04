@@ -2,11 +2,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { DEFAULT_CONFIG } from './constants';
 import { useProcessSimulation } from './hooks/useProcessSimulation';
-import { ProcessStep, SimulationConfig, NodeType, DurationUnit, RandomnessMode, StepSimulationMode, ArrivalInputMode } from './types';
+import { ProcessStep, SimulationConfig, NodeType, DurationUnit, RandomnessMode, StepSimulationMode, ArrivalInputMode, ResourceExecutionMode, TeamAllocationMode, NonWorkingArrivalPolicy, DemandModifier, AutoPauseConfig, ItemProfile } from './types';
 import { ProcessMap } from './components/ProcessMap';
 import { StatsBoard } from './components/StatsBoard';
 import { MetroDemoBoard } from './components/MetroDemoBoard';
 import { generateScenario, analyzeBottlenecks } from './services/geminiService';
+import { DEFAULT_BUSINESS_CALENDAR, getActiveDemandModifiers, getBusinessDate, getDemandMultiplier, isWorkingTime, normalizeBusinessCalendar, normalizeDemandModifiers } from './services/simulationCalendar';
 import { Play, Pause, RotateCcw, Download, Upload, Zap, MessageSquare, Loader2, Sparkles, Menu, X, Settings, BarChart3, ArrowRight, ArrowDownUp, Clock, PlayCircle, StopCircle, Box, Shuffle, AlertTriangle, Palette, Users, Dna, Copy, ClipboardPaste, Trash2 } from 'lucide-react';
 
 interface CanvasSpawnPosition {
@@ -56,6 +57,22 @@ const UI_THEMES: { id: UiTheme; label: string; swatch: string }[] = [
   { id: 'warm', label: 'Warm', swatch: 'bg-orange-500' },
 ];
 
+const WEEKDAY_OPTIONS = [
+  { value: 0, label: 'Sun' },
+  { value: 1, label: 'Mon' },
+  { value: 2, label: 'Tue' },
+  { value: 3, label: 'Wed' },
+  { value: 4, label: 'Thu' },
+  { value: 5, label: 'Fri' },
+  { value: 6, label: 'Sat' },
+];
+
+const NON_WORKING_POLICY_LABELS: Record<NonWorkingArrivalPolicy, string> = {
+  queue: 'Arrive and queue',
+  delay: 'Delay arrivals',
+  reject: 'Reject / cancel arrivals',
+};
+
 const formatSimulationTime = (totalMs: number) => {
   const safeMs = Math.max(0, Math.floor(totalMs));
   const totalSeconds = Math.floor(safeMs / 1000);
@@ -73,6 +90,30 @@ const formatSimulationTime = (totalMs: number) => {
   return `${String(totalHours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 };
 
+const formatBusinessDateTime = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hours}:${minutes}`;
+};
+
+const getAutoPauseProgressRows = (autoPause: AutoPauseConfig | undefined, stats: { totalItemsCreated: number; totalItemsFinished: number; totalItemsFailed: number; totalItemsCancelled: number; activeItems: number }, simMs: number) => {
+  if (!autoPause?.enabled) {
+    return [];
+  }
+
+  return [
+    { label: 'Sim time', target: autoPause.simulationTimeMs, value: simMs },
+    { label: 'Created', target: autoPause.totalItemsCreated, value: stats.totalItemsCreated },
+    { label: 'Finished', target: autoPause.totalItemsFinished, value: stats.totalItemsFinished },
+    { label: 'Active', target: autoPause.activeItems, value: stats.activeItems },
+    { label: 'Failed', target: autoPause.totalItemsFailed, value: stats.totalItemsFailed },
+    { label: 'Cancelled', target: autoPause.totalItemsCancelled, value: stats.totalItemsCancelled },
+  ].filter((row): row is { label: string; target: number; value: number } => typeof row.target === 'number' && row.target > 0);
+};
+
 const CUSTOM_CLOCK_VALUE = 'custom';
 const FLOWSIM_EXPORT_VERSION = 3;
 const FLOWSIM_DRAFT_STORAGE_KEY = 'flowsim-local-draft';
@@ -81,6 +122,9 @@ const VALID_NODE_TYPES: NodeType[] = ['start', 'process', 'end'];
 const VALID_RANDOMNESS_MODES: RandomnessMode[] = ['fixed', 'range'];
 const VALID_SIMULATION_MODES: StepSimulationMode[] = ['resource', 'delay'];
 const VALID_ARRIVAL_INPUT_MODES: ArrivalInputMode[] = ['rate', 'interval'];
+const VALID_RESOURCE_EXECUTION_MODES: ResourceExecutionMode[] = ['single', 'collaborative', 'multitask'];
+const VALID_TEAM_ALLOCATION_MODES: TeamAllocationMode[] = ['auto', 'explicit'];
+const VALID_NON_WORKING_POLICIES: NonWorkingArrivalPolicy[] = ['queue', 'delay', 'reject'];
 const DEFAULT_ZERO_VARIANCE_STEP_IDS = new Set(['step-1', 'step-2', 'step-3', 'step-4']);
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> => (
@@ -105,6 +149,191 @@ const getArrivalUnitLabel = (unit?: DurationUnit) => (
 
 const getArrivalMinValue = (mode?: ArrivalInputMode) => mode === 'interval' ? 0.001 : 0.000000001;
 const getBatchSize = (value: unknown) => Math.max(1, Math.min(1000, Math.round(toFiniteNumber(value, 1))));
+const toPositiveInteger = (value: unknown, fallback: number, min = 1, max = 50) => {
+  const parsed = Math.round(toFiniteNumber(value, fallback));
+  return Math.max(min, Math.min(max, parsed));
+};
+
+const sanitizeAutoPause = (value: unknown): AutoPauseConfig => {
+  if (!isObjectRecord(value)) {
+    return { enabled: false };
+  }
+
+  const getOptionalTarget = (target: unknown) => {
+    const parsed = Number(target);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  };
+
+  return {
+    enabled: Boolean(value.enabled),
+    simulationTimeMs: getOptionalTarget(value.simulationTimeMs),
+    totalItemsCreated: getOptionalTarget(value.totalItemsCreated),
+    totalItemsFinished: getOptionalTarget(value.totalItemsFinished),
+    totalItemsFailed: getOptionalTarget(value.totalItemsFailed),
+    totalItemsCancelled: getOptionalTarget(value.totalItemsCancelled),
+    activeItems: getOptionalTarget(value.activeItems),
+  };
+};
+
+const sanitizeEfficiencyRecord = (value: unknown, maxKey: number, fallback: Record<number, number>) => {
+  if (!isObjectRecord(value)) {
+    return fallback;
+  }
+
+  const entries = Object.entries(value)
+    .map(([key, rawMultiplier]) => {
+      const numericKey = Math.round(Number(key));
+      if (!Number.isFinite(numericKey) || numericKey < 1 || numericKey > maxKey) {
+        return null;
+      }
+
+      return [numericKey, Math.max(0.05, Math.min(50, toFiniteNumber(rawMultiplier, fallback[numericKey] ?? 1)))] as const;
+    })
+    .filter((entry): entry is readonly [number, number] => entry !== null);
+
+  return entries.length > 0 ? Object.fromEntries(entries) as Record<number, number> : fallback;
+};
+
+const buildDefaultCollaborativeEfficiency = (maxResources: number) => Object.fromEntries(
+  Array.from({ length: Math.max(1, maxResources) }, (_, index) => {
+    const resources = index + 1;
+    return [resources, resources === 1 ? 1 : Number((1 + (resources - 1) * 0.65).toFixed(2))];
+  })
+) as Record<number, number>;
+
+const buildDefaultMultitaskEfficiency = (maxConcurrent: number) => Object.fromEntries(
+  Array.from({ length: Math.max(1, maxConcurrent) }, (_, index) => {
+    const load = index + 1;
+    return [load, Number(Math.max(0.25, 1 - (load - 1) * 0.2).toFixed(2))];
+  })
+) as Record<number, number>;
+
+const updateEfficiencyValue = (record: Record<number, number> | undefined, key: number, value: number) => ({
+  ...(record || {}),
+  [key]: Math.max(0.05, Number.isFinite(value) ? value : 1),
+});
+
+const sanitizeCollaborativeTeams = (value: unknown, fallbackCapacity: number) => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter(isObjectRecord)
+    .map((team, index) => ({
+      id: typeof team.id === 'string' && team.id.trim() ? team.id : `team-${index + 1}`,
+      name: typeof team.name === 'string' && team.name.trim() ? team.name : `Team ${index + 1}`,
+      resources: toPositiveInteger(team.resources, Math.max(1, Math.min(2, fallbackCapacity)), 1, 50),
+    }))
+    .filter((team) => team.resources > 0);
+};
+
+const DEFAULT_ITEM_PROFILE: ItemProfile = {
+  id: 'standard',
+  name: 'Standard',
+  probability: 1,
+  processingTimeMultiplier: 1,
+  failureMultiplier: 1,
+  cancellationMultiplier: 1,
+  priority: 1,
+  color: '#38bdf8',
+};
+
+const sanitizeItemProfiles = (value: unknown): ItemProfile[] => {
+  if (!Array.isArray(value) || value.length === 0) {
+    return [{ ...DEFAULT_ITEM_PROFILE }];
+  }
+
+  return value
+    .filter(isObjectRecord)
+    .map((profile, index) => ({
+      id: typeof profile.id === 'string' && profile.id.trim() ? profile.id : `profile-${index + 1}`,
+      name: typeof profile.name === 'string' && profile.name.trim() ? profile.name : `Profile ${index + 1}`,
+      probability: Math.max(0, Math.min(1, toFiniteNumber(profile.probability, index === 0 ? 1 : 0))),
+      processingTimeMultiplier: Math.max(0.01, toFiniteNumber(profile.processingTimeMultiplier, 1)),
+      failureMultiplier: Math.max(0, toFiniteNumber(profile.failureMultiplier, 1)),
+      cancellationMultiplier: Math.max(0, toFiniteNumber(profile.cancellationMultiplier, 1)),
+      priority: Math.max(0, toFiniteNumber(profile.priority, 1)),
+      color: typeof profile.color === 'string' && profile.color.trim() ? profile.color : DEFAULT_ITEM_PROFILE.color,
+    }));
+};
+
+const getProfileProbabilityTotal = (step: ProcessStep) => (step.itemProfiles || []).reduce((sum, profile) => sum + (profile.probability || 0), 0);
+
+const updateItemProfile = (step: ProcessStep, profileId: string, updates: Partial<ItemProfile>): ProcessStep => ({
+  ...step,
+  itemProfiles: sanitizeItemProfiles((step.itemProfiles || [DEFAULT_ITEM_PROFILE]).map((profile) => (
+    profile.id === profileId ? { ...profile, ...updates } : profile
+  ))),
+});
+
+const getEditableTeams = (step: ProcessStep) => (
+  step.collaborativeTeams && step.collaborativeTeams.length > 0
+    ? step.collaborativeTeams
+    : [{ id: `team-${Date.now()}`, name: 'Team 1', resources: step.targetResourcesPerItem ?? 2 }]
+);
+
+const getTeamAllocationMode = (step: ProcessStep) => step.teamAllocationMode || (step.collaborativeTeams && step.collaborativeTeams.length > 0 ? 'explicit' : 'auto');
+const getTeamResourceTotal = (step: ProcessStep) => getTeamAllocationMode(step) === 'explicit'
+  ? getEditableTeams(step).reduce((sum, team) => sum + toPositiveInteger(team.resources, 1, 1, 50), 0)
+  : step.capacity;
+
+const getStepValidationError = (step: ProcessStep | null) => {
+  if (!step) {
+    return null;
+  }
+
+  if (step.type === 'start') {
+    const total = getProfileProbabilityTotal(step);
+    if (step.itemProfiles && step.itemProfiles.length > 0 && Math.abs(total - 1) > 0.001) {
+      return `Item profile probabilities must total 100% (currently ${(total * 100).toFixed(1)}%).`;
+    }
+    return null;
+  }
+
+  if (step.type !== 'process' || step.simulationMode === 'delay') {
+    return null;
+  }
+
+  if ((step.resourceExecutionMode || 'single') !== 'collaborative') {
+    return null;
+  }
+
+  if (getTeamAllocationMode(step) !== 'explicit') {
+    const targetSize = toPositiveInteger(step.targetResourcesPerItem, 1, 1, 50);
+    if (targetSize > step.capacity) {
+      return `Default team size (${targetSize}) cannot exceed Capacity (${step.capacity}).`;
+    }
+    return null;
+  }
+
+  const teams = getEditableTeams(step);
+  if (teams.length === 0) {
+    return 'Add at least one team.';
+  }
+
+  const emptyName = teams.find((team) => !team.name || !team.name.trim());
+  if (emptyName) {
+    return 'Every team needs a name.';
+  }
+
+  const duplicateName = teams.some((team, index) => teams.findIndex((otherTeam) => otherTeam.name.trim().toLowerCase() === team.name.trim().toLowerCase()) !== index);
+  if (duplicateName) {
+    return 'Team names must be unique.';
+  }
+
+  const totalTeamResources = getTeamResourceTotal(step);
+  if (totalTeamResources !== step.capacity) {
+    return `Team resources (${totalTeamResources}) must equal Capacity (${step.capacity}).`;
+  }
+
+  const maxTeamSize = Math.max(...teams.map((team) => toPositiveInteger(team.resources, 1, 1, 50)));
+  if ((step.maxResourcesPerItem ?? maxTeamSize) < maxTeamSize) {
+    return `Max resources / item must be at least the largest team size (${maxTeamSize}).`;
+  }
+
+  return null;
+};
 
 const cloneStep = (step: ProcessStep): ProcessStep => ({
   ...step,
@@ -206,6 +435,18 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
   const randomnessMode = typeof rawRandomnessMode === 'string' && VALID_RANDOMNESS_MODES.includes(rawRandomnessMode as RandomnessMode)
     ? rawRandomnessMode as RandomnessMode
     : 'fixed';
+  const calendarMode = rawStep.calendarMode === 'custom' ? 'custom' : 'inherit';
+  const stepBusinessCalendar = isObjectRecord(rawStep.businessCalendar)
+    ? normalizeBusinessCalendar({
+        enabled: rawStep.businessCalendar.enabled !== false,
+        daysOfWeek: Array.isArray(rawStep.businessCalendar.daysOfWeek) ? rawStep.businessCalendar.daysOfWeek.map(day => Number(day)) : DEFAULT_BUSINESS_CALENDAR.daysOfWeek,
+        startHour: toFiniteNumber(rawStep.businessCalendar.startHour, DEFAULT_BUSINESS_CALENDAR.startHour),
+        endHour: toFiniteNumber(rawStep.businessCalendar.endHour, DEFAULT_BUSINESS_CALENDAR.endHour),
+        nonWorkingArrivalPolicy: typeof rawStep.businessCalendar.nonWorkingArrivalPolicy === 'string' && VALID_NON_WORKING_POLICIES.includes(rawStep.businessCalendar.nonWorkingArrivalPolicy as NonWorkingArrivalPolicy)
+          ? rawStep.businessCalendar.nonWorkingArrivalPolicy as NonWorkingArrivalPolicy
+          : DEFAULT_BUSINESS_CALENDAR.nonWorkingArrivalPolicy,
+      })
+    : undefined;
   const rawArrivalInputMode = rawStep.arrivalInputMode;
   const arrivalInputMode = isStart && typeof rawArrivalInputMode === 'string' && VALID_ARRIVAL_INPUT_MODES.includes(rawArrivalInputMode as ArrivalInputMode)
     ? rawArrivalInputMode as ArrivalInputMode
@@ -214,9 +455,29 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
   const simulationMode = isProcess && typeof rawSimulationMode === 'string' && VALID_SIMULATION_MODES.includes(rawSimulationMode as StepSimulationMode)
     ? rawSimulationMode as StepSimulationMode
     : isProcess ? 'resource' : undefined;
+  const rawResourceExecutionMode = rawStep.resourceExecutionMode;
+  const resourceExecutionMode = isProcess && typeof rawResourceExecutionMode === 'string' && VALID_RESOURCE_EXECUTION_MODES.includes(rawResourceExecutionMode as ResourceExecutionMode)
+    ? rawResourceExecutionMode as ResourceExecutionMode
+    : isProcess ? 'single' : undefined;
+  const rawTeamAllocationMode = rawStep.teamAllocationMode;
+  const teamAllocationMode = isProcess && typeof rawTeamAllocationMode === 'string' && VALID_TEAM_ALLOCATION_MODES.includes(rawTeamAllocationMode as TeamAllocationMode)
+    ? rawTeamAllocationMode as TeamAllocationMode
+    : isProcess ? Array.isArray(rawStep.collaborativeTeams) && rawStep.collaborativeTeams.length > 0 ? 'explicit' : 'auto' : undefined;
+  const minResourcesPerItem = isProcess ? toPositiveInteger(rawStep.minResourcesPerItem, 1, 1, 50) : undefined;
+  const maxResourcesPerItem = isProcess ? Math.max(minResourcesPerItem ?? 1, toPositiveInteger(rawStep.maxResourcesPerItem, 1, 1, 50)) : undefined;
+  const targetResourcesPerItem = isProcess ? Math.max(minResourcesPerItem ?? 1, Math.min(maxResourcesPerItem ?? 1, toPositiveInteger(rawStep.targetResourcesPerItem, Math.min(2, maxResourcesPerItem ?? 1), 1, 50))) : undefined;
+  const collaborativeTeams = isProcess ? sanitizeCollaborativeTeams(rawStep.collaborativeTeams, Math.max(1, toFiniteNumber(rawStep.capacity, 1))) : undefined;
+  const maxConcurrentItemsPerResource = isProcess ? toPositiveInteger(rawStep.maxConcurrentItemsPerResource, 1, 1, 50) : undefined;
+  const collaborativeEfficiency = isProcess
+    ? sanitizeEfficiencyRecord(rawStep.collaborativeEfficiency, maxResourcesPerItem ?? 1, buildDefaultCollaborativeEfficiency(maxResourcesPerItem ?? 1))
+    : undefined;
+  const multitaskEfficiency = isProcess
+    ? sanitizeEfficiencyRecord(rawStep.multitaskEfficiency, maxConcurrentItemsPerResource ?? 1, buildDefaultMultitaskEfficiency(maxConcurrentItemsPerResource ?? 1))
+    : undefined;
   const arrivalUnit = isStart && typeof rawStep.arrivalUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.arrivalUnit)
     ? rawStep.arrivalUnit as DurationUnit
     : isStart ? 's' : undefined;
+  const itemProfiles = isStart ? sanitizeItemProfiles(rawStep.itemProfiles) : undefined;
   const endTimeUnit = isEnd && typeof rawStep.endTimeUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.endTimeUnit)
     ? rawStep.endTimeUnit as DurationUnit
     : isEnd ? 'min' : undefined;
@@ -254,10 +515,21 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
     type,
     name: typeof rawStep.name === 'string' && rawStep.name.trim() ? rawStep.name : isStart ? 'Start Point' : isEnd ? 'End Point' : `Step ${index + 1}`,
     randomnessMode,
+    calendarMode,
+    businessCalendar: calendarMode === 'custom' ? stepBusinessCalendar || normalizeBusinessCalendar({ ...DEFAULT_BUSINESS_CALENDAR, enabled: true }) : undefined,
     arrivalInputMode,
     arrivalUnit,
     endTimeUnit,
     simulationMode,
+    resourceExecutionMode,
+    minResourcesPerItem,
+    targetResourcesPerItem,
+    maxResourcesPerItem,
+    teamAllocationMode,
+    collaborativeTeams,
+    collaborativeEfficiency,
+    maxConcurrentItemsPerResource,
+    multitaskEfficiency,
     capacity: isProcess ? Math.max(1, Math.round(toFiniteNumber(rawStep.capacity, 1))) : 0,
     processingTime: isProcess ? Math.max(0, toFiniteNumber(rawStep.processingTime, 2000)) : 0,
     processingTimeUnit,
@@ -269,6 +541,8 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
     minArrivalRate: isStart ? toPositiveNumber(rawStep.minArrivalRate, 0.2, 0.000000001) : undefined,
     maxArrivalRate: isStart ? toPositiveNumber(rawStep.maxArrivalRate, 0.8, 0.000000001) : undefined,
     arrivalBatchSize: isStart ? getBatchSize(rawStep.arrivalBatchSize) : undefined,
+    arrivalBatchIntervalMs: isStart ? Math.max(0, toFiniteNumber(rawStep.arrivalBatchIntervalMs, 0)) : undefined,
+    itemProfiles,
     failureProbability: Math.max(0, Math.min(1, toFiniteNumber(rawStep.failureProbability, 0))),
     cancellationProbability: Math.max(0, Math.min(1, toFiniteNumber(rawStep.cancellationProbability, 0))),
     color: typeof rawStep.color === 'string' && rawStep.color.trim() ? rawStep.color : isStart ? '#10b981' : isEnd ? '#ef4444' : '#3b82f6',
@@ -310,11 +584,24 @@ const sanitizeConfig = (rawConfig: unknown, migrateDefaultVariance = false): Sim
       ...step,
       connections: normalizedConnections,
       sourceProcessingTimes: filteredSourceRules,
+      calendarMode: step.calendarMode || 'inherit',
+      businessCalendar: step.calendarMode === 'custom' ? normalizeBusinessCalendar(step.businessCalendar || { ...DEFAULT_BUSINESS_CALENDAR, enabled: true }) : undefined,
       minArrivalRate: step.type === 'start' ? Math.min(step.minArrivalRate ?? 0.2, step.maxArrivalRate ?? 0.8) : undefined,
       maxArrivalRate: step.type === 'start' ? Math.max(step.minArrivalRate ?? 0.2, step.maxArrivalRate ?? 0.8) : undefined,
       arrivalBatchSize: step.type === 'start' ? getBatchSize(step.arrivalBatchSize) : undefined,
+      arrivalBatchIntervalMs: step.type === 'start' ? Math.max(0, toFiniteNumber(step.arrivalBatchIntervalMs, 0)) : undefined,
+      itemProfiles: step.type === 'start' ? sanitizeItemProfiles(step.itemProfiles) : undefined,
       minProcessingTime: step.type === 'process' ? Math.min(step.minProcessingTime ?? 1000, step.maxProcessingTime ?? 3000) : 0,
       maxProcessingTime: step.type === 'process' ? Math.max(step.minProcessingTime ?? 1000, step.maxProcessingTime ?? 3000) : 0,
+      resourceExecutionMode: step.type === 'process' ? step.resourceExecutionMode || 'single' : undefined,
+      minResourcesPerItem: step.type === 'process' ? Math.min(step.minResourcesPerItem ?? 1, step.maxResourcesPerItem ?? 1) : undefined,
+      targetResourcesPerItem: step.type === 'process' ? Math.max(Math.min(step.minResourcesPerItem ?? 1, step.maxResourcesPerItem ?? 1), Math.min(step.targetResourcesPerItem ?? Math.min(2, step.maxResourcesPerItem ?? 1), Math.max(step.minResourcesPerItem ?? 1, step.maxResourcesPerItem ?? 1))) : undefined,
+      maxResourcesPerItem: step.type === 'process' ? Math.max(step.minResourcesPerItem ?? 1, step.maxResourcesPerItem ?? 1) : undefined,
+      teamAllocationMode: step.type === 'process' ? step.teamAllocationMode || (step.collaborativeTeams && step.collaborativeTeams.length > 0 ? 'explicit' : 'auto') : undefined,
+      collaborativeTeams: step.type === 'process' ? sanitizeCollaborativeTeams(step.collaborativeTeams, step.capacity || 1) : undefined,
+      maxConcurrentItemsPerResource: step.type === 'process' ? Math.max(1, step.maxConcurrentItemsPerResource ?? 1) : undefined,
+      collaborativeEfficiency: step.type === 'process' ? step.collaborativeEfficiency || buildDefaultCollaborativeEfficiency(step.maxResourcesPerItem ?? 1) : undefined,
+      multitaskEfficiency: step.type === 'process' ? step.multitaskEfficiency || buildDefaultMultitaskEfficiency(step.maxConcurrentItemsPerResource ?? 1) : undefined,
     };
   });
 
@@ -326,6 +613,22 @@ const sanitizeConfig = (rawConfig: unknown, migrateDefaultVariance = false): Sim
     simulationMode: typeof rawConfig.simulationMode === 'string' && ['realistic', 'worst-case'].includes(rawConfig.simulationMode)
       ? rawConfig.simulationMode as 'realistic' | 'worst-case'
       : 'realistic',
+    calendarStartIso: typeof rawConfig.calendarStartIso === 'string' && rawConfig.calendarStartIso.trim() ? rawConfig.calendarStartIso : '2026-01-05T00:00:00',
+    businessCalendar: isObjectRecord(rawConfig.businessCalendar)
+      ? normalizeBusinessCalendar({
+          enabled: Boolean(rawConfig.businessCalendar.enabled),
+          daysOfWeek: Array.isArray(rawConfig.businessCalendar.daysOfWeek) ? rawConfig.businessCalendar.daysOfWeek.map(day => Number(day)) : DEFAULT_BUSINESS_CALENDAR.daysOfWeek,
+          startHour: toFiniteNumber(rawConfig.businessCalendar.startHour, DEFAULT_BUSINESS_CALENDAR.startHour),
+          endHour: toFiniteNumber(rawConfig.businessCalendar.endHour, DEFAULT_BUSINESS_CALENDAR.endHour),
+          nonWorkingArrivalPolicy: typeof rawConfig.businessCalendar.nonWorkingArrivalPolicy === 'string' && VALID_NON_WORKING_POLICIES.includes(rawConfig.businessCalendar.nonWorkingArrivalPolicy as NonWorkingArrivalPolicy)
+            ? rawConfig.businessCalendar.nonWorkingArrivalPolicy as NonWorkingArrivalPolicy
+            : DEFAULT_BUSINESS_CALENDAR.nonWorkingArrivalPolicy,
+        })
+      : DEFAULT_BUSINESS_CALENDAR,
+    demandModifiers: Array.isArray(rawConfig.demandModifiers)
+      ? normalizeDemandModifiers(rawConfig.demandModifiers.filter(isObjectRecord) as Partial<DemandModifier>[])
+      : [],
+    autoPause: sanitizeAutoPause(rawConfig.autoPause),
   };
 };
 
@@ -388,20 +691,29 @@ const App: React.FC = () => {
   const [canvasViewMode, setCanvasViewMode] = useState<CanvasViewMode>('map');
   const [flowClipboard, setFlowClipboard] = useState<ProcessStep[] | null>(null);
   const [selectedStepIds, setSelectedStepIds] = useState<string[]>([]);
+  const [autoPauseNotice, setAutoPauseNotice] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   
   // Edit Modal State
   const [editingStep, setEditingStep] = useState<ProcessStep | null>(null);
   const [activeTab, setActiveTab] = useState<'basic' | 'connections' | 'rules' | 'exceptions'>('basic');
+  const editingStepValidationError = getStepValidationError(editingStep);
 
   // Simulation Hook
-  const { items, stepStats, simulationTimeMs, globalStats, resetSimulation } = useProcessSimulation(config);
+  const { items, stepStats, simulationTimeMs, globalStats, autoPauseReason, resetSimulation } = useProcessSimulation(config, (reason) => {
+    setConfig((previous) => previous.isRunning ? { ...previous, isRunning: false } : previous);
+    setAutoPauseNotice(reason);
+  });
 
   // Handlers
-  const togglePlay = () => setConfig(p => ({ ...p, isRunning: !p.isRunning }));
+  const togglePlay = () => {
+    setAutoPauseNotice(null);
+    setConfig(p => ({ ...p, isRunning: !p.isRunning }));
+  };
   
   const saveStepUpdate = () => {
     if (!editingStep) return;
+    if (editingStepValidationError) return;
     setConfig(p => ({
       ...p,
       steps: p.steps.map(s => s.id === editingStep.id ? editingStep : s)
@@ -500,6 +812,7 @@ const App: React.FC = () => {
       minArrivalRate: isStart ? 8 : undefined,
       maxArrivalRate: isStart ? 20 : undefined,
       arrivalBatchSize: isStart ? 1 : undefined,
+      arrivalBatchIntervalMs: isStart ? 0 : undefined,
       failureProbability: 0,
       cancellationProbability: 0,
       color: isStart ? '#10b981' : isEnd ? '#ef4444' : '#3b82f6',
@@ -834,6 +1147,54 @@ const App: React.FC = () => {
     setConfig((p) => ({ ...p, timeCompression: parsed }));
   };
 
+  const businessCalendar = normalizeBusinessCalendar(config.businessCalendar);
+  const demandModifiers = normalizeDemandModifiers(config.demandModifiers);
+  const currentBusinessDate = getBusinessDate(config.calendarStartIso, simulationTimeMs);
+  const globalIsWorking = isWorkingTime(businessCalendar, config.calendarStartIso, simulationTimeMs);
+  const activeDemandModifiers = getActiveDemandModifiers(demandModifiers, config.calendarStartIso, simulationTimeMs);
+  const activeDemandModifierIds = new Set(activeDemandModifiers.map((modifier) => modifier.id));
+  const currentDemandMultiplier = getDemandMultiplier(demandModifiers, config.calendarStartIso, simulationTimeMs);
+  const autoPauseProgressRows = getAutoPauseProgressRows(config.autoPause, globalStats, simulationTimeMs);
+  const updateBusinessCalendar = (updates: Partial<typeof businessCalendar>) => {
+    setConfig((previous) => ({
+      ...previous,
+      businessCalendar: normalizeBusinessCalendar({ ...businessCalendar, ...updates }),
+    }));
+  };
+  const updateDemandModifier = (modifierId: string, updates: Partial<DemandModifier>) => {
+    setConfig((previous) => ({
+      ...previous,
+      demandModifiers: normalizeDemandModifiers((previous.demandModifiers || []).map((modifier) => (
+        modifier.id === modifierId ? { ...modifier, ...updates } : modifier
+      ))),
+    }));
+  };
+  const addDemandModifier = () => {
+    setConfig((previous) => {
+      const modifiers = normalizeDemandModifiers(previous.demandModifiers);
+      return {
+        ...previous,
+        demandModifiers: normalizeDemandModifiers([
+          ...modifiers,
+          {
+            id: `modifier-${Date.now()}`,
+            name: `Peak ${modifiers.length + 1}`,
+            enabled: true,
+            multiplier: 2,
+            startHour: 9,
+            endHour: 11,
+          },
+        ]),
+      };
+    });
+  };
+  const removeDemandModifier = (modifierId: string) => {
+    setConfig((previous) => ({
+      ...previous,
+      demandModifiers: (previous.demandModifiers || []).filter((modifier) => modifier.id !== modifierId),
+    }));
+  };
+
   return (
     <div data-theme={uiTheme} className="min-h-screen bg-slate-950 text-slate-200 flex flex-col font-sans selection:bg-blue-500/30 theme-root">
       <input
@@ -914,8 +1275,8 @@ const App: React.FC = () => {
              <button onClick={() => setIsSidebarOpen(false)} className="text-slate-400"><X size={20}/></button>
           </div>
 
-          <div className="custom-scrollbar h-full overflow-y-auto p-5 space-y-6">
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 space-y-4">
+          <div className="custom-scrollbar h-full overflow-y-auto p-4 space-y-4">
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-3">
               <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
                 <Settings size={14}/> Quick Controls
               </h3>
@@ -937,32 +1298,32 @@ const App: React.FC = () => {
                 </div>
               </div>
               <div className="flex gap-2">
-                <button 
+                <button
                   onClick={togglePlay}
-                  className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg font-semibold transition-all ${
-                    config.isRunning 
-                      ? 'bg-amber-500/10 text-amber-500 border border-amber-500/50 hover:bg-amber-500/20' 
+                  className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg font-semibold transition-all ${
+                    config.isRunning
+                      ? 'bg-amber-500/10 text-amber-500 border border-amber-500/50 hover:bg-amber-500/20'
                       : 'bg-emerald-500 hover:bg-emerald-400 text-slate-900 shadow-lg shadow-emerald-900/20'
                   }`}
                 >
                   {config.isRunning ? <><Pause size={18}/> Pause</> : <><Play size={18}/> Start</>}
                 </button>
-                <button 
+                <button
                   onClick={resetSimulation}
-                  className="p-3 rounded-lg bg-slate-800 border border-slate-600 hover:bg-slate-700 text-slate-300 transition-colors"
+                  className="p-2.5 rounded-lg bg-slate-700 border border-slate-500 hover:bg-slate-600 text-slate-200 transition-colors"
                   title="Reset"
                 >
                   <RotateCcw size={18}/>
                 </button>
               </div>
 
-              <div className="space-y-4 pt-1">
+              <div className="space-y-3">
                 <div>
-                  <div className="flex justify-between text-sm mb-1">
+                  <div className="flex justify-between text-xs mb-1">
                     <span className="text-slate-400">Speed</span>
                     <span className="font-mono text-purple-400">{config.speedMultiplier}x</span>
                   </div>
-                  <input 
+                  <input
                     type="range" min="1" max="10" step="1"
                     value={config.speedMultiplier}
                     onChange={(e) => setConfig(p => ({ ...p, speedMultiplier: parseInt(e.target.value) }))}
@@ -970,144 +1331,485 @@ const App: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <div className="flex justify-between text-sm mb-1 gap-3">
-                    <span className="text-slate-400">Simulation Clock</span>
-                    <span className="text-right font-mono text-cyan-400 text-[11px]">{activeCompressionPreset?.label || `${config.timeCompression}x time`}</span>
+                  <div className="flex justify-between items-start text-xs mb-1 gap-2">
+                    <span className="text-slate-400">Sim Clock</span>
+                    <span className="text-right font-mono text-cyan-400 text-[10px] leading-tight">{activeCompressionPreset?.label || `${config.timeCompression}x`}</span>
                   </div>
                   <select
                     value={compressionSelectValue}
                     onChange={(e) => applyClockPreset(e.target.value)}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/30"
+                    className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-200 outline-none transition focus:border-cyan-500"
                   >
                     {TIME_COMPRESSION_PRESETS.map((preset) => (
                       <option key={preset.value} value={String(preset.value)}>{preset.label}</option>
                     ))}
                     <option value={CUSTOM_CLOCK_VALUE}>Custom</option>
                   </select>
-                  <p className="mt-2 text-xs leading-relaxed text-slate-500">{activeCompressionPreset?.hint || 'Choose how much simulated time passes during each real second.'}</p>
-                  <div className="mt-3">
-                    <div className="flex justify-between text-[11px] text-slate-500 mb-1">
-                      <span>Custom Ratio</span>
-                      <span className="font-mono text-cyan-400">{config.timeCompression} sim sec / real sec</span>
-                    </div>
+                  <div className="mt-2">
                     <input
                       type="number"
                       min="0.001"
                       step="0.001"
                       value={config.timeCompression}
                       onChange={(e) => applyCustomClockValue(e.target.value)}
-                      className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/30"
+                      placeholder="Custom ratio"
+                      className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-200 outline-none transition focus:border-cyan-500"
                     />
                   </div>
                 </div>
-                <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-3">
-                  <div className="flex items-center justify-between gap-3 text-sm">
-                    <span className="text-slate-300">Current Sim Time</span>
+                <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-2.5 py-2">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="text-slate-300">Sim Time</span>
                     <span className="font-mono text-cyan-300">{simulationClockLabel}</span>
                   </div>
                 </div>
-                <div>
-                  <div className="flex justify-between text-sm mb-2">
-                    <span className="text-slate-400">Simulation Mode</span>
-                    <span className={`text-xs font-semibold ${config.simulationMode === 'worst-case' ? 'text-orange-400' : 'text-emerald-400'}`}>
-                      {config.simulationMode === 'worst-case' ? 'Worst-Case' : 'Realistic'}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => setConfig(p => ({ ...p, simulationMode: 'realistic' }))}
-                      className={`flex flex-col items-center justify-center rounded-lg border px-3 py-2.5 text-xs font-semibold transition-colors ${
-                        (config.simulationMode || 'realistic') === 'realistic'
-                          ? 'border-emerald-500 bg-emerald-500/10 text-emerald-300'
-                          : 'border-slate-800 bg-slate-900 text-slate-400 hover:bg-slate-800'
-                      }`}
-                    >
-                      <PlayCircle size={16} className="mb-1" />
-                      Realistic
-                    </button>
-                    <button
-                      onClick={() => setConfig(p => ({ ...p, simulationMode: 'worst-case' }))}
-                      className={`flex flex-col items-center justify-center rounded-lg border px-3 py-2.5 text-xs font-semibold transition-colors ${
-                        config.simulationMode === 'worst-case'
-                          ? 'border-orange-500 bg-orange-500/10 text-orange-300'
-                          : 'border-slate-800 bg-slate-900 text-slate-400 hover:bg-slate-800'
-                      }`}
-                    >
-                      <AlertTriangle size={16} className="mb-1" />
-                      Worst-Case
-                    </button>
-                  </div>
-                  <p className="mt-2 text-xs leading-relaxed text-slate-500">
-                    {config.simulationMode === 'worst-case'
-                      ? '⚠️ Stress testing mode: batches arrive instantly, cancellations happen faster, variance produces extreme values. Use for capacity planning.'
-                      : '✓ Normal mode: realistic distributions and timing for everyday simulation.'}
-                  </p>
-                </div>
               </div>
             </div>
 
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 space-y-3">
-              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                <Sparkles size={14}/> AI Scenario
-              </h3>
-              <p className="text-xs text-slate-500 leading-relaxed">Describe a real process and let AI rebuild the nodes and routes.</p>
-              <div className="relative">
-                <textarea 
-                  value={aiPrompt}
-                  onChange={(e) => setAiPrompt(e.target.value)}
-                  placeholder="E.g., Car Wash, Hospital ER..."
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none resize-none h-24 transition-all"
-                />
-                <button 
-                  onClick={handleGenerateScenario}
-                  disabled={isGenerating || !aiPrompt}
-                  className="absolute bottom-2 right-2 p-2 bg-blue-600 hover:bg-blue-500 text-white rounded-md disabled:opacity-50 transition-colors"
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                  <Clock size={14}/> Business Time
+                </h3>
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${globalIsWorking ? 'bg-emerald-500 text-slate-950' : 'bg-slate-700 text-slate-400'}`}>
+                  {globalIsWorking ? 'Open' : 'Closed'}
+                </span>
+              </div>
+              <div className="space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-2 rounded-lg border border-emerald-500/20 bg-slate-950/50 px-2.5 py-1.5">
+                  <span className="text-slate-400 text-[11px]">Date</span>
+                  <span className="font-mono text-emerald-100 text-[11px]">{formatBusinessDateTime(currentBusinessDate)}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-2.5 py-1.5">
+                  <span className="text-slate-400 text-[11px]">Demand</span>
+                  <span className="font-mono font-bold text-amber-200 text-[11px]">x{currentDemandMultiplier.toFixed(2)}</span>
+                </div>
+                {activeDemandModifiers.length > 0 && (
+                  <div className="rounded-lg border border-slate-800 bg-slate-950/50 px-2.5 py-1.5">
+                    <div className="mb-1.5 text-[10px] text-slate-400">Active peaks:</div>
+                    <div className="flex flex-wrap gap-1">
+                      {activeDemandModifiers.map((modifier) => (
+                        <span key={modifier.id} className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-amber-100">
+                          {modifier.name} x{modifier.multiplier}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {autoPauseProgressRows.length > 0 && (
+                  <div className="rounded-lg border border-rose-500/20 bg-rose-500/10 px-2.5 py-1.5">
+                    <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-rose-200">Auto Pause Progress</div>
+                    <div className="space-y-1">
+                      {autoPauseProgressRows.map((row) => {
+                        const pct = Math.min(100, (row.value / Math.max(1, row.target)) * 100);
+                        return (
+                          <div key={row.label}>
+                            <div className="mb-0.5 flex justify-between gap-2 text-[9px] text-slate-400">
+                              <span>{row.label}</span>
+                              <span className="font-mono text-rose-100">{Math.floor(row.value)}/{row.target}</span>
+                            </div>
+                            <div className="h-1 overflow-hidden rounded-full bg-slate-800">
+                              <div className="h-full rounded-full bg-rose-400" style={{ width: `${pct}%` }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                  <AlertTriangle size={14}/> Auto Pause
+                </h3>
+                <button
+                  onClick={() => setConfig((previous) => ({ ...previous, autoPause: { ...(previous.autoPause || { enabled: false }), enabled: !previous.autoPause?.enabled } }))}
+                  className={`rounded-full px-2.5 py-0.5 text-[10px] font-semibold transition-colors ${config.autoPause?.enabled ? 'bg-rose-500 text-white' : 'bg-slate-700 text-slate-400'}`}
                 >
-                  {isGenerating ? <Loader2 size={16} className="animate-spin"/> : <ArrowRight size={16}/>}
+                  {config.autoPause?.enabled ? 'On' : 'Off'}
                 </button>
               </div>
-            </div>
-
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 space-y-3">
-              <div className="flex justify-between items-center">
-                 <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                    <BarChart3 size={14}/> Analysis
-                 </h3>
-                 <button 
-                    onClick={handleAnalyze} 
-                    disabled={isAnalyzing || globalStats.totalItemsFinished < 5}
-                    className="text-xs bg-slate-700 hover:bg-slate-600 text-slate-200 px-2 py-1 rounded transition-colors disabled:opacity-50"
-                 >
-                    {isAnalyzing ? 'Thinking...' : 'Analyze'}
-                 </button>
-              </div>
-              
-              {aiAnalysis ? (
-                <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3 text-sm text-slate-300 leading-relaxed">
-                  <MessageSquare size={14} className="inline mr-2 text-blue-400"/>
-                  {aiAnalysis}
+              {(autoPauseNotice || autoPauseReason) && (
+                <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-100">
+                  Paused: {autoPauseNotice || autoPauseReason}
                 </div>
-              ) : (
-                <div className="text-xs text-slate-500 italic text-center py-2">
-                   Run simulation to generate data
+              )}
+              {config.autoPause?.enabled && (
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { key: 'simulationTimeMs' as const, label: 'Sim time', step: 1000, placeholder: 'ms' },
+                    { key: 'totalItemsCreated' as const, label: 'Created', step: 1, placeholder: 'items' },
+                    { key: 'totalItemsFinished' as const, label: 'Finished', step: 1, placeholder: 'items' },
+                    { key: 'activeItems' as const, label: 'Active', step: 1, placeholder: 'items' },
+                    { key: 'totalItemsFailed' as const, label: 'Failed', step: 1, placeholder: 'items' },
+                    { key: 'totalItemsCancelled' as const, label: 'Cancelled', step: 1, placeholder: 'items' },
+                  ].map((field) => (
+                    <div key={field.key}>
+                      <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-rose-200">{field.label}</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step={field.step}
+                        placeholder={field.placeholder}
+                        value={config.autoPause?.[field.key] ?? ''}
+                        onChange={(e) => setConfig((previous) => ({
+                          ...previous,
+                          autoPause: {
+                            ...(previous.autoPause || { enabled: true }),
+                            enabled: true,
+                            [field.key]: e.target.value ? Number(e.target.value) : undefined,
+                          },
+                        }))}
+                        className="w-full rounded-lg border border-rose-500/30 bg-slate-900 px-2 py-1.5 text-xs text-rose-100 outline-none focus:ring-1 focus:ring-rose-500"
+                      />
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
 
-            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 space-y-3">
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                  <Clock size={14}/> Business Hours
+                </h3>
+                <button
+                  onClick={() => updateBusinessCalendar({ enabled: !businessCalendar.enabled })}
+                  className={`rounded-full px-2.5 py-0.5 text-[10px] font-semibold transition-colors ${businessCalendar.enabled ? 'bg-indigo-500 text-white' : 'bg-slate-700 text-slate-400'}`}
+                >
+                  {businessCalendar.enabled ? 'On' : 'Off'}
+                </button>
+              </div>
+              {businessCalendar.enabled && (
+                <div className="space-y-2.5">
+                  <div>
+                    <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-indigo-200">Start date</label>
+                    <input
+                      type="datetime-local"
+                      value={(config.calendarStartIso || '2026-01-05T00:00:00').slice(0, 16)}
+                      onChange={(e) => setConfig((previous) => ({ ...previous, calendarStartIso: e.target.value ? `${e.target.value}:00` : previous.calendarStartIso }))}
+                      className="w-full rounded-lg border border-indigo-500/30 bg-slate-900 px-2 py-1.5 text-[11px] text-indigo-100 outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <label className="block text-[9px] font-semibold uppercase tracking-wider text-indigo-200">Working hours</label>
+                      <button
+                        onClick={() => {
+                          const current = businessCalendar.workingHours || [{ start: 9, end: 17 }];
+                          const lastSegment = current[current.length - 1];
+                          const newStart = lastSegment ? Math.min(23, lastSegment.end) : 9;
+                          const newEnd = Math.min(24, newStart + 1);
+                          updateBusinessCalendar({
+                            workingHours: [...current, { start: newStart, end: newEnd }]
+                          });
+                        }}
+                        className="rounded border border-indigo-500/40 bg-indigo-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-indigo-200 hover:bg-indigo-500/20"
+                      >
+                        + Segment
+                      </button>
+                    </div>
+                    <div className="space-y-1.5">
+                      {(businessCalendar.workingHours || [{ start: 9, end: 17 }]).map((segment, index) => (
+                        <div key={index} className="flex items-center gap-1.5 rounded-lg border border-indigo-500/20 bg-slate-950/70 p-1.5">
+                          <input
+                            type="number"
+                            min="0"
+                            max="23.99"
+                            step="0.5"
+                            value={segment.start}
+                            onChange={(e) => {
+                              const current = businessCalendar.workingHours || [{ start: 9, end: 17 }];
+                              const updated = [...current];
+                              updated[index] = { ...updated[index], start: Number(e.target.value) };
+                              updateBusinessCalendar({ workingHours: updated });
+                            }}
+                            className="w-16 rounded border border-indigo-500/30 bg-slate-900 px-1.5 py-1 text-[11px] text-indigo-100 outline-none focus:ring-1 focus:ring-indigo-500"
+                          />
+                          <span className="text-[10px] text-slate-500">–</span>
+                          <input
+                            type="number"
+                            min="0.01"
+                            max="24"
+                            step="0.5"
+                            value={segment.end}
+                            onChange={(e) => {
+                              const current = businessCalendar.workingHours || [{ start: 9, end: 17 }];
+                              const updated = [...current];
+                              updated[index] = { ...updated[index], end: Number(e.target.value) };
+                              updateBusinessCalendar({ workingHours: updated });
+                            }}
+                            className="w-16 rounded border border-indigo-500/30 bg-slate-900 px-1.5 py-1 text-[11px] text-indigo-100 outline-none focus:ring-1 focus:ring-indigo-500"
+                          />
+                          {(businessCalendar.workingHours || []).length > 1 && (
+                            <button
+                              onClick={() => {
+                                const current = businessCalendar.workingHours || [{ start: 9, end: 17 }];
+                                updateBusinessCalendar({
+                                  workingHours: current.filter((_, i) => i !== index)
+                                });
+                              }}
+                              className="ml-auto rounded border border-red-500/30 bg-red-500/10 p-1 text-red-300 hover:bg-red-500/20"
+                              title="Remove"
+                            >
+                              <Trash2 size={10} />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-indigo-200">Working days</label>
+                    <div className="grid grid-cols-7 gap-1">
+                      {WEEKDAY_OPTIONS.map((day) => {
+                        const selected = businessCalendar.daysOfWeek.includes(day.value);
+                        return (
+                          <button
+                            key={day.value}
+                            onClick={() => updateBusinessCalendar({
+                              daysOfWeek: selected
+                                ? businessCalendar.daysOfWeek.filter((value) => value !== day.value)
+                                : [...businessCalendar.daysOfWeek, day.value].sort(),
+                            })}
+                            className={`rounded border px-1 py-1 text-[10px] font-semibold ${selected ? 'border-indigo-400 bg-indigo-500 text-white' : 'border-slate-700 bg-slate-900 text-slate-500'}`}
+                          >
+                            {day.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-indigo-200">Non-working arrivals</label>
+                    <select
+                      value={businessCalendar.nonWorkingArrivalPolicy || 'queue'}
+                      onChange={(e) => updateBusinessCalendar({ nonWorkingArrivalPolicy: e.target.value as NonWorkingArrivalPolicy })}
+                      className="w-full rounded-lg border border-indigo-500/30 bg-slate-900 px-2 py-1.5 text-[11px] text-indigo-100 outline-none focus:ring-1 focus:ring-indigo-500"
+                    >
+                      {VALID_NON_WORKING_POLICIES.map((policy) => (
+                        <option key={policy} value={policy}>{NON_WORKING_POLICY_LABELS[policy]}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                  <ArrowDownUp size={14}/> Demand Peaks
+                </h3>
+                <button
+                  onClick={addDemandModifier}
+                  className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[9px] font-semibold text-amber-100 hover:bg-amber-500/20"
+                >
+                  + Add
+                </button>
+              </div>
+              {demandModifiers.length === 0 ? (
+                <div className="rounded-lg border border-slate-800 bg-slate-900/70 px-2.5 py-2 text-xs text-slate-500">No peak rules configured.</div>
+              ) : (
+                <div className="space-y-2.5 max-h-80 overflow-y-auto pr-1">
+                  {demandModifiers.map((modifier) => {
+                    const isActivePeak = activeDemandModifierIds.has(modifier.id);
+                    return (
+                    <div key={modifier.id} className={`rounded-lg border p-2.5 ${isActivePeak ? 'border-amber-400 bg-amber-500/15' : 'border-amber-500/20 bg-slate-950/60'}`}>
+                      <div className="mb-2 flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={modifier.enabled}
+                          onChange={(e) => updateDemandModifier(modifier.id, { enabled: e.target.checked })}
+                          className="h-3.5 w-3.5 rounded border-slate-600 bg-slate-900 accent-amber-500"
+                        />
+                        <input
+                          type="text"
+                          value={modifier.name}
+                          onChange={(e) => updateDemandModifier(modifier.id, { name: e.target.value })}
+                          className="min-w-0 flex-1 rounded border border-amber-500/30 bg-slate-900 px-2 py-1 text-xs text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
+                        />
+                        <button
+                          onClick={() => removeDemandModifier(modifier.id)}
+                          className="rounded border border-rose-500/30 px-1.5 py-1 text-[10px] text-rose-200 hover:bg-rose-500/10"
+                        >
+                          Del
+                        </button>
+                      </div>
+                      {isActivePeak && (
+                        <div className="mb-2 rounded border border-amber-400/40 bg-amber-500/20 px-2 py-1 text-[9px] font-semibold text-amber-100">
+                          Active now · x{modifier.multiplier}
+                        </div>
+                      )}
+                      <div className="grid grid-cols-3 gap-1.5 mb-2">
+                        <div>
+                          <label className="mb-0.5 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">Mult</label>
+                          <input
+                            type="number" min="0.01" step="0.05"
+                            value={modifier.multiplier}
+                            onChange={(e) => updateDemandModifier(modifier.id, { multiplier: Number(e.target.value) })}
+                            className="w-full rounded border border-amber-500/30 bg-slate-900 px-1.5 py-1 text-xs text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-0.5 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">Start</label>
+                          <input
+                            type="number" min="0" max="23" step="0.5"
+                            value={modifier.startHour ?? 0}
+                            onChange={(e) => updateDemandModifier(modifier.id, { startHour: Number(e.target.value) })}
+                            className="w-full rounded border border-amber-500/30 bg-slate-900 px-1.5 py-1 text-xs text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-0.5 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">End</label>
+                          <input
+                            type="number" min="1" max="24" step="0.5"
+                            value={modifier.endHour ?? 24}
+                            onChange={(e) => updateDemandModifier(modifier.id, { endHour: Number(e.target.value) })}
+                            className="w-full rounded border border-amber-500/30 bg-slate-900 px-1.5 py-1 text-xs text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
+                          />
+                        </div>
+                      </div>
+                      <div className="mb-2">
+                        <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">Days</label>
+                        <div className="grid grid-cols-7 gap-1">
+                          {WEEKDAY_OPTIONS.map((day) => {
+                            const selected = (modifier.daysOfWeek || []).includes(day.value);
+                            return (
+                              <button
+                                key={day.value}
+                                onClick={() => updateDemandModifier(modifier.id, {
+                                  daysOfWeek: selected
+                                    ? (modifier.daysOfWeek || []).filter((value) => value !== day.value)
+                                    : [...(modifier.daysOfWeek || []), day.value].sort(),
+                                })}
+                                className={`rounded border px-1 py-0.5 text-[9px] font-semibold ${selected ? 'border-amber-400 bg-amber-500 text-slate-950' : 'border-slate-700 bg-slate-900 text-slate-500'}`}
+                              >
+                                {day.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <div>
+                          <label className="mb-0.5 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">Start date</label>
+                          <input
+                            type="date"
+                            value={modifier.startDate || ''}
+                            onChange={(e) => updateDemandModifier(modifier.id, { startDate: e.target.value || undefined })}
+                            className="w-full rounded border border-amber-500/30 bg-slate-900 px-1.5 py-1 text-[10px] text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-0.5 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">End date</label>
+                          <input
+                            type="date"
+                            value={modifier.endDate || ''}
+                            onChange={(e) => updateDemandModifier(modifier.id, { endDate: e.target.value || undefined })}
+                            className="w-full rounded border border-amber-500/30 bg-slate-900 px-1.5 py-1 text-[10px] text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-2.5">
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Simulation Mode</h3>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setConfig(p => ({ ...p, simulationMode: 'realistic' }))}
+                  className={`flex flex-col items-center justify-center rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${
+                    (config.simulationMode || 'realistic') === 'realistic'
+                      ? 'border-emerald-500 bg-emerald-500/10 text-emerald-300'
+                      : 'border-slate-800 bg-slate-900 text-slate-400 hover:bg-slate-800'
+                  }`}
+                >
+                  <PlayCircle size={16} className="mb-1" />
+                  Realistic
+                </button>
+                <button
+                  onClick={() => setConfig(p => ({ ...p, simulationMode: 'worst-case' }))}
+                  className={`flex flex-col items-center justify-center rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${
+                    config.simulationMode === 'worst-case'
+                      ? 'border-orange-500 bg-orange-500/10 text-orange-300'
+                      : 'border-slate-800 bg-slate-900 text-slate-400 hover:bg-slate-800'
+                  }`}
+                >
+                  <AlertTriangle size={16} className="mb-1" />
+                  Worst-Case
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-2.5">
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                <Sparkles size={14}/> AI Scenario
+              </h3>
+              <div className="relative">
+                <textarea
+                  value={aiPrompt}
+                  onChange={(e) => setAiPrompt(e.target.value)}
+                  placeholder="E.g., Car Wash, Hospital ER..."
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-xs focus:ring-1 focus:ring-blue-500 focus:border-transparent outline-none resize-none h-20 transition-all"
+                />
+                <button
+                  onClick={handleGenerateScenario}
+                  disabled={isGenerating || !aiPrompt}
+                  className="absolute bottom-2 right-2 p-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-md disabled:opacity-50 transition-colors"
+                >
+                  {isGenerating ? <Loader2 size={14} className="animate-spin"/> : <ArrowRight size={14}/>}
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-2.5">
+              <div className="flex justify-between items-center">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                  <BarChart3 size={14}/> Analysis
+                </h3>
+                <button
+                  onClick={handleAnalyze}
+                  disabled={isAnalyzing || globalStats.totalItemsFinished < 5}
+                  className="text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-200 px-2 py-1 rounded transition-colors disabled:opacity-50"
+                >
+                  {isAnalyzing ? 'Thinking...' : 'Analyze'}
+                </button>
+              </div>
+
+              {aiAnalysis ? (
+                <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-2.5 text-xs text-slate-300 leading-relaxed">
+                  <MessageSquare size={12} className="inline mr-1.5 text-blue-400"/>
+                  {aiAnalysis}
+                </div>
+              ) : (
+                <div className="text-xs text-slate-500 italic text-center py-2">
+                  Run simulation to generate data
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3.5 space-y-2.5">
               <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Flow steps</h3>
-              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
                 {config.steps.map(step => (
                   <button
                     key={step.id}
                     onClick={() => { setEditingStep(step); setActiveTab('basic'); setIsSidebarOpen(false); }}
-                    className="w-full flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2 text-left hover:border-blue-500/50 hover:bg-slate-800 transition-colors"
+                    className="w-full flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/70 px-2.5 py-2 text-left hover:border-blue-500/50 hover:bg-slate-800 transition-colors"
                   >
                     <span className="flex min-w-0 items-center gap-2">
-                      <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: step.color }} />
-                      <span className="truncate text-sm text-slate-200">{step.name}</span>
+                      <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: step.color }} />
+                      <span className="truncate text-xs text-slate-200">{step.name}</span>
                     </span>
-                    <span className="text-[10px] uppercase text-slate-500 shrink-0">{step.type}</span>
+                    <span className="text-[9px] uppercase text-slate-500 shrink-0">{step.type}</span>
                   </button>
                 ))}
               </div>
@@ -1382,26 +2084,153 @@ const App: React.FC = () => {
 
                             {/* RANDOMNESS MODE TOGGLE */}
                             {editingStep.type !== 'end' && (
-                                <div className="flex items-center justify-between p-3 bg-slate-800 rounded-lg border border-slate-700">
-                                    <div className="flex items-center gap-2">
-                                        <Shuffle size={16} className={editingStep.randomnessMode === 'range' ? 'text-purple-400' : 'text-slate-400'} />
-                                        <span className="text-sm font-semibold text-slate-200">Random Range Mode</span>
-                                    </div>
-                                    <div className="flex items-center gap-2 bg-slate-900 rounded p-1">
-                                        <button 
-                                            onClick={() => setEditingStep({...editingStep, randomnessMode: 'fixed'})}
-                                            className={`text-xs px-3 py-1.5 rounded transition-all ${editingStep.randomnessMode === 'fixed' || !editingStep.randomnessMode ? 'bg-slate-700 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                <>
+                                  <div className="flex items-center justify-between p-3 bg-slate-800 rounded-lg border border-slate-700">
+                                      <div className="flex items-center gap-2">
+                                          <Shuffle size={16} className={editingStep.randomnessMode === 'range' ? 'text-purple-400' : 'text-slate-400'} />
+                                          <span className="text-sm font-semibold text-slate-200">Random Range Mode</span>
+                                      </div>
+                                      <div className="flex items-center gap-2 bg-slate-900 rounded p-1">
+                                          <button 
+                                              onClick={() => setEditingStep({...editingStep, randomnessMode: 'fixed'})}
+                                              className={`text-xs px-3 py-1.5 rounded transition-all ${editingStep.randomnessMode === 'fixed' || !editingStep.randomnessMode ? 'bg-slate-700 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                          >
+                                            Fixed
+                                          </button>
+                                          <button 
+                                              onClick={() => setEditingStep({...editingStep, randomnessMode: 'range'})}
+                                              className={`text-xs px-3 py-1.5 rounded transition-all ${editingStep.randomnessMode === 'range' ? 'bg-purple-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
+                                          >
+                                              Random Range
+                                          </button>
+                                      </div>
+                                  </div>
+
+                                  {editingStep.type === 'start' && (
+                                    <div className="mt-4 rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-4">
+                                      <div className="mb-3 flex items-center justify-between gap-3">
+                                        <div>
+                                          <label className="block text-xs font-semibold text-cyan-200 uppercase">Item Mix / Quality</label>
+                                          <p className="mt-1 text-xs text-slate-500">Define what kind of items this Start Point creates. Probabilities must total 100%.</p>
+                                        </div>
+                                        <button
+                                          onClick={() => {
+                                            const profiles = sanitizeItemProfiles(editingStep.itemProfiles);
+                                            setEditingStep({
+                                              ...editingStep,
+                                              itemProfiles: [
+                                                ...profiles,
+                                                {
+                                                  id: `profile-${Date.now()}`,
+                                                  name: `Profile ${profiles.length + 1}`,
+                                                  probability: 0,
+                                                  processingTimeMultiplier: 1,
+                                                  failureMultiplier: 1,
+                                                  cancellationMultiplier: 1,
+                                                  priority: 1,
+                                                  color: '#38bdf8',
+                                                },
+                                              ],
+                                            });
+                                          }}
+                                          className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/20"
                                         >
-                                          Fixed
+                                          Add Profile
                                         </button>
-                                        <button 
-                                            onClick={() => setEditingStep({...editingStep, randomnessMode: 'range'})}
-                                            className={`text-xs px-3 py-1.5 rounded transition-all ${editingStep.randomnessMode === 'range' ? 'bg-purple-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}
-                                        >
-                                            Random Range
-                                        </button>
+                                      </div>
+                                      <div className={`mb-3 rounded-lg border px-3 py-2 text-xs ${Math.abs(getProfileProbabilityTotal(editingStep) - 1) <= 0.001 ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200' : 'border-rose-500/40 bg-rose-500/10 text-rose-200'}`}>
+                                        Probability total: <span className="font-mono font-bold">{(getProfileProbabilityTotal(editingStep) * 100).toFixed(1)}%</span>
+                                      </div>
+                                      <div className="space-y-3">
+                                        {sanitizeItemProfiles(editingStep.itemProfiles).map((profile) => (
+                                          <div key={profile.id} className="rounded-lg border border-cyan-500/20 bg-slate-950/60 p-3">
+                                            <div className="mb-2 grid grid-cols-[32px_1fr_80px_auto] items-center gap-2">
+                                              <input
+                                                type="color"
+                                                value={profile.color}
+                                                onChange={(e) => setEditingStep(updateItemProfile(editingStep, profile.id, { color: e.target.value }))}
+                                                className="h-8 w-8 cursor-pointer rounded border-none bg-transparent"
+                                                title="Profile color"
+                                              />
+                                              <input
+                                                type="text"
+                                                value={profile.name}
+                                                onChange={(e) => setEditingStep(updateItemProfile(editingStep, profile.id, { name: e.target.value }))}
+                                                className="min-w-0 rounded-lg border border-cyan-500/30 bg-slate-900 px-2 py-1.5 text-xs text-cyan-100 outline-none focus:ring-2 focus:ring-cyan-500"
+                                              />
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                max="100"
+                                                step="1"
+                                                value={Math.round(profile.probability * 100)}
+                                                onChange={(e) => setEditingStep(updateItemProfile(editingStep, profile.id, { probability: Math.max(0, Math.min(1, Number(e.target.value) / 100)) }))}
+                                                className="w-full rounded-lg border border-cyan-500/30 bg-slate-900 px-2 py-1.5 text-xs text-cyan-100 outline-none focus:ring-2 focus:ring-cyan-500"
+                                                title="Probability %"
+                                              />
+                                              <button
+                                                onClick={() => {
+                                                  const profiles = sanitizeItemProfiles(editingStep.itemProfiles).filter((existing) => existing.id !== profile.id);
+                                                  setEditingStep({ ...editingStep, itemProfiles: profiles.length > 0 ? profiles : [{ ...DEFAULT_ITEM_PROFILE }] });
+                                                }}
+                                                disabled={sanitizeItemProfiles(editingStep.itemProfiles).length <= 1}
+                                                className="rounded border border-rose-500/30 px-2 py-1.5 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-40"
+                                              >
+                                                Remove
+                                              </button>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                                              <div>
+                                                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-cyan-200">Time Factor</label>
+                                                <input
+                                                  type="number"
+                                                  min="0.01"
+                                                  step="0.05"
+                                                  value={profile.processingTimeMultiplier}
+                                                  onChange={(e) => setEditingStep(updateItemProfile(editingStep, profile.id, { processingTimeMultiplier: Number(e.target.value) }))}
+                                                  className="w-full rounded-lg border border-cyan-500/30 bg-slate-900 px-2 py-1.5 text-xs text-cyan-100 outline-none focus:ring-2 focus:ring-cyan-500"
+                                                />
+                                              </div>
+                                              <div>
+                                                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-cyan-200">Failure Factor</label>
+                                                <input
+                                                  type="number"
+                                                  min="0"
+                                                  step="0.05"
+                                                  value={profile.failureMultiplier}
+                                                  onChange={(e) => setEditingStep(updateItemProfile(editingStep, profile.id, { failureMultiplier: Number(e.target.value) }))}
+                                                  className="w-full rounded-lg border border-cyan-500/30 bg-slate-900 px-2 py-1.5 text-xs text-cyan-100 outline-none focus:ring-2 focus:ring-cyan-500"
+                                                />
+                                              </div>
+                                              <div>
+                                                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-cyan-200">Cancel Factor</label>
+                                                <input
+                                                  type="number"
+                                                  min="0"
+                                                  step="0.05"
+                                                  value={profile.cancellationMultiplier}
+                                                  onChange={(e) => setEditingStep(updateItemProfile(editingStep, profile.id, { cancellationMultiplier: Number(e.target.value) }))}
+                                                  className="w-full rounded-lg border border-cyan-500/30 bg-slate-900 px-2 py-1.5 text-xs text-cyan-100 outline-none focus:ring-2 focus:ring-cyan-500"
+                                                />
+                                              </div>
+                                              <div>
+                                                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-cyan-200">Priority</label>
+                                                <input
+                                                  type="number"
+                                                  min="0"
+                                                  step="1"
+                                                  value={profile.priority}
+                                                  onChange={(e) => setEditingStep(updateItemProfile(editingStep, profile.id, { priority: Number(e.target.value) }))}
+                                                  className="w-full rounded-lg border border-cyan-500/30 bg-slate-900 px-2 py-1.5 text-xs text-cyan-100 outline-none focus:ring-2 focus:ring-cyan-500"
+                                                />
+                                              </div>
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
                                     </div>
-                                </div>
+                                  )}
+                                </>
                             )}
 
                             {/* START NODE SPECIFIC */}
@@ -1528,6 +2357,149 @@ const App: React.FC = () => {
                                 </div>
                             )}
 
+                            {editingStep.type !== 'end' && (
+                              <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/10 p-4">
+                                <div className="mb-3 flex items-center justify-between gap-3">
+                                  <div>
+                                    <label className="block text-xs font-semibold text-indigo-200 uppercase">Calendar Override</label>
+                                    <p className="mt-1 text-xs text-slate-500">Use global business hours or give this card its own schedule.</p>
+                                  </div>
+                                  <div className="flex rounded-lg bg-slate-900 p-1 text-xs">
+                                    <button
+                                      onClick={() => setEditingStep({ ...editingStep, calendarMode: 'inherit', businessCalendar: undefined })}
+                                      className={`rounded px-3 py-1.5 font-semibold ${editingStep.calendarMode !== 'custom' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                                    >
+                                      Inherit
+                                    </button>
+                                    <button
+                                      onClick={() => setEditingStep({ ...editingStep, calendarMode: 'custom', businessCalendar: normalizeBusinessCalendar(editingStep.businessCalendar || { ...businessCalendar, enabled: true }) })}
+                                      className={`rounded px-3 py-1.5 font-semibold ${editingStep.calendarMode === 'custom' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                                    >
+                                      Custom
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {editingStep.calendarMode === 'custom' && (() => {
+                                  const stepCalendar = normalizeBusinessCalendar(editingStep.businessCalendar || { ...businessCalendar, enabled: true });
+                                  const updateStepCalendar = (updates: Partial<typeof stepCalendar>) => setEditingStep({
+                                    ...editingStep,
+                                    businessCalendar: normalizeBusinessCalendar({ ...stepCalendar, ...updates, enabled: true }),
+                                  });
+
+                                  return (
+                                    <div className="space-y-3">
+                                      <div>
+                                        <div className="mb-2 flex items-center justify-between">
+                                          <label className="block text-[10px] font-semibold uppercase tracking-wider text-indigo-200">Working hours</label>
+                                          <button
+                                            onClick={() => {
+                                              const current = stepCalendar.workingHours || [{ start: 9, end: 17 }];
+                                              const lastSegment = current[current.length - 1];
+                                              const newStart = lastSegment ? Math.min(23, lastSegment.end) : 9;
+                                              const newEnd = Math.min(24, newStart + 1);
+                                              updateStepCalendar({
+                                                workingHours: [...current, { start: newStart, end: newEnd }]
+                                              });
+                                            }}
+                                            className="rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-2 py-1 text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/20"
+                                          >
+                                            + Add
+                                          </button>
+                                        </div>
+                                        <div className="space-y-2">
+                                          {(stepCalendar.workingHours || [{ start: 9, end: 17 }]).map((segment, index) => (
+                                            <div key={index} className="flex items-center gap-2 rounded-lg border border-indigo-500/20 bg-slate-950/70 p-2">
+                                              <div className="flex flex-1 items-center gap-2">
+                                                <input
+                                                  type="number"
+                                                  min="0"
+                                                  max="23.99"
+                                                  step="0.5"
+                                                  value={segment.start}
+                                                  onChange={(e) => {
+                                                    const current = stepCalendar.workingHours || [{ start: 9, end: 17 }];
+                                                    const updated = [...current];
+                                                    updated[index] = { ...updated[index], start: Number(e.target.value) };
+                                                    updateStepCalendar({ workingHours: updated });
+                                                  }}
+                                                  className="w-20 rounded border border-indigo-500/30 bg-slate-900 px-2 py-1 text-xs text-indigo-100 outline-none focus:ring-1 focus:ring-indigo-500"
+                                                />
+                                                <span className="text-xs text-slate-500">to</span>
+                                                <input
+                                                  type="number"
+                                                  min="0.01"
+                                                  max="24"
+                                                  step="0.5"
+                                                  value={segment.end}
+                                                  onChange={(e) => {
+                                                    const current = stepCalendar.workingHours || [{ start: 9, end: 17 }];
+                                                    const updated = [...current];
+                                                    updated[index] = { ...updated[index], end: Number(e.target.value) };
+                                                    updateStepCalendar({ workingHours: updated });
+                                                  }}
+                                                  className="w-20 rounded border border-indigo-500/30 bg-slate-900 px-2 py-1 text-xs text-indigo-100 outline-none focus:ring-1 focus:ring-indigo-500"
+                                                />
+                                              </div>
+                                              {(stepCalendar.workingHours || []).length > 1 && (
+                                                <button
+                                                  onClick={() => {
+                                                    const current = stepCalendar.workingHours || [{ start: 9, end: 17 }];
+                                                    updateStepCalendar({
+                                                      workingHours: current.filter((_, i) => i !== index)
+                                                    });
+                                                  }}
+                                                  className="rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-xs text-red-300 hover:bg-red-500/20"
+                                                  title="Remove"
+                                                >
+                                                  <Trash2 size={12} />
+                                                </button>
+                                              )}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                      <div>
+                                        <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-indigo-200">Working days</label>
+                                        <div className="grid grid-cols-7 gap-1">
+                                          {WEEKDAY_OPTIONS.map((day) => {
+                                            const selected = stepCalendar.daysOfWeek.includes(day.value);
+                                            return (
+                                              <button
+                                                key={day.value}
+                                                onClick={() => updateStepCalendar({
+                                                  daysOfWeek: selected
+                                                    ? stepCalendar.daysOfWeek.filter((value) => value !== day.value)
+                                                    : [...stepCalendar.daysOfWeek, day.value].sort(),
+                                                })}
+                                                className={`rounded-lg border px-1.5 py-1.5 text-[10px] font-semibold ${selected ? 'border-indigo-400 bg-indigo-500 text-white' : 'border-slate-700 bg-slate-900 text-slate-500'}`}
+                                              >
+                                                {day.label}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+                                      {editingStep.type === 'start' && (
+                                        <div>
+                                          <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-indigo-200">Non-working arrivals</label>
+                                          <select
+                                            value={stepCalendar.nonWorkingArrivalPolicy || 'queue'}
+                                            onChange={(e) => updateStepCalendar({ nonWorkingArrivalPolicy: e.target.value as NonWorkingArrivalPolicy })}
+                                            className="w-full rounded-lg border border-indigo-500/30 bg-slate-900 px-3 py-2 text-xs text-indigo-100 outline-none focus:ring-2 focus:ring-indigo-500"
+                                          >
+                                            {VALID_NON_WORKING_POLICIES.map((policy) => (
+                                              <option key={policy} value={policy}>{NON_WORKING_POLICY_LABELS[policy]}</option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+                            )}
+
                             {/* PROCESS NODE SPECIFIC */}
                             {editingStep.type === 'process' && (
                                 <div className="space-y-4">
@@ -1551,15 +2523,224 @@ const App: React.FC = () => {
                                   </div>
                                 </div>
 
-                                {editingStep.simulationMode !== 'delay' && <div>
-                                        <label className="block text-xs font-semibold text-slate-400 uppercase mb-1">Capacity (Resources)</label>
-                                        <input 
-                                            type="number" min="1" max="50"
-                                            value={editingStep.capacity} 
-                                            onChange={e => setEditingStep({...editingStep, capacity: parseInt(e.target.value) || 1})}
-                                            className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                                        />
-                                        </div>}
+                                {editingStep.simulationMode !== 'delay' && <div className="space-y-4 rounded-xl border border-blue-500/20 bg-blue-500/5 p-4">
+                                        <div>
+                                          <label className="block text-xs font-semibold text-blue-300 uppercase mb-1">Capacity (Resources)</label>
+                                          <input 
+                                              type="number" min="1" max="50"
+                                              value={editingStep.capacity} 
+                                              onChange={e => setEditingStep({...editingStep, capacity: parseInt(e.target.value) || 1})}
+                                              className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-slate-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                                          />
+                                          <p className="mt-1 text-xs text-slate-500">Resource units available at this step. Execution mode controls how those units are consumed.</p>
+                                          {(editingStep.resourceExecutionMode || 'single') === 'collaborative' && (
+                                            <div className={`mt-2 rounded-lg border px-3 py-2 text-xs ${getTeamResourceTotal(editingStep) === editingStep.capacity ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200' : 'border-rose-500/40 bg-rose-500/10 text-rose-200'}`}>
+                                              {getTeamAllocationMode(editingStep) === 'explicit'
+                                                ? <>Capacity check: team resources <span className="font-mono font-bold">{getTeamResourceTotal(editingStep)}</span> / capacity <span className="font-mono font-bold">{editingStep.capacity}</span>. These must match before saving.</>
+                                                : <>Auto teams: capacity <span className="font-mono font-bold">{editingStep.capacity}</span> will be split into teams of up to <span className="font-mono font-bold">{editingStep.targetResourcesPerItem ?? 1}</span>.</>}
+                                            </div>
+                                          )}
+                                        </div>
+
+                                        <div>
+                                          <label className="block text-xs font-semibold text-blue-300 uppercase mb-2">Execution Mode</label>
+                                          <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                                            {[
+                                              { id: 'single' as ResourceExecutionMode, title: '1 resource / item', hint: 'Classic queue behavior.' },
+                                              { id: 'collaborative' as ResourceExecutionMode, title: 'Team per item', hint: 'Fixed-size teams finish one item faster.' },
+                                              { id: 'multitask' as ResourceExecutionMode, title: '1 resource / many items', hint: 'One person or AI handles multiple items.' },
+                                            ].map((mode) => (
+                                              <button
+                                                key={mode.id}
+                                                onClick={() => setEditingStep({
+                                                  ...editingStep,
+                                                  resourceExecutionMode: mode.id,
+                                                  minResourcesPerItem: editingStep.minResourcesPerItem ?? 1,
+                                                  targetResourcesPerItem: editingStep.targetResourcesPerItem ?? 2,
+                                                  maxResourcesPerItem: editingStep.maxResourcesPerItem ?? 2,
+                                                  teamAllocationMode: editingStep.teamAllocationMode ?? 'auto',
+                                                  collaborativeTeams: editingStep.collaborativeTeams && editingStep.collaborativeTeams.length > 0 ? editingStep.collaborativeTeams : [{ id: `team-${Date.now()}`, name: 'Team 1', resources: editingStep.targetResourcesPerItem ?? 2 }],
+                                                  collaborativeEfficiency: editingStep.collaborativeEfficiency || buildDefaultCollaborativeEfficiency(editingStep.maxResourcesPerItem ?? 2),
+                                                  maxConcurrentItemsPerResource: editingStep.maxConcurrentItemsPerResource ?? 2,
+                                                  multitaskEfficiency: editingStep.multitaskEfficiency || buildDefaultMultitaskEfficiency(editingStep.maxConcurrentItemsPerResource ?? 2),
+                                                })}
+                                                className={`rounded-lg border px-3 py-3 text-left transition-all ${(editingStep.resourceExecutionMode || 'single') === mode.id ? 'border-blue-500 bg-blue-500/15 text-blue-100' : 'border-slate-700 bg-slate-900 text-slate-400 hover:bg-slate-800'}`}
+                                              >
+                                                <div className="text-sm font-bold">{mode.title}</div>
+                                                <p className="mt-1 text-[11px] opacity-75">{mode.hint}</p>
+                                              </button>
+                                            ))}
+                                          </div>
+                                        </div>
+
+                                        {(editingStep.resourceExecutionMode || 'single') === 'collaborative' && (
+                                          <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/10 p-3">
+                                            <label className="block text-[10px] text-indigo-200 uppercase mb-2">Team allocation</label>
+                                            <div className="grid grid-cols-2 gap-2">
+                                              {[
+                                                { id: 'auto' as TeamAllocationMode, title: 'Auto teams', hint: 'Use Capacity and default team size.' },
+                                                { id: 'explicit' as TeamAllocationMode, title: 'Explicit teams', hint: 'Name each team and set its people.' },
+                                              ].map((mode) => (
+                                                <button
+                                                  key={mode.id}
+                                                  onClick={() => setEditingStep({
+                                                    ...editingStep,
+                                                    teamAllocationMode: mode.id,
+                                                    collaborativeTeams: mode.id === 'explicit' ? getEditableTeams(editingStep) : editingStep.collaborativeTeams,
+                                                  })}
+                                                  className={`rounded-lg border px-3 py-2 text-left transition-all ${getTeamAllocationMode(editingStep) === mode.id ? 'border-indigo-400 bg-indigo-500/20 text-indigo-100' : 'border-slate-700 bg-slate-900 text-slate-400 hover:bg-slate-800'}`}
+                                                >
+                                                  <div className="text-sm font-bold">{mode.title}</div>
+                                                  <p className="mt-1 text-[11px] opacity-75">{mode.hint}</p>
+                                                </button>
+                                              ))}
+                                            </div>
+
+                                            {getTeamAllocationMode(editingStep) === 'auto' && (
+                                              <div className="mt-4 rounded-lg border border-indigo-500/20 bg-slate-950/50 p-3">
+                                                <label className="block text-[10px] text-indigo-200 uppercase mb-1">Default team size</label>
+                                                <input
+                                                  type="number" min="1" max="50"
+                                                  value={editingStep.targetResourcesPerItem ?? 2}
+                                                  onChange={e => {
+                                                    const targetResources = Math.max(1, Math.min(editingStep.capacity, parseInt(e.target.value) || 1));
+                                                    setEditingStep({ ...editingStep, minResourcesPerItem: targetResources, targetResourcesPerItem: targetResources, maxResourcesPerItem: targetResources, collaborativeEfficiency: editingStep.collaborativeEfficiency || buildDefaultCollaborativeEfficiency(targetResources) });
+                                                  }}
+                                                  className="w-full bg-slate-900 border border-indigo-500/30 rounded p-2 text-indigo-100 font-mono focus:ring-2 focus:ring-indigo-500 outline-none"
+                                                />
+                                                <p className="mt-2 text-xs text-slate-500">Example: Capacity 6 and default team size 2 allows up to 3 teams. The final team can use remaining resources if capacity is not evenly divisible.</p>
+                                              </div>
+                                            )}
+
+                                            {getTeamAllocationMode(editingStep) === 'explicit' && <div className="mt-4 rounded-lg border border-indigo-500/20 bg-slate-950/50 p-3">
+                                              <div className="mb-3 flex items-center justify-between gap-3">
+                                                <div>
+                                                  <label className="block text-[10px] text-indigo-200 uppercase">Explicit Teams</label>
+                                                  <p className="text-xs text-slate-500">Each team can process one item at a time with its own resource count.</p>
+                                                </div>
+                                                <button
+                                                  onClick={() => {
+                                                    const teams = getEditableTeams(editingStep);
+                                                    setEditingStep({
+                                                      ...editingStep,
+                                                      collaborativeTeams: [
+                                                        ...teams,
+                                                        { id: `team-${Date.now()}`, name: `Team ${teams.length + 1}`, resources: editingStep.targetResourcesPerItem ?? 2 },
+                                                      ],
+                                                    });
+                                                  }}
+                                                  className="rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-3 py-1.5 text-xs font-semibold text-indigo-100 hover:bg-indigo-500/20"
+                                                >
+                                                  Add Team
+                                                </button>
+                                              </div>
+                                              <div className="space-y-2">
+                                                {getEditableTeams(editingStep).map((team, teamIndex) => (
+                                                  <div key={team.id} className="grid grid-cols-[1fr_90px_auto] items-center gap-2">
+                                                    <input
+                                                      type="text"
+                                                      value={team.name}
+                                                      onChange={e => {
+                                                        const teams = getEditableTeams(editingStep).map((existingTeam) => existingTeam.id === team.id ? { ...existingTeam, name: e.target.value } : existingTeam);
+                                                        setEditingStep({ ...editingStep, collaborativeTeams: teams });
+                                                      }}
+                                                      className="w-full bg-slate-900 border border-indigo-500/30 rounded p-2 text-indigo-100 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                                                    />
+                                                    <input
+                                                      type="number" min="1" max="50"
+                                                      value={team.resources}
+                                                      onChange={e => {
+                                                        const resources = Math.max(1, parseInt(e.target.value) || 1);
+                                                        const teams = getEditableTeams(editingStep).map((existingTeam) => existingTeam.id === team.id ? { ...existingTeam, resources } : existingTeam);
+                                                        const maxResources = Math.max(editingStep.maxResourcesPerItem ?? 1, resources);
+                                                        setEditingStep({ ...editingStep, collaborativeTeams: teams, maxResourcesPerItem: maxResources, collaborativeEfficiency: editingStep.collaborativeEfficiency || buildDefaultCollaborativeEfficiency(maxResources) });
+                                                      }}
+                                                      className="w-full bg-slate-900 border border-indigo-500/30 rounded p-2 text-indigo-100 font-mono outline-none focus:ring-2 focus:ring-indigo-500"
+                                                      title="Resources in this team"
+                                                    />
+                                                    <button
+                                                      onClick={() => {
+                                                        const teams = getEditableTeams(editingStep).filter((existingTeam) => existingTeam.id !== team.id);
+                                                        setEditingStep({ ...editingStep, collaborativeTeams: teams.length > 0 ? teams : [{ id: `team-${Date.now()}`, name: 'Team 1', resources: 1 }] });
+                                                      }}
+                                                      disabled={teamIndex === 0 && getEditableTeams(editingStep).length === 1}
+                                                      className="rounded border border-rose-500/30 px-2 py-2 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-40"
+                                                    >
+                                                      Remove
+                                                    </button>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                              <div className="mt-2 text-xs text-slate-500">
+                                                Total team resources: <span className="font-mono text-indigo-200">{getTeamResourceTotal(editingStep)}</span>. Required capacity: <span className="font-mono text-indigo-200">{editingStep.capacity}</span>.
+                                              </div>
+                                              {getTeamResourceTotal(editingStep) !== editingStep.capacity && (
+                                                <button
+                                                  onClick={() => setEditingStep({ ...editingStep, capacity: getTeamResourceTotal(editingStep) })}
+                                                  className="mt-2 rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-3 py-1.5 text-xs font-semibold text-indigo-100 hover:bg-indigo-500/20"
+                                                >
+                                                  Set Capacity to {getTeamResourceTotal(editingStep)}
+                                                </button>
+                                              )}
+                                            </div>}
+                                            <div className="mt-3 space-y-2">
+                                              <label className="block text-[10px] text-indigo-200 uppercase">Speed multiplier by assigned resources</label>
+                                              {Array.from({ length: Math.max(1, editingStep.maxResourcesPerItem ?? 2) }, (_, index) => index + 1).map(resourceCount => (
+                                                <div key={resourceCount} className="grid grid-cols-[90px_1fr_70px] items-center gap-2 text-xs">
+                                                  <span className="text-slate-400">{resourceCount} resource{resourceCount > 1 ? 's' : ''}</span>
+                                                  <input
+                                                    type="range" min="0.1" max="10" step="0.05"
+                                                    value={editingStep.collaborativeEfficiency?.[resourceCount] ?? (resourceCount === 1 ? 1 : 1 + (resourceCount - 1) * 0.65)}
+                                                    onChange={e => setEditingStep({ ...editingStep, collaborativeEfficiency: updateEfficiencyValue(editingStep.collaborativeEfficiency, resourceCount, Number(e.target.value)) })}
+                                                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                                                  />
+                                                  <input
+                                                    type="number" min="0.1" max="10" step="0.05"
+                                                    value={editingStep.collaborativeEfficiency?.[resourceCount] ?? (resourceCount === 1 ? 1 : 1 + (resourceCount - 1) * 0.65)}
+                                                    onChange={e => setEditingStep({ ...editingStep, collaborativeEfficiency: updateEfficiencyValue(editingStep.collaborativeEfficiency, resourceCount, Number(e.target.value)) })}
+                                                    className="w-full bg-slate-900 border border-indigo-500/30 rounded p-1.5 text-indigo-100 font-mono outline-none"
+                                                  />
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        )}
+
+                                        {(editingStep.resourceExecutionMode || 'single') === 'multitask' && (
+                                          <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 p-3">
+                                            <label className="block text-[10px] text-cyan-200 uppercase mb-1">Max concurrent items / resource</label>
+                                            <input
+                                              type="number" min="1" max="50"
+                                              value={editingStep.maxConcurrentItemsPerResource ?? 2}
+                                              onChange={e => {
+                                                const maxConcurrent = Math.max(1, parseInt(e.target.value) || 1);
+                                                setEditingStep({ ...editingStep, maxConcurrentItemsPerResource: maxConcurrent, multitaskEfficiency: editingStep.multitaskEfficiency || buildDefaultMultitaskEfficiency(maxConcurrent) });
+                                              }}
+                                              className="w-full bg-slate-900 border border-cyan-500/30 rounded p-2 text-cyan-100 font-mono focus:ring-2 focus:ring-cyan-500 outline-none"
+                                            />
+                                            <div className="mt-3 space-y-2">
+                                              <label className="block text-[10px] text-cyan-200 uppercase">Speed multiplier by concurrent load</label>
+                                              {Array.from({ length: Math.max(1, editingStep.maxConcurrentItemsPerResource ?? 2) }, (_, index) => index + 1).map(load => (
+                                                <div key={load} className="grid grid-cols-[90px_1fr_70px] items-center gap-2 text-xs">
+                                                  <span className="text-slate-400">{load} item{load > 1 ? 's' : ''}</span>
+                                                  <input
+                                                    type="range" min="0.1" max="2" step="0.05"
+                                                    value={editingStep.multitaskEfficiency?.[load] ?? Math.max(0.25, 1 - (load - 1) * 0.2)}
+                                                    onChange={e => setEditingStep({ ...editingStep, multitaskEfficiency: updateEfficiencyValue(editingStep.multitaskEfficiency, load, Number(e.target.value)) })}
+                                                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
+                                                  />
+                                                  <input
+                                                    type="number" min="0.1" max="2" step="0.05"
+                                                    value={editingStep.multitaskEfficiency?.[load] ?? Math.max(0.25, 1 - (load - 1) * 0.2)}
+                                                    onChange={e => setEditingStep({ ...editingStep, multitaskEfficiency: updateEfficiencyValue(editingStep.multitaskEfficiency, load, Number(e.target.value)) })}
+                                                    className="w-full bg-slate-900 border border-cyan-500/30 rounded p-1.5 text-cyan-100 font-mono outline-none"
+                                                  />
+                                                </div>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        )}
+                                      </div>}
                                     
                                     <div className="p-4 bg-slate-800/50 border border-slate-700 rounded-lg">
                                           <label className="block text-xs font-semibold text-blue-400 uppercase mb-3">{editingStep.simulationMode === 'delay' ? 'Delay Duration (ms)' : 'Processing Duration (ms)'}</label>
@@ -1806,7 +2987,13 @@ const App: React.FC = () => {
                      )}
 
                   </div>
-                  <div className="p-4 border-t border-slate-800 bg-slate-800/30 flex justify-end gap-2 shrink-0">
+                  <div className="p-4 border-t border-slate-800 bg-slate-800/30 flex flex-col gap-3 shrink-0">
+                     {editingStepValidationError && (
+                       <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+                         Cannot save: {editingStepValidationError}
+                       </div>
+                     )}
+                     <div className="flex justify-end gap-2">
                      <button 
                         onClick={() => setEditingStep(null)}
                         className="px-4 py-2 rounded text-slate-300 hover:text-white hover:bg-slate-700 transition-colors"
@@ -1815,10 +3002,12 @@ const App: React.FC = () => {
                      </button>
                      <button 
                         onClick={saveStepUpdate}
-                        className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition-colors"
+                      disabled={Boolean(editingStepValidationError)}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded font-medium transition-colors disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
                      >
                         Save Changes
                      </button>
+                    </div>
                   </div>
                </div>
             </div>

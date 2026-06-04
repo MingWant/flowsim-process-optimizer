@@ -1,6 +1,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { ProcessStep, WorkItem, SimulationConfig, StepStats, SimulationStats } from '../types';
+import { getDemandMultiplier, getNextWorkingSimulationTime, isWorkingTime, normalizeBusinessCalendar } from '../services/simulationCalendar';
 
 const TRANSMISSION_DURATION = 900; // visual ms to travel between nodes
 const TIME_UNIT_TO_MS = {
@@ -71,11 +72,143 @@ const generateNormalRandom = (): number => {
   return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
 };
 
-const getSimulationSignature = (steps: ProcessStep[]) => JSON.stringify(steps.map((step) => ({
+const getPositiveInteger = (value: number | undefined, fallback: number, min = 1, max = 1000): number => {
+  const parsed = typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : fallback;
+  return Math.max(min, Math.min(max, parsed));
+};
+
+const getRecordMultiplier = (record: Record<number, number> | undefined, key: number, fallback: number): number => {
+  const direct = record?.[key];
+  if (typeof direct === 'number' && Number.isFinite(direct) && direct > 0) {
+    return direct;
+  }
+
+  const stringKey = record?.[String(key) as unknown as number];
+  if (typeof stringKey === 'number' && Number.isFinite(stringKey) && stringKey > 0) {
+    return stringKey;
+  }
+
+  return fallback;
+};
+
+const getStepResourceCapacity = (step: ProcessStep): number => Math.max(1, getPositiveInteger(step.capacity, 1, 1, 1000));
+
+const getCollaborativeTeams = (step: ProcessStep) => (
+  step.teamAllocationMode === 'explicit' ? step.collaborativeTeams || [] : []
+).filter((team) => team && typeof team.id === 'string' && getPositiveInteger(team.resources, 0, 0, 1000) > 0);
+
+const getCollaborativeCapacity = (step: ProcessStep): number => {
+  const teams = getCollaborativeTeams(step);
+  if (teams.length > 0) {
+    return teams.reduce((sum, team) => sum + getPositiveInteger(team.resources, 1, 1, 1000), 0);
+  }
+
+  return getStepResourceCapacity(step);
+};
+
+const getTeamUsageKey = (stepId: string, teamId: string) => `${stepId}::${teamId}`;
+
+const getResourceUnitsForItem = (step: ProcessStep, freeUnits: number): number => {
+  if ((step.resourceExecutionMode || 'single') !== 'collaborative') {
+    return 1;
+  }
+
+  const minResources = getPositiveInteger(step.minResourcesPerItem, 1, 1, 1000);
+  const maxResources = getPositiveInteger(step.maxResourcesPerItem, minResources, minResources, 1000);
+  const targetResources = getPositiveInteger(step.targetResourcesPerItem, minResources, minResources, maxResources);
+  if (freeUnits < minResources) {
+    return 0;
+  }
+
+  return Math.max(minResources, Math.min(targetResources, maxResources, freeUnits));
+};
+
+const getStepProcessingLimit = (step: ProcessStep): number => {
+  const capacity = getStepResourceCapacity(step);
+  if ((step.resourceExecutionMode || 'single') === 'collaborative') {
+    return getCollaborativeCapacity(step);
+  }
+
+  if ((step.resourceExecutionMode || 'single') === 'multitask') {
+    return capacity * getPositiveInteger(step.maxConcurrentItemsPerResource, 1, 1, 1000);
+  }
+
+  return capacity;
+};
+
+const getResourceLoadForNextItem = (step: ProcessStep, nextUsage: number): number => {
+  if ((step.resourceExecutionMode || 'single') !== 'multitask') {
+    return 1;
+  }
+
+  return Math.max(1, Math.ceil(nextUsage / getStepResourceCapacity(step)));
+};
+
+const getProcessingSpeedMultiplier = (step: ProcessStep, item: WorkItem): number => {
+  const executionMode = item.executionMode || step.resourceExecutionMode || 'single';
+
+  if (executionMode === 'collaborative') {
+    const assignedResources = getPositiveInteger(item.assignedResourceCount, 1, 1, 1000);
+    return getRecordMultiplier(step.collaborativeEfficiency, assignedResources, assignedResources === 1 ? 1 : 1 + (assignedResources - 1) * 0.65);
+  }
+
+  if (executionMode === 'multitask') {
+    const load = getPositiveInteger(item.resourceLoadFactor, 1, 1, 1000);
+    return getRecordMultiplier(step.multitaskEfficiency, load, Math.max(0.25, 1 - (load - 1) * 0.2));
+  }
+
+  return 1;
+};
+
+const getItemDispatchPriority = (item: WorkItem): number => {
+  const priority = item.priority;
+  return typeof priority === 'number' && Number.isFinite(priority) ? priority : 1;
+};
+
+const getItemProfileForSpawn = (step: ProcessStep) => {
+  const profiles = step.itemProfiles && step.itemProfiles.length > 0 ? step.itemProfiles : undefined;
+  if (!profiles) {
+    return undefined;
+  }
+
+  const totalProbability = profiles.reduce((sum, profile) => sum + Math.max(0, profile.probability || 0), 0);
+  if (totalProbability <= 0) {
+    return profiles[0];
+  }
+
+  const roll = Math.random() * totalProbability;
+  let cumulative = 0;
+  for (const profile of profiles) {
+    cumulative += Math.max(0, profile.probability || 0);
+    if (roll <= cumulative) {
+      return profile;
+    }
+  }
+
+  return profiles[profiles.length - 1];
+};
+
+const getSimulationSignature = (config: SimulationConfig) => JSON.stringify({
+  calendarStartIso: config.calendarStartIso,
+  businessCalendar: config.businessCalendar,
+  demandModifiers: config.demandModifiers,
+  autoPause: config.autoPause,
+  steps: config.steps.map((step) => ({
   id: step.id,
   type: step.type,
   randomnessMode: step.randomnessMode,
   simulationMode: step.simulationMode,
+  calendarMode: step.calendarMode,
+  businessCalendar: step.businessCalendar,
+  resourceExecutionMode: step.resourceExecutionMode,
+  minResourcesPerItem: step.minResourcesPerItem,
+  targetResourcesPerItem: step.targetResourcesPerItem,
+  maxResourcesPerItem: step.maxResourcesPerItem,
+  teamAllocationMode: step.teamAllocationMode,
+  collaborativeTeams: step.collaborativeTeams,
+  collaborativeEfficiency: step.collaborativeEfficiency,
+  maxConcurrentItemsPerResource: step.maxConcurrentItemsPerResource,
+  multitaskEfficiency: step.multitaskEfficiency,
   capacity: step.capacity,
   processingTime: step.processingTime,
   processingTimeUnit: step.processingTimeUnit,
@@ -89,13 +222,15 @@ const getSimulationSignature = (steps: ProcessStep[]) => JSON.stringify(steps.ma
   minArrivalRate: step.minArrivalRate,
   maxArrivalRate: step.maxArrivalRate,
   arrivalBatchSize: step.arrivalBatchSize,
+  arrivalBatchIntervalMs: step.arrivalBatchIntervalMs,
+  itemProfiles: step.itemProfiles,
   failureProbability: step.failureProbability,
   cancellationProbability: step.cancellationProbability,
   connections: step.connections,
   sourceProcessingTimes: step.sourceProcessingTimes,
-})));
+}))});
 
-export const useProcessSimulation = (config: SimulationConfig) => {
+export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (reason: string) => void) => {
   const [items, setItems] = useState<WorkItem[]>([]);
   const [stepStats, setStepStats] = useState<StepStats[]>([]);
   const [simulationTimeMs, setSimulationTimeMs] = useState(0);
@@ -108,13 +243,14 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     avgThroughput: 0,
     activeItems: 0,
   });
+  const [autoPauseReason, setAutoPauseReason] = useState<string | null>(null);
 
   const lastTickRef = useRef<number>(Date.now());
   const simulationTimeRef = useRef(0);
   const itemsRef = useRef<WorkItem[]>([]);
   const statsRef = useRef<SimulationStats>({ ...globalStats });
   const stepsRef = useRef<ProcessStep[]>(config.steps);
-  const simulationSignatureRef = useRef(getSimulationSignature(config.steps));
+  const simulationSignatureRef = useRef(getSimulationSignature(config));
   const lastUiUpdateRef = useRef(0);
   
   // Track the absolute simulated timestamp when the next item should spawn for each start node
@@ -141,6 +277,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     };
     statsRef.current = initialStats;
     setGlobalStats(initialStats);
+    setAutoPauseReason(null);
     setStepStats([]);
     lastUiUpdateRef.current = 0;
     nextSpawnTimeRef.current = {};
@@ -150,8 +287,32 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     });
   }, [config.steps]);
 
+  const getAutoPauseReason = (activeItems: number): string | null => {
+    const autoPause = config.autoPause;
+    if (!autoPause?.enabled) {
+      return null;
+    }
+
+    const checks: Array<[number | undefined, number, string]> = [
+      [autoPause.simulationTimeMs, simulationTimeRef.current, 'Simulation time'],
+      [autoPause.totalItemsCreated, statsRef.current.totalItemsCreated, 'Created items'],
+      [autoPause.totalItemsFinished, statsRef.current.totalItemsFinished, 'Finished items'],
+      [autoPause.totalItemsFailed, statsRef.current.totalItemsFailed, 'Failed items'],
+      [autoPause.totalItemsCancelled, statsRef.current.totalItemsCancelled, 'Cancelled items'],
+      [autoPause.activeItems, activeItems, 'Active work'],
+    ];
+
+    for (const [target, current, label] of checks) {
+      if (typeof target === 'number' && Number.isFinite(target) && target > 0 && current >= target) {
+        return `${label} reached ${target}`;
+      }
+    }
+
+    return null;
+  };
+
   useEffect(() => {
-    const nextSignature = getSimulationSignature(config.steps);
+    const nextSignature = getSimulationSignature(config);
     const simulationLogicChanged = nextSignature !== simulationSignatureRef.current;
 
     stepsRef.current = config.steps;
@@ -172,7 +333,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           stepCountersRef.current[s.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
         }
     });
-  }, [config.steps, resetSimulation]);
+  }, [config, config.steps, resetSimulation]);
 
   const getNextStepId = (currentStep: ProcessStep): string | 'finished' => {
     if (!currentStep.connections || currentStep.connections.length === 0) {
@@ -203,11 +364,15 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
   const getArrivalUnitMs = (step: ProcessStep) => TIME_UNIT_TO_MS[step.arrivalUnit || 's'];
   const getArrivalBatchSize = (step: ProcessStep) => Math.max(1, Math.min(1000, Math.round(safeNumber(step.arrivalBatchSize, 1))));
+  const getEffectiveBusinessCalendar = (step: ProcessStep) => normalizeBusinessCalendar(
+    step.calendarMode === 'custom' ? step.businessCalendar : config.businessCalendar
+  );
 
-  const calculateNextSpawnDelay = (step: ProcessStep): number => {
+  const calculateNextSpawnDelay = (step: ProcessStep, eventSimulationMs = simulationTimeRef.current): number => {
     const unitMs = getArrivalUnitMs(step);
     const inputMode = step.arrivalInputMode || 'rate';
     const batchSize = getArrivalBatchSize(step);
+    const demandMultiplier = Math.max(0.01, getDemandMultiplier(config.demandModifiers, config.calendarStartIso, eventSimulationMs));
 
     if (step.randomnessMode === 'range') {
         const minValue = safeNumber(step.minArrivalRate, inputMode === 'interval' ? 1 : 0.1);
@@ -217,22 +382,30 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           const minInterval = Math.max(MIN_ARRIVAL_RATE, Math.min(minValue, maxValue));
           const maxInterval = Math.max(MIN_ARRIVAL_RATE, Math.max(minValue, maxValue));
           const randomInterval = minInterval + Math.random() * (maxInterval - minInterval);
-          return randomInterval * unitMs;
+          return (randomInterval * unitMs) / demandMultiplier;
         }
 
         const randomRate = minValue + Math.random() * (maxValue - minValue);
-        const safeRate = Math.max(MIN_ARRIVAL_RATE, randomRate);
+        const safeRate = Math.max(MIN_ARRIVAL_RATE, randomRate * demandMultiplier);
         return (unitMs * batchSize) / safeRate; 
     } else {
         const value = safeNumber(step.arrivalRate, inputMode === 'interval' ? 1 : 0.5);
 
         if (inputMode === 'interval') {
-          return Math.max(MIN_ARRIVAL_RATE, value) * unitMs;
+          return (Math.max(MIN_ARRIVAL_RATE, value) * unitMs) / demandMultiplier;
         }
 
-        const safeRate = Math.max(MIN_ARRIVAL_RATE, value);
+        const safeRate = Math.max(MIN_ARRIVAL_RATE, value * demandMultiplier);
         return (unitMs * batchSize) / safeRate;
     }
+  };
+
+  const applyExecutionSpeed = (step: ProcessStep, item: WorkItem, duration: number): number => {
+    const speedMultiplier = getProcessingSpeedMultiplier(step, item);
+    const profileMultiplier = typeof item.processingTimeMultiplier === 'number' && Number.isFinite(item.processingTimeMultiplier)
+      ? Math.max(0.01, item.processingTimeMultiplier)
+      : 1;
+    return (duration * profileMultiplier) / Math.max(0.05, speedMultiplier);
   };
 
   const calculateProcessingDuration = (step: ProcessStep, item: WorkItem): number => {
@@ -255,16 +428,16 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           if (simulationMode === 'worst-case') {
             // Worst-case: uniform distribution, can produce extreme values
             const speedNoise = 1 + (Math.random() * 2 - 1) * variance;
-            return Math.max(MIN_PROCESSING_DURATION_MS, baseMs * speedNoise);
+            return applyExecutionSpeed(step, item, Math.max(MIN_PROCESSING_DURATION_MS, baseMs * speedNoise));
           } else {
             // Realistic: normal distribution with bounds
             const normalRandom = generateNormalRandom();
             const duration = baseMs + baseMs * variance * normalRandom;
             // Clamp to reasonable bounds: not less than 20% of base, not more than 3x base
-            return Math.max(baseMs * 0.2, Math.min(baseMs * 3, duration));
+            return applyExecutionSpeed(step, item, Math.max(baseMs * 0.2, Math.min(baseMs * 3, duration)));
           }
         }
-        return Math.max(MIN_PROCESSING_DURATION_MS, baseMs);
+        return applyExecutionSpeed(step, item, Math.max(MIN_PROCESSING_DURATION_MS, baseMs));
     }
 
     // 2. Range Mode
@@ -279,7 +452,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         return Math.min(min, MAX_SAFE_DURATION_MS);
       }
       // Independent random number for this call
-      return min + Math.random() * (max - min);
+      return applyExecutionSpeed(step, item, min + Math.random() * (max - min));
     }
 
     // 3. Default Fixed Mode
@@ -291,7 +464,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
       return MAX_SAFE_DURATION_MS;
     }
     if (isDelayMode) {
-      return Math.max(MIN_PROCESSING_DURATION_MS, baseMs);
+      return applyExecutionSpeed(step, item, Math.max(MIN_PROCESSING_DURATION_MS, baseMs));
     }
 
     const variance = safeNumber(step.variance, 0);
@@ -299,16 +472,16 @@ export const useProcessSimulation = (config: SimulationConfig) => {
       if (simulationMode === 'worst-case') {
         // Worst-case: uniform distribution, can produce extreme values
         const speedNoise = 1 + (Math.random() * 2 - 1) * variance;
-        return Math.max(MIN_PROCESSING_DURATION_MS, baseMs * speedNoise);
+        return applyExecutionSpeed(step, item, Math.max(MIN_PROCESSING_DURATION_MS, baseMs * speedNoise));
       } else {
         // Realistic: normal distribution with bounds
         const normalRandom = generateNormalRandom();
         const duration = baseMs + baseMs * variance * normalRandom;
         // Clamp to reasonable bounds: not less than 20% of base, not more than 3x base
-        return Math.max(baseMs * 0.2, Math.min(baseMs * 3, duration));
+        return applyExecutionSpeed(step, item, Math.max(baseMs * 0.2, Math.min(baseMs * 3, duration)));
       }
     }
-    return Math.max(MIN_PROCESSING_DURATION_MS, baseMs);
+    return applyExecutionSpeed(step, item, Math.max(MIN_PROCESSING_DURATION_MS, baseMs));
   };
 
   const beginTransmission = (
@@ -414,6 +587,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
       const steps: ProcessStep[] = stepsRef.current;
       const stepMap = new Map<string, ProcessStep>(steps.map((s: ProcessStep) => [s.id, s]));
+      const defaultBusinessCalendar = normalizeBusinessCalendar(config.businessCalendar);
 
         // 1. Arrival Logic (Absolute Simulated Event Time)
       for (const startNode of steps.filter((s: ProcessStep) => s.type === 'start')) {
@@ -429,6 +603,25 @@ export const useProcessSimulation = (config: SimulationConfig) => {
             while (nextSpawnAt <= simulationTimeRef.current && spawnedThisTick < MAX_SPAWNS_PER_START_PER_TICK) {
               const batchSize = getArrivalBatchSize(startNode);
               const simulationMode = config.simulationMode || 'realistic';
+              const startCalendar = getEffectiveBusinessCalendar(startNode);
+              const isStartWorking = isWorkingTime(startCalendar, config.calendarStartIso, nextSpawnAt);
+
+              if (!isStartWorking && startCalendar.nonWorkingArrivalPolicy === 'delay') {
+                nextSpawnAt = getNextWorkingSimulationTime(startCalendar, config.calendarStartIso, nextSpawnAt);
+                if (nextSpawnAt > simulationTimeRef.current) {
+                  break;
+                }
+              }
+
+              if (!isStartWorking && startCalendar.nonWorkingArrivalPolicy === 'reject') {
+                statsRef.current.totalItemsCancelled += batchSize;
+                if (stepCountersRef.current[startNode.id]) {
+                  stepCountersRef.current[startNode.id].cancelled += batchSize;
+                }
+                nextSpawnAt += calculateNextSpawnDelay(startNode, nextSpawnAt);
+                spawnedThisTick++;
+                continue;
+              }
 
               for (let batchIndex = 0; batchIndex < batchSize; batchIndex++) {
                 // SPAWN
@@ -439,16 +632,23 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                 }
 
                 if (firstTargetId !== 'finished') {
-                  // Calculate spawn time based on simulation mode
+                  // Calculate spawn time based on simulation mode and batch interval
                   let itemSpawnTime: number;
+                  const batchInterval = typeof startNode.arrivalBatchIntervalMs === 'number' && Number.isFinite(startNode.arrivalBatchIntervalMs)
+                    ? Math.max(0, startNode.arrivalBatchIntervalMs)
+                    : 0;
+
                   if (simulationMode === 'worst-case') {
                     // Worst-case: all items arrive at exactly the same time (instant surge)
                     itemSpawnTime = nextSpawnAt;
                   } else {
-                    // Realistic: small time offset to simulate physical arrival sequence
-                    // Each item arrives 0.1ms after the previous one in the batch
-                    itemSpawnTime = nextSpawnAt + (batchIndex * 0.1);
+                    // Realistic: configurable time offset between items in a batch
+                    // Default 0ms = simultaneous arrival (e.g., group interview, API burst)
+                    // Can be configured for scenarios like customers entering store (e.g., 5000ms = 5 seconds apart)
+                    itemSpawnTime = nextSpawnAt + (batchIndex * batchInterval);
                   }
+
+                  const itemProfile = getItemProfileForSpawn(startNode);
 
                   const newItem: WorkItem = {
                     id: `item-${statsRef.current.totalItemsCreated + 1}`,
@@ -464,6 +664,16 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                     totalTransmissionTime: 0,
                     totalWaitTime: 0,
                     totalProcessingTime: 0,
+                    itemProfileId: itemProfile?.id,
+                    itemProfileName: itemProfile?.name,
+                    itemProfileColor: itemProfile?.color,
+                    processingTimeMultiplier: itemProfile?.processingTimeMultiplier ?? 1,
+                    failureMultiplier: itemProfile?.failureMultiplier ?? 1,
+                    cancellationMultiplier: itemProfile?.cancellationMultiplier ?? 1,
+                    priority: itemProfile?.priority ?? 1,
+                    assignedResourceCount: 1,
+                    resourceLoadFactor: 1,
+                    executionMode: 'single',
                       stepEntryTime: itemSpawnTime,
                       queuedAtSimulationMs: undefined,
                       queueCancellationCheckedAtSimulationMs: undefined,
@@ -486,7 +696,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                 }
               }
 
-                  nextSpawnAt += calculateNextSpawnDelay(startNode);
+                  nextSpawnAt += calculateNextSpawnDelay(startNode, nextSpawnAt);
                     spawnedThisTick++;
           }
           
@@ -496,13 +706,21 @@ export const useProcessSimulation = (config: SimulationConfig) => {
       // 2. Resource Tracking Setup
       const currentItems: WorkItem[] = itemsRef.current;
       const stepUsage = new Map<string, number>();
+      const stepTeamUsage = new Map<string, boolean>();
       steps.forEach((s: ProcessStep) => stepUsage.set(s.id, 0));
 
       // Pass 1: Count currently processing items
       for (const item of currentItems) {
         if (item.status === 'processing' && item.currentStepId !== 'finished') {
           const count = stepUsage.get(item.currentStepId) || 0;
-          stepUsage.set(item.currentStepId, count + 1);
+          const currentStep = stepMap.get(item.currentStepId);
+          const usageUnits = currentStep?.resourceExecutionMode === 'collaborative'
+            ? getPositiveInteger(item.assignedResourceCount, 1, 1, 1000)
+            : 1;
+          stepUsage.set(item.currentStepId, count + usageUnits);
+          if (currentStep?.resourceExecutionMode === 'collaborative' && item.assignedTeamId) {
+            stepTeamUsage.set(getTeamUsageKey(item.currentStepId, item.assignedTeamId), true);
+          }
         }
       }
 
@@ -515,7 +733,11 @@ export const useProcessSimulation = (config: SimulationConfig) => {
       };
 
       const applyQueueCancellationThrough = (item: WorkItem, step: ProcessStep, throughSimulationMs: number): boolean => {
-        if (item.status !== 'queued' || step.cancellationProbability <= 0) {
+        const cancellationMultiplier = typeof item.cancellationMultiplier === 'number' && Number.isFinite(item.cancellationMultiplier)
+          ? Math.max(0, item.cancellationMultiplier)
+          : 1;
+        const effectiveCancellationProbability = step.cancellationProbability * cancellationMultiplier;
+        if (item.status !== 'queued' || effectiveCancellationProbability <= 0) {
           return false;
         }
 
@@ -531,10 +753,10 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
         if (simulationMode === 'worst-case') {
           // Worst-case: linear model, reaches 100% quickly for stress testing
-          cancelChance = Math.min(1, step.cancellationProbability * (exposureMs / 1000));
+          cancelChance = Math.min(1, effectiveCancellationProbability * (exposureMs / 1000));
         } else {
           // Realistic: exponential distribution (Poisson process)
-          cancelChance = 1 - Math.exp(-step.cancellationProbability * (exposureMs / 1000));
+          cancelChance = 1 - Math.exp(-effectiveCancellationProbability * (exposureMs / 1000));
         }
 
         item.queueCancellationCheckedAtSimulationMs = throughSimulationMs;
@@ -546,13 +768,42 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         return false;
       };
 
+      const getCollaborativeAssignment = (step: ProcessStep, stepId: string, freeUnits: number) => {
+        const teams = getCollaborativeTeams(step);
+        const minResources = getPositiveInteger(step.minResourcesPerItem, 1, 1, 1000);
+
+        if (teams.length > 0) {
+          const availableTeam = [...teams]
+            .filter((team) => getPositiveInteger(team.resources, 1, 1, 1000) >= minResources)
+            .sort((a, b) => getPositiveInteger(a.resources, 1, 1, 1000) - getPositiveInteger(b.resources, 1, 1, 1000))
+            .find((team) => !stepTeamUsage.get(getTeamUsageKey(stepId, team.id)));
+
+          if (!availableTeam) {
+            return { resources: 0 };
+          }
+
+          return {
+            resources: getPositiveInteger(availableTeam.resources, 1, 1, 1000),
+            teamId: availableTeam.id,
+            teamName: availableTeam.name || availableTeam.id,
+          };
+        }
+
+        return { resources: getResourceUnitsForItem(step, freeUnits) };
+      };
+
       const startQueuedItemsForStep = (stepId: string, availableAtSimulationMs: number) => {
         const step = stepMap.get(stepId);
         if (!step || step.type !== 'process' || step.simulationMode === 'delay') {
           return;
         }
 
-        const capacity = Math.max(1, step.capacity || 1);
+        const stepCalendar = step.calendarMode === 'custom' ? getEffectiveBusinessCalendar(step) : defaultBusinessCalendar;
+        if (!isWorkingTime(stepCalendar, config.calendarStartIso, availableAtSimulationMs)) {
+          return;
+        }
+
+        const capacity = getStepProcessingLimit(step);
         let currentUsage = stepUsage.get(stepId) || 0;
         if (currentUsage >= capacity) {
           return;
@@ -561,6 +812,11 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         const queuedItems = itemsRef.current
           .filter((queueItem: WorkItem) => queueItem.currentStepId === stepId && queueItem.status === 'queued')
           .sort((a: WorkItem, b: WorkItem) => {
+            const priorityDelta = getItemDispatchPriority(b) - getItemDispatchPriority(a);
+            if (priorityDelta !== 0) {
+              return priorityDelta;
+            }
+
             const aQueuedAt = a.queuedAtSimulationMs ?? a.stepEntryTime ?? a.createdAtSimulationMs;
             const bQueuedAt = b.queuedAtSimulationMs ?? b.stepEntryTime ?? b.createdAtSimulationMs;
             if (aQueuedAt !== bQueuedAt) {
@@ -580,8 +836,24 @@ export const useProcessSimulation = (config: SimulationConfig) => {
             continue;
           }
 
+          const freeUnits = capacity - currentUsage;
+          const assignment = step.resourceExecutionMode === 'collaborative'
+            ? getCollaborativeAssignment(step, stepId, freeUnits)
+            : { resources: getResourceUnitsForItem(step, freeUnits) };
+          if (assignment.resources <= 0) {
+            break;
+          }
+
+          queuedItem.executionMode = step.resourceExecutionMode || 'single';
+          queuedItem.assignedResourceCount = assignment.resources;
+          queuedItem.assignedTeamId = assignment.teamId;
+          queuedItem.assignedTeamName = assignment.teamName;
+          queuedItem.resourceLoadFactor = getResourceLoadForNextItem(step, currentUsage + 1);
+          if (assignment.teamId) {
+            stepTeamUsage.set(getTeamUsageKey(stepId, assignment.teamId), true);
+          }
           beginProcessing(queuedItem, step, startAt);
-          currentUsage++;
+          currentUsage += step.resourceExecutionMode === 'collaborative' ? assignment.resources : 1;
         }
 
         stepUsage.set(stepId, currentUsage);
@@ -647,7 +919,10 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         item.totalProcessingTime += safeDuration;
 
         // EXCEPTION: Failure
-        const failChance = Math.min(1, safeNumber(currentStep.failureProbability, 0));
+        const failureMultiplier = typeof item.failureMultiplier === 'number' && Number.isFinite(item.failureMultiplier)
+          ? Math.max(0, item.failureMultiplier)
+          : 1;
+        const failChance = Math.min(1, safeNumber(currentStep.failureProbability, 0) * failureMultiplier);
         if (Math.random() < failChance) {
           item.status = 'error';
           statsRef.current.totalItemsFailed++;
@@ -656,7 +931,10 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
           if (currentStep.simulationMode !== 'delay') {
             const currentUsage = stepUsage.get(item.currentStepId) || 0;
-            stepUsage.set(item.currentStepId, Math.max(0, currentUsage - 1));
+            const usageUnits = currentStep.resourceExecutionMode === 'collaborative'
+              ? getPositiveInteger(item.assignedResourceCount, 1, 1, 1000)
+              : 1;
+            stepUsage.set(item.currentStepId, Math.max(0, currentUsage - usageUnits));
             startQueuedItemsForStep(item.currentStepId, eventTime);
           }
           return;
@@ -689,7 +967,10 @@ export const useProcessSimulation = (config: SimulationConfig) => {
 
         if (currentStep.simulationMode !== 'delay') {
           const currentUsage = stepUsage.get(completedStepId) || 0;
-          stepUsage.set(completedStepId, Math.max(0, currentUsage - 1));
+          const usageUnits = currentStep.resourceExecutionMode === 'collaborative'
+            ? getPositiveInteger(item.assignedResourceCount, 1, 1, 1000)
+            : 1;
+          stepUsage.set(completedStepId, Math.max(0, currentUsage - usageUnits));
           startQueuedItemsForStep(completedStepId, eventTime);
         }
       };
@@ -863,11 +1144,24 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           const runtime = stepRuntimeById.get(s.id) || { queueLength: 0, activeProcessing: 0 };
           const queueLength = runtime.queueLength;
           const activeProcessing = runtime.activeProcessing;
+          const resourceUsage = s.type === 'process' && s.simulationMode !== 'delay'
+            ? stepUsage.get(s.id) || 0
+            : 0;
+          const totalResources = s.type === 'process' && s.simulationMode !== 'delay'
+            ? getStepProcessingLimit(s)
+            : 0;
+          const processingItemsForStep = itemsRef.current.filter((item: WorkItem) => item.currentStepId === s.id && item.status === 'processing');
+          const avgResourcesPerItem = processingItemsForStep.length > 0
+            ? processingItemsForStep.reduce((sum, item) => sum + getPositiveInteger(item.assignedResourceCount, 1, 1, 1000), 0) / processingItemsForStep.length
+            : 0;
+          const avgResourceLoadFactor = processingItemsForStep.length > 0
+            ? processingItemsForStep.reduce((sum, item) => sum + getPositiveInteger(item.resourceLoadFactor, 1, 1, 1000), 0) / processingItemsForStep.length
+            : 0;
 
           let utilization = 0;
           if (s.type === 'process' && s.simulationMode !== 'delay') {
-            const cap = Math.max(1, s.capacity || 1);
-            const used = stepUsage.get(s.id) || 0;
+            const cap = Math.max(1, totalResources || 1);
+            const used = resourceUsage;
             utilization = used / cap;
           }
 
@@ -876,6 +1170,10 @@ export const useProcessSimulation = (config: SimulationConfig) => {
             queueLength,
             activeProcessing,
             utilization,
+            resourceUsage,
+            totalResources,
+            avgResourcesPerItem,
+            avgResourceLoadFactor,
             avgWaitTime: counters.totalStarted > 0 ? counters.totalWaitTime / counters.totalStarted : 0,
             avgCompletionTime: counters.processed > 0
               ? s.type === 'end'
@@ -901,6 +1199,14 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           avgThroughput,
           activeItems,
         });
+
+        const pauseReason = getAutoPauseReason(activeItems);
+        if (pauseReason) {
+          setAutoPauseReason(pauseReason);
+          onAutoPause?.(pauseReason);
+          lastTickRef.current = now;
+          return;
+        }
       }
 
       animationFrameId = requestAnimationFrame(tick);
@@ -909,13 +1215,14 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     animationFrameId = requestAnimationFrame(tick);
 
     return () => cancelAnimationFrame(animationFrameId);
-  }, [config.isRunning, config.speedMultiplier, config.timeCompression, config.simulationMode, config.steps]);
+  }, [config.isRunning, config.speedMultiplier, config.timeCompression, config.simulationMode, config.steps, config.businessCalendar, config.calendarStartIso, config.demandModifiers, config.autoPause, onAutoPause]);
 
   return {
     items,
     stepStats,
     simulationTimeMs,
     globalStats,
+    autoPauseReason,
     resetSimulation
   };
 };

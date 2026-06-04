@@ -2,7 +2,7 @@
 import React from 'react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
 import { SimulationStats, StepStats, ProcessStep, DurationUnit, WorkItem } from '../types';
-import { XCircle, Ban, CheckCircle2, Gauge, Timer, Activity, GitCompareArrows } from 'lucide-react';
+import { XCircle, Ban, CheckCircle2, Gauge, Timer, Activity, GitCompareArrows, Users } from 'lucide-react';
 
 interface Props {
   globalStats: SimulationStats;
@@ -41,6 +41,26 @@ const UNIT_LABELS: Record<DurationUnit, string> = {
   week: 'week',
   month: 'month',
   year: 'year',
+};
+
+const getExecutionModeLabel = (step: ProcessStep) => {
+  if (step.type !== 'process') {
+    return step.type;
+  }
+
+  if (step.simulationMode === 'delay') {
+    return 'Delay';
+  }
+
+  if ((step.resourceExecutionMode || 'single') === 'collaborative') {
+    return step.teamAllocationMode === 'explicit' ? 'Explicit Teams' : 'Auto Teams';
+  }
+
+  if (step.resourceExecutionMode === 'multitask') {
+    return 'Multitask';
+  }
+
+  return 'Single';
 };
 
 const getPreferredThroughputUnit = (steps: ProcessStep[]): DurationUnit => {
@@ -216,6 +236,14 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, ite
 
   const maxFinished = Math.max(1, ...flowMetrics.map(flow => flow.finished));
   const maxThroughput = Math.max(0.000001, ...flowMetrics.map(flow => flow.throughput));
+  const resourceSteps = steps
+    .filter(step => step.type === 'process' && step.simulationMode !== 'delay')
+    .map(step => ({ step, stats: stepStatsById.get(step.id) }))
+    .filter((entry): entry is { step: ProcessStep; stats: StepStats } => Boolean(entry.stats));
+  const totalResourceUsage = resourceSteps.reduce((sum, entry) => sum + (entry.stats.resourceUsage || 0), 0);
+  const totalResourceCapacity = resourceSteps.reduce((sum, entry) => sum + (entry.stats.totalResources || entry.step.capacity || 0), 0);
+  const weightedAvgResourcesPerItem = resourceSteps.reduce((sum, entry) => sum + (entry.stats.avgResourcesPerItem || 0) * entry.stats.activeProcessing, 0) / Math.max(1, resourceSteps.reduce((sum, entry) => sum + entry.stats.activeProcessing, 0));
+  const weightedAvgResourceLoad = resourceSteps.reduce((sum, entry) => sum + (entry.stats.avgResourceLoadFactor || 0) * entry.stats.activeProcessing, 0) / Math.max(1, resourceSteps.reduce((sum, entry) => sum + entry.stats.activeProcessing, 0));
 
   const cards = [
     {
@@ -244,6 +272,13 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, ite
       value: globalStats.activeItems,
       color: 'text-amber-400',
       icon: <Activity size={22} className="text-amber-400" />,
+      suffix: ''
+    },
+    {
+      label: 'Resources Used',
+      value: `${totalResourceUsage}/${totalResourceCapacity}`,
+      color: 'text-purple-300',
+      icon: <Users size={22} className="text-purple-300" />,
       suffix: ''
     },
   ];
@@ -289,6 +324,48 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, ite
             {flowMetrics.length} live flow{flowMetrics.length === 1 ? '' : 's'}
           </div>
         </div>
+
+        {resourceSteps.length > 0 && (
+          <div className="mb-4 rounded-2xl border border-purple-500/20 bg-purple-500/5 p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h4 className="flex items-center gap-2 text-sm font-semibold text-purple-100">
+                  <Users size={16} className="text-purple-300" /> Resource Execution
+                </h4>
+                <p className="mt-1 text-xs text-slate-500">Live resource allocation across process steps.</p>
+              </div>
+              <div className="flex flex-wrap gap-2 text-xs">
+                <span className="rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1 font-semibold text-purple-200">Used {totalResourceUsage}/{totalResourceCapacity}</span>
+                <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1 font-semibold text-blue-200">Avg team {weightedAvgResourcesPerItem.toFixed(1)}</span>
+                <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 font-semibold text-cyan-200">Avg load {weightedAvgResourceLoad.toFixed(1)}</span>
+              </div>
+            </div>
+            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {resourceSteps.map(({ step, stats }) => {
+                const capacity = stats.totalResources || step.capacity || 1;
+                const usagePercent = Math.min(100, ((stats.resourceUsage || 0) / Math.max(1, capacity)) * 100);
+                return (
+                  <div key={step.id} className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold text-slate-100" title={step.name}>{step.name}</div>
+                        <div className="text-[10px] uppercase tracking-wider text-slate-500">{getExecutionModeLabel(step)}</div>
+                      </div>
+                      <div className="font-mono text-sm font-bold text-purple-200">{stats.resourceUsage || 0}/{capacity}</div>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
+                      <div className="h-full rounded-full bg-purple-400" style={{ width: `${usagePercent}%` }} />
+                    </div>
+                    <div className="mt-2 flex justify-between text-[10px] text-slate-500">
+                      <span>Avg team <span className="font-mono text-blue-200">{(stats.avgResourcesPerItem || 0).toFixed(1)}</span></span>
+                      <span>Avg load <span className="font-mono text-cyan-200">{(stats.avgResourceLoadFactor || 0).toFixed(1)}</span></span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
           {flowMetrics.map(flow => (

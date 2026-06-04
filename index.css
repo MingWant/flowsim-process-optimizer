@@ -15,7 +15,7 @@ body {
 }
 
 .theme-root[data-theme='light'] {
-  filter: invert(0.92) hue-rotate(180deg) saturate(0.86) brightness(1.08);
+  filter: invert(0.93) hue-rotate(180deg) saturate(0.85) brightness(1.08) contrast(1.12);
 }
 
 .theme-root[data-theme='light'] img,
@@ -23,7 +23,7 @@ body {
 .theme-root[data-theme='light'] canvas,
 .theme-root[data-theme='light'] svg,
 .theme-root[data-theme='light'] input[type='color'] {
-  filter: invert(1) hue-rotate(180deg) saturate(1.1);
+  filter: invert(1) hue-rotate(180deg) saturate(1.05) brightness(0.96);
 }
 
 .theme-root[data-theme='ocean'] {

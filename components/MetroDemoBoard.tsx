@@ -27,8 +27,8 @@ interface StationLayout {
 
 const CARD_WIDTH = 190;
 const CARD_HEIGHT = 120;
-const COLUMN_GAP = 228;
-const ROW_GAP = 154;
+const COLUMN_GAP = 260;
+const ROW_GAP = 180;
 const BOARD_PADDING_X = 46;
 const BOARD_PADDING_Y = 44;
 
@@ -579,13 +579,15 @@ export const MetroDemoBoard: React.FC<Props> = ({ steps, stepStats, items, simul
               </div>
             </div>
 
-            {showBottlenecks && bottleneckStepIds.size > 0 && (
-              <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
-                <AlertTriangle size={14} className="text-amber-300" />
-                <span>{bottleneckStepIds.size} bottleneck candidate{bottleneckStepIds.size === 1 ? '' : 's'} in this flow</span>
-                <span className="text-amber-200/80">· Queue, utilization, or failure pressure is elevated</span>
-              </div>
-            )}
+            <div className="mb-4" style={{ minHeight: '36px' }}>
+              {showBottlenecks && bottleneckStepIds.size > 0 && (
+                <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                  <AlertTriangle size={14} className="text-amber-300" />
+                  <span>{bottleneckStepIds.size} bottleneck candidate{bottleneckStepIds.size === 1 ? '' : 's'} in this flow</span>
+                  <span className="text-amber-200/80">· Queue, utilization, or failure pressure is elevated</span>
+                </div>
+              )}
+            </div>
 
             <div className="overflow-x-auto pb-2">
               <div style={{ width: width * zoom, height: height * zoom }}>

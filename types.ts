@@ -6,10 +6,69 @@ export type StepSimulationMode = 'resource' | 'delay';
 export type DurationUnit = 'ms' | 's' | 'min' | 'h' | 'day' | 'week' | 'month' | 'year';
 export type ArrivalInputMode = 'rate' | 'interval';
 export type SimulationMode = 'realistic' | 'worst-case';
+export type ResourceExecutionMode = 'single' | 'collaborative' | 'multitask';
+export type TeamAllocationMode = 'auto' | 'explicit';
+export type NonWorkingArrivalPolicy = 'queue' | 'delay' | 'reject';
+
+export interface WorkingHourSegment {
+  start: number; // 0-24, local hour (e.g., 9 = 9:00, 9.5 = 9:30)
+  end: number;   // 0-24, must be after start
+}
+
+export interface BusinessCalendar {
+  enabled: boolean;
+  daysOfWeek: number[]; // 0 = Sunday, 6 = Saturday
+  // Legacy fields (for backward compatibility, auto-migrated to workingHours)
+  startHour?: number; // 0-23.99 local business hour (deprecated)
+  endHour?: number; // 0-24, must be after startHour (deprecated)
+  // New multi-segment support
+  workingHours?: WorkingHourSegment[]; // Multiple working time segments (e.g., morning + afternoon)
+  nonWorkingArrivalPolicy?: NonWorkingArrivalPolicy;
+}
+
+export interface DemandModifier {
+  id: string;
+  name: string;
+  enabled: boolean;
+  multiplier: number;
+  startHour?: number;
+  endHour?: number;
+  daysOfWeek?: number[];
+  months?: number[]; // 1-12
+  startDate?: string; // yyyy-mm-dd
+  endDate?: string; // yyyy-mm-dd inclusive
+}
+
+export interface AutoPauseConfig {
+  enabled: boolean;
+  simulationTimeMs?: number;
+  totalItemsCreated?: number;
+  totalItemsFinished?: number;
+  totalItemsFailed?: number;
+  totalItemsCancelled?: number;
+  activeItems?: number;
+}
 
 export interface StepConnection {
   targetId: string;
   probability: number; // 0 to 1
+}
+
+export interface ResourceTeam {
+  id: string;
+  name: string;
+  resources: number;
+}
+
+export interface ItemProfile {
+  id: string;
+  name: string;
+  probability: number; // 0-1
+  processingTimeMultiplier: number;
+  failureMultiplier: number;
+  cancellationMultiplier: number;
+  priority: number;
+  color: string;
 }
 
 export interface ProcessStep {
@@ -20,9 +79,20 @@ export interface ProcessStep {
   // Logic Config
   randomnessMode: RandomnessMode;
   simulationMode?: StepSimulationMode; // resource = capacity/queue, delay = time-only
+  calendarMode?: 'inherit' | 'custom';
+  businessCalendar?: BusinessCalendar;
   
   // Process Node Fields
   capacity: number; 
+  resourceExecutionMode?: ResourceExecutionMode;
+  minResourcesPerItem?: number;
+  targetResourcesPerItem?: number;
+  maxResourcesPerItem?: number;
+  teamAllocationMode?: TeamAllocationMode;
+  collaborativeTeams?: ResourceTeam[];
+  collaborativeEfficiency?: Record<number, number>; // resource count -> speed multiplier
+  maxConcurrentItemsPerResource?: number;
+  multitaskEfficiency?: Record<number, number>; // concurrent items on same resource -> speed multiplier
   processingTime: number; // Default ms (Fixed Mode)
   processingTimeUnit?: DurationUnit;
   variance: number; // 0-1 (Fixed Mode)
@@ -37,6 +107,8 @@ export interface ProcessStep {
   minArrivalRate?: number; // Items per selected simulated unit (Range Mode)
   maxArrivalRate?: number; // Items per selected simulated unit (Range Mode)
   arrivalBatchSize?: number; // Number of items created at each arrival event
+  arrivalBatchIntervalMs?: number; // Time interval between items within a batch (ms), default 0 (simultaneous arrival)
+  itemProfiles?: ItemProfile[];
 
   // End Node Fields
   endTimeUnit?: DurationUnit;
@@ -71,6 +143,18 @@ export interface WorkItem {
   queuedAtSimulationMs?: number;
   queueCancellationCheckedAtSimulationMs?: number;
   requiredDuration?: number; // The specific time calculated for this item instance
+  itemProfileId?: string;
+  itemProfileName?: string;
+  itemProfileColor?: string;
+  processingTimeMultiplier?: number;
+  failureMultiplier?: number;
+  cancellationMultiplier?: number;
+  priority?: number;
+  assignedResourceCount?: number;
+  assignedTeamId?: string;
+  assignedTeamName?: string;
+  resourceLoadFactor?: number;
+  executionMode?: ResourceExecutionMode;
   processingStartedAtSimulationMs?: number;
   processingEndsAtSimulationMs?: number;
   transmissionStartedAtSimulationMs?: number;
@@ -90,6 +174,10 @@ export interface SimulationConfig {
   speedMultiplier: number;
   timeCompression: number; // simulated ms advanced per real ms
   simulationMode?: SimulationMode; // realistic (default) or worst-case planning
+  calendarStartIso?: string;
+  businessCalendar?: BusinessCalendar;
+  demandModifiers?: DemandModifier[];
+  autoPause?: AutoPauseConfig;
 }
 
 export interface SimulationStats {
@@ -107,6 +195,10 @@ export interface StepStats {
   queueLength: number;
   activeProcessing: number;
   utilization: number;
+  resourceUsage: number;
+  totalResources: number;
+  avgResourcesPerItem: number;
+  avgResourceLoadFactor: number;
   avgWaitTime: number;
   avgCompletionTime: number;
   // Cumulative History
