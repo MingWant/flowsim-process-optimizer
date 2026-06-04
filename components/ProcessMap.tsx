@@ -3,7 +3,7 @@ import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react'
 import { flushSync } from 'react-dom';
 import { ProcessStep, StepStats, WorkItem } from '../types';
 import { ProcessNode } from './ProcessNode';
-import { Move, ZoomIn, ZoomOut, Maximize, PlayCircle, Box, StopCircle, MousePointer2, Minimize2, PanelsTopLeft, Hand, Copy, ScanSearch, Trash2 } from 'lucide-react';
+import { Move, ZoomIn, ZoomOut, Maximize, PlayCircle, Box, StopCircle, MousePointer2, Minimize2, PanelsTopLeft, Hand, Copy, ScanSearch, Trash2, Wrench } from 'lucide-react';
 
 interface Props {
   steps: ProcessStep[];
@@ -19,6 +19,7 @@ interface Props {
   onSelectionChange: (stepIds: string[]) => void;
   onCopySelected: () => void;
   onDeleteSelected: () => void;
+  onClearCanvas: () => void;
 }
 
 interface Position {
@@ -29,6 +30,8 @@ interface Position {
 type InteractionMode = 'mixed' | 'pan' | 'select' | 'move';
 
 interface SelectionBox {
+  // Stored in canvas/world coordinates so the anchor stays attached to the
+  // process canvas while the viewport pans or scrolls during selection.
   startX: number;
   startY: number;
   currentX: number;
@@ -80,6 +83,15 @@ const getStepDimensions = (type?: ProcessStep['type'], collapsed = false) => ({
         : END_HEIGHT,
 });
 
+const haveSameIds = (a: string[], b: string[]) => {
+  if (a.length !== b.length) {
+    return false;
+  }
+
+  const ids = new Set(a);
+  return b.every((id) => ids.has(id));
+};
+
 export const ProcessMap: React.FC<Props> = ({ 
   steps, 
   stepStats, 
@@ -94,6 +106,7 @@ export const ProcessMap: React.FC<Props> = ({
   onSelectionChange,
   onCopySelected,
   onDeleteSelected,
+  onClearCanvas,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [isControlPressed, setIsControlPressed] = useState(false);
@@ -106,13 +119,27 @@ export const ProcessMap: React.FC<Props> = ({
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [settlingId, setSettlingId] = useState<string | null>(null);
   const [collapsedStepIds, setCollapsedStepIds] = useState<Record<string, boolean>>({});
+  const [isToolbarExpanded, setIsToolbarExpanded] = useState(false);
   const [dragPreview, setDragPreview] = useState<{ id: string; offsetX: number; offsetY: number } | null>(null);
   const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const selectionBaseIdsRef = useRef<string[]>([]);
+  const selectionBoxRef = useRef<SelectionBox | null>(null);
+  const selectionRectElementRef = useRef<HTMLDivElement | null>(null);
+  const pendingSelectionIdsRef = useRef<string[]>(selectedStepIds);
+  const selectionPointerRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  const selectionStartClientRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  const canvasContentRef = useRef<HTMLDivElement | null>(null);
+  const panRef = useRef(pan);
+  const scaleRef = useRef(scale);
+  const autoPanFrameRef = useRef<number | null>(null);
+  const autoPanLastTimestampRef = useRef<number | null>(null);
+  const autoPanVelocityRef = useRef({ x: 0, y: 0 });
+  const emittedSelectionIdsRef = useRef<string[]>(selectedStepIds);
   const dragDeltaRef = useRef({ x: 0, y: 0 });
   const dragFrameRef = useRef<number | null>(null);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const settleTimerRef = useRef<number | null>(null);
+  const blankClickRef = useRef<{ clientX: number; clientY: number; shouldClear: boolean } | null>(null);
   const nodeRefs = useRef(new Map<string, HTMLDivElement | null>());
   const addCounterRef = useRef(0);
 
@@ -233,29 +260,83 @@ export const ProcessMap: React.FC<Props> = ({
     return () => window.cancelAnimationFrame(frameId);
   }, [fitViewToProcess, positions, steps.length]);
 
-  const viewportSelectionRect = useMemo(() => {
-    if (!selectionBox) {
+  useEffect(() => {
+    panRef.current = pan;
+  }, [pan]);
+
+  useEffect(() => {
+    scaleRef.current = scale;
+  }, [scale]);
+
+  useEffect(() => {
+    emittedSelectionIdsRef.current = selectedStepIds;
+    pendingSelectionIdsRef.current = selectedStepIds;
+  }, [selectedStepIds]);
+
+  const isSelectionBoxActive = selectionBox !== null;
+
+  const renderSelectionBox = useCallback((box: SelectionBox | null) => {
+    const element = selectionRectElementRef.current;
+
+    if (!element || !box) {
+      if (element) {
+        element.style.display = 'none';
+      }
+      return;
+    }
+
+    const left = Math.min(box.startX, box.currentX);
+    const top = Math.min(box.startY, box.currentY);
+    const width = Math.abs(box.currentX - box.startX);
+    const height = Math.abs(box.currentY - box.startY);
+
+    element.style.display = 'block';
+    element.style.transform = `translate3d(${left}px, ${top}px, 0)`;
+    element.style.width = `${width}px`;
+    element.style.height = `${height}px`;
+  }, []);
+
+  const renderCanvasTransform = useCallback((nextPan: Position, nextScale = scaleRef.current) => {
+    const element = canvasContentRef.current;
+
+    if (!element) {
+      return;
+    }
+
+    element.style.transform = `translate3d(${nextPan.x}px, ${nextPan.y}px, 0) scale(${nextScale})`;
+  }, []);
+
+  const getCanvasPointFromClient = useCallback((clientX: number, clientY: number, panOverride = panRef.current) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+
+    if (!rect) {
       return null;
     }
 
+    const viewportX = Math.min(Math.max(clientX - rect.left, 0), rect.width);
+    const viewportY = Math.min(Math.max(clientY - rect.top, 0), rect.height);
+
     return {
-      left: Math.min(selectionBox.startX, selectionBox.currentX),
-      top: Math.min(selectionBox.startY, selectionBox.currentY),
-      width: Math.abs(selectionBox.currentX - selectionBox.startX),
-      height: Math.abs(selectionBox.currentY - selectionBox.startY),
+      x: (viewportX - panOverride.x) / scaleRef.current,
+      y: (viewportY - panOverride.y) / scaleRef.current,
     };
-  }, [selectionBox]);
+  }, []);
+
+  const isClientPointInsideCanvas = useCallback((clientX: number, clientY: number) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+
+    if (!rect) {
+      return false;
+    }
+
+    return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+  }, []);
 
   const computeSelectionInWorld = useCallback((box: SelectionBox) => {
     const left = Math.min(box.startX, box.currentX);
     const top = Math.min(box.startY, box.currentY);
     const right = Math.max(box.startX, box.currentX);
     const bottom = Math.max(box.startY, box.currentY);
-
-    const worldLeft = (left - pan.x) / scale;
-    const worldTop = (top - pan.y) / scale;
-    const worldRight = (right - pan.x) / scale;
-    const worldBottom = (bottom - pan.y) / scale;
 
     return steps.filter((step) => {
       const pos = positions[step.id] || (typeof step.x === 'number' && typeof step.y === 'number' ? { x: step.x, y: step.y } : null);
@@ -269,9 +350,30 @@ export const ProcessMap: React.FC<Props> = ({
       const stepRight = pos.x + width;
       const stepBottom = pos.y + height;
 
-      return stepLeft < worldRight && stepRight > worldLeft && stepTop < worldBottom && stepBottom > worldTop;
+      return stepLeft < right && stepRight > left && stepTop < bottom && stepBottom > top;
     }).map((step) => step.id);
-  }, [collapsedStepIds, pan.x, pan.y, positions, scale, steps]);
+  }, [collapsedStepIds, positions, steps]);
+
+  const updateSelectionFromClientPoint = useCallback((clientX: number, clientY: number, panOverride = panRef.current) => {
+    const activeBox = selectionBoxRef.current;
+    const canvasPoint = getCanvasPointFromClient(clientX, clientY, panOverride);
+
+    if (!activeBox || !canvasPoint) {
+      return;
+    }
+
+    const nextBox = {
+      ...activeBox,
+      currentX: canvasPoint.x,
+      currentY: canvasPoint.y,
+    };
+    const nextSelectedIds = computeSelectionInWorld(nextBox);
+    const mergedSelection = Array.from(new Set([...selectionBaseIdsRef.current, ...nextSelectedIds]));
+
+    selectionBoxRef.current = nextBox;
+    renderSelectionBox(nextBox);
+    pendingSelectionIdsRef.current = mergedSelection;
+  }, [computeSelectionInWorld, getCanvasPointFromClient, renderSelectionBox]);
 
   const canPanCanvas = interactionMode === 'pan' || interactionMode === 'mixed';
   const canMoveNodes = interactionMode === 'move' || interactionMode === 'mixed';
@@ -365,29 +467,44 @@ export const ProcessMap: React.FC<Props> = ({
 
       e.preventDefault();
 
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) {
+      const startPoint = getCanvasPointFromClient(e.clientX, e.clientY);
+      if (!startPoint) {
         return;
       }
 
       const nextBox = {
-        startX: e.clientX - rect.left,
-        startY: e.clientY - rect.top,
-        currentX: e.clientX - rect.left,
-        currentY: e.clientY - rect.top,
+        startX: startPoint.x,
+        startY: startPoint.y,
+        currentX: startPoint.x,
+        currentY: startPoint.y,
       };
 
       const isAdditiveSelection = isTemporarySelectGesture
         ? e.metaKey || e.shiftKey
         : e.metaKey || e.ctrlKey || e.shiftKey;
       selectionBaseIdsRef.current = isAdditiveSelection ? selectedStepIds : [];
+      pendingSelectionIdsRef.current = selectionBaseIdsRef.current;
 
       if (!isAdditiveSelection) {
+        emittedSelectionIdsRef.current = [];
+        pendingSelectionIdsRef.current = [];
         onSelectionChange([]);
       }
 
+      selectionPointerRef.current = { clientX: e.clientX, clientY: e.clientY };
+      selectionStartClientRef.current = { clientX: e.clientX, clientY: e.clientY };
+      selectionBoxRef.current = nextBox;
+      renderSelectionBox(nextBox);
       setSelectionBox(nextBox);
       return;
+    }
+
+    if (!isInteractiveElement) {
+      blankClickRef.current = {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        shouldClear: selectedStepIds.length > 0,
+      };
     }
 
     if (!isInteractiveElement && canPanCanvas) {
@@ -410,33 +527,45 @@ export const ProcessMap: React.FC<Props> = ({
     if (isPanning) {
         const dx = e.clientX - lastMousePos.x;
         const dy = e.clientY - lastMousePos.y;
+        const blankClick = blankClickRef.current;
+        if (blankClick && (Math.abs(e.clientX - blankClick.clientX) > 3 || Math.abs(e.clientY - blankClick.clientY) > 3)) {
+          blankClickRef.current = null;
+        }
         setPan(p => ({ x: p.x + dx, y: p.y + dy }));
         setLastMousePos({ x: e.clientX, y: e.clientY });
     }
 
     if (selectionBox) {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) {
-        return;
-      }
-
-      const nextBox = {
-        ...selectionBox,
-        currentX: e.clientX - rect.left,
-        currentY: e.clientY - rect.top,
-      };
-      const nextSelectedIds = computeSelectionInWorld(nextBox);
-      const mergedSelection = Array.from(new Set([...selectionBaseIdsRef.current, ...nextSelectedIds]));
-
-      setSelectionBox(nextBox);
-      onSelectionChange(mergedSelection);
+      selectionPointerRef.current = { clientX: e.clientX, clientY: e.clientY };
     }
   };
 
   const handlePanEnd = () => {
+    const activeSelectionBox = selectionBoxRef.current;
+
+    if (blankClickRef.current?.shouldClear) {
+      emittedSelectionIdsRef.current = [];
+      onSelectionChange([]);
+    }
+    blankClickRef.current = null;
+
+    if (activeSelectionBox) {
+      const nextSelection = pendingSelectionIdsRef.current;
+      if (!haveSameIds(emittedSelectionIdsRef.current, nextSelection)) {
+        emittedSelectionIdsRef.current = nextSelection;
+        onSelectionChange(nextSelection);
+      }
+      setPan(panRef.current);
+    }
+
     setIsPanning(false);
     setSelectionBox(null);
+    selectionBoxRef.current = null;
+    renderSelectionBox(null);
+    selectionPointerRef.current = null;
+    selectionStartClientRef.current = null;
     selectionBaseIdsRef.current = [];
+    pendingSelectionIdsRef.current = emittedSelectionIdsRef.current;
   };
 
   useEffect(() => {
@@ -466,6 +595,137 @@ export const ProcessMap: React.FC<Props> = ({
       window.removeEventListener('blur', handleBlur);
     };
   }, []);
+
+  useEffect(() => {
+    if (!isSelectionBoxActive) {
+      return;
+    }
+
+    const handleWindowMouseMove = (event: MouseEvent) => {
+      selectionPointerRef.current = { clientX: event.clientX, clientY: event.clientY };
+      if (isClientPointInsideCanvas(event.clientX, event.clientY)) {
+        updateSelectionFromClientPoint(event.clientX, event.clientY);
+      }
+    };
+
+    const handleWindowMouseUp = () => {
+      handlePanEnd();
+    };
+
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+    };
+  }, [isClientPointInsideCanvas, isSelectionBoxActive, updateSelectionFromClientPoint]);
+
+  useEffect(() => {
+    if (!isSelectionBoxActive) {
+      if (autoPanFrameRef.current !== null) {
+        window.cancelAnimationFrame(autoPanFrameRef.current);
+        autoPanFrameRef.current = null;
+      }
+      autoPanLastTimestampRef.current = null;
+      autoPanVelocityRef.current = { x: 0, y: 0 };
+      return;
+    }
+
+    const edgePadding = 160;
+    const minSpeed = 0;
+    const maxSpeed = 260;
+    const smoothing = 0.1;
+
+    const runAutoPan = (timestamp: number) => {
+      autoPanFrameRef.current = null;
+
+      const rect = containerRef.current?.getBoundingClientRect();
+      const pointer = selectionPointerRef.current;
+      const startPointer = selectionStartClientRef.current;
+      const activeBox = selectionBoxRef.current;
+
+      if (!rect || !pointer || !startPointer || !activeBox) {
+        return;
+      }
+
+      const elapsedMs = autoPanLastTimestampRef.current === null
+        ? 16.67
+        : Math.min(34, Math.max(0, timestamp - autoPanLastTimestampRef.current));
+      autoPanLastTimestampRef.current = timestamp;
+
+      const getAxisVelocity = (distanceIntoEdge: number) => {
+        const normalizedDistance = Math.min(1, Math.max(0, distanceIntoEdge) / edgePadding);
+        if (normalizedDistance === 0) {
+          return 0;
+        }
+
+        return minSpeed + normalizedDistance * normalizedDistance * normalizedDistance * (maxSpeed - minSpeed);
+      };
+      let dx = 0;
+      let dy = 0;
+      const intentThreshold = 24;
+      const movedX = pointer.clientX - startPointer.clientX;
+      const movedY = pointer.clientY - startPointer.clientY;
+      const wantsLeft = pointer.clientX < rect.left || movedX < -intentThreshold;
+      const wantsRight = pointer.clientX > rect.right || movedX > intentThreshold;
+      const wantsUp = pointer.clientY < rect.top || movedY < -intentThreshold;
+      const wantsDown = pointer.clientY > rect.bottom || movedY > intentThreshold;
+
+      if (wantsLeft && pointer.clientX < rect.left + edgePadding) {
+        dx = getAxisVelocity(rect.left + edgePadding - pointer.clientX);
+      } else if (wantsRight && pointer.clientX > rect.right - edgePadding) {
+        dx = -getAxisVelocity(pointer.clientX - (rect.right - edgePadding));
+      }
+
+      if (wantsUp && pointer.clientY < rect.top + edgePadding) {
+        dy = getAxisVelocity(rect.top + edgePadding - pointer.clientY);
+      } else if (wantsDown && pointer.clientY > rect.bottom - edgePadding) {
+        dy = -getAxisVelocity(pointer.clientY - (rect.bottom - edgePadding));
+      }
+
+      autoPanVelocityRef.current = {
+        x: autoPanVelocityRef.current.x + (dx - autoPanVelocityRef.current.x) * smoothing,
+        y: autoPanVelocityRef.current.y + (dy - autoPanVelocityRef.current.y) * smoothing,
+      };
+
+      if (dx === 0 && Math.abs(autoPanVelocityRef.current.x) < 0.5) {
+        autoPanVelocityRef.current.x = 0;
+      }
+      if (dy === 0 && Math.abs(autoPanVelocityRef.current.y) < 0.5) {
+        autoPanVelocityRef.current.y = 0;
+      }
+
+      dx = autoPanVelocityRef.current.x * elapsedMs / 1000;
+      dy = autoPanVelocityRef.current.y * elapsedMs / 1000;
+
+      if (Math.abs(dx) >= 0.35 || Math.abs(dy) >= 0.35) {
+        const nextPan = {
+          x: panRef.current.x + dx,
+          y: panRef.current.y + dy,
+        };
+
+        panRef.current = nextPan;
+        renderCanvasTransform(nextPan);
+        updateSelectionFromClientPoint(pointer.clientX, pointer.clientY, nextPan);
+      }
+
+      if (selectionBoxRef.current) {
+        autoPanFrameRef.current = window.requestAnimationFrame(runAutoPan);
+      }
+    };
+
+    autoPanFrameRef.current = window.requestAnimationFrame(runAutoPan);
+
+    return () => {
+      if (autoPanFrameRef.current !== null) {
+        window.cancelAnimationFrame(autoPanFrameRef.current);
+        autoPanFrameRef.current = null;
+      }
+      autoPanLastTimestampRef.current = null;
+      autoPanVelocityRef.current = { x: 0, y: 0 };
+    };
+  }, [isSelectionBoxActive, updateSelectionFromClientPoint]);
   
   useEffect(() => {
     const container = containerRef.current;
@@ -475,6 +735,32 @@ export const ProcessMap: React.FC<Props> = ({
 
     const handleNativeWheel = (event: WheelEvent) => {
       if (!(event.metaKey || event.ctrlKey)) {
+        if (interactionMode === 'select' || selectionBoxRef.current) {
+          event.preventDefault();
+          event.stopPropagation();
+
+          const panDelta = {
+            x: -event.deltaX,
+            y: -event.deltaY,
+          };
+          const nextPan = {
+            x: panRef.current.x + panDelta.x,
+            y: panRef.current.y + panDelta.y,
+          };
+
+          panRef.current = nextPan;
+          if (selectionBoxRef.current) {
+            renderCanvasTransform(nextPan);
+          } else {
+            setPan(nextPan);
+          }
+
+          const pointer = selectionPointerRef.current;
+          if (pointer && selectionBoxRef.current) {
+            updateSelectionFromClientPoint(pointer.clientX, pointer.clientY, nextPan);
+          }
+        }
+
         return;
       }
 
@@ -488,7 +774,7 @@ export const ProcessMap: React.FC<Props> = ({
     return () => {
       container.removeEventListener('wheel', handleNativeWheel);
     };
-  }, [zoomAtClientPoint]);
+  }, [computeSelectionInWorld, interactionMode, onSelectionChange, pan.x, pan.y, scale, zoomAtClientPoint]);
 
   const getViewportSpawnPosition = (type: 'process' | 'start' | 'end'): Position => {
     const container = containerRef.current;
@@ -848,19 +1134,21 @@ export const ProcessMap: React.FC<Props> = ({
 
     return (
      <div className="relative w-full h-[calc(100vh-15rem)] min-h-[620px] bg-slate-950 overflow-hidden border border-slate-800 rounded-2xl select-none group shadow-inner xl:h-[calc(100vh-13rem)]">
-       <div className="absolute left-4 top-4 z-50 flex flex-wrap gap-2 rounded-2xl border border-slate-800 bg-slate-950/85 p-2 shadow-2xl backdrop-blur-sm">
-         <button onClick={() => handleAddStep('start')} className="flex items-center gap-1.5 rounded-xl bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 transition-colors"><PlayCircle size={14}/> Start</button>
-         <button onClick={() => handleAddStep('process')} className="flex items-center gap-1.5 rounded-xl bg-blue-500/10 px-3 py-2 text-xs font-semibold text-blue-300 hover:bg-blue-500/20 transition-colors"><Box size={14}/> Process</button>
-         <button onClick={() => handleAddStep('end')} className="flex items-center gap-1.5 rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 transition-colors"><StopCircle size={14}/> End</button>
-         <div className="mx-1 hidden h-8 w-px bg-slate-800 lg:block" />
-         <button onClick={() => setInteractionMode('mixed')} className={`hidden items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors lg:flex ${interactionMode === 'mixed' ? 'bg-emerald-500/20 text-emerald-200' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}><MousePointer2 size={14}/> Mixed</button>
-         <button onClick={() => setInteractionMode('pan')} className={`hidden items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors lg:flex ${interactionMode === 'pan' ? 'bg-cyan-500/20 text-cyan-200' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}><Hand size={14}/> Pan</button>
-         <button onClick={() => setInteractionMode('select')} className={`hidden items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors lg:flex ${interactionMode === 'select' ? 'bg-blue-500/20 text-blue-200' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}><ScanSearch size={14}/> Select</button>
-         <button onClick={() => setInteractionMode('move')} className={`hidden items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors lg:flex ${interactionMode === 'move' ? 'bg-violet-500/20 text-violet-200' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}><Move size={14}/> Move</button>
-         <button onClick={onCopySelected} disabled={selectedStepIds.length === 0} className="hidden items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed lg:flex"><Copy size={14}/> Copy selected{selectedStepIds.length > 0 ? ` (${selectedStepIds.length})` : ''}</button>
-         <button onClick={onDeleteSelected} disabled={selectedStepIds.length === 0} className="hidden items-center gap-1.5 rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed lg:flex"><Trash2 size={14}/> Delete selected{selectedStepIds.length > 0 ? ` (${selectedStepIds.length})` : ''}</button>
-         <button onClick={() => setAllStepsCollapsed(true)} className="hidden items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors lg:flex"><Minimize2 size={14}/> Compact all</button>
-         <button onClick={() => setAllStepsCollapsed(false)} className="hidden items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors lg:flex"><PanelsTopLeft size={14}/> Expand all</button>
+       <div className={`absolute left-4 top-4 z-50 flex max-w-[calc(100%-7rem)] flex-wrap gap-2 rounded-2xl border border-slate-800 bg-slate-950/85 p-2 shadow-2xl backdrop-blur-sm transition-all ${isToolbarExpanded ? 'max-h-48 overflow-y-auto' : 'max-h-[3.35rem] overflow-hidden [&_[data-toolbar-extra]]:hidden'}`}>
+         <button onClick={() => setIsToolbarExpanded((expanded) => !expanded)} className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-800 transition-colors"><Wrench size={14}/> Tools</button>
+         <button data-toolbar-extra onClick={() => handleAddStep('start')} className="flex items-center gap-1.5 rounded-xl bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 transition-colors"><PlayCircle size={14}/> Start</button>
+         <button data-toolbar-extra onClick={() => handleAddStep('process')} className="flex items-center gap-1.5 rounded-xl bg-blue-500/10 px-3 py-2 text-xs font-semibold text-blue-300 hover:bg-blue-500/20 transition-colors"><Box size={14}/> Process</button>
+         <button data-toolbar-extra onClick={() => handleAddStep('end')} className="flex items-center gap-1.5 rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 transition-colors"><StopCircle size={14}/> End</button>
+         <div data-toolbar-extra className="mx-1 hidden h-8 w-px bg-slate-800 lg:block" />
+         <button data-toolbar-extra onClick={() => setInteractionMode('mixed')} className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors ${interactionMode === 'mixed' ? 'bg-emerald-500/20 text-emerald-200' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}><MousePointer2 size={14}/> Mixed</button>
+         <button data-toolbar-extra onClick={() => setInteractionMode('pan')} className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors ${interactionMode === 'pan' ? 'bg-cyan-500/20 text-cyan-200' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}><Hand size={14}/> Pan</button>
+         <button data-toolbar-extra onClick={() => setInteractionMode('select')} className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors ${interactionMode === 'select' ? 'bg-blue-500/20 text-blue-200' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}><ScanSearch size={14}/> Select</button>
+         <button data-toolbar-extra onClick={() => setInteractionMode('move')} className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition-colors ${interactionMode === 'move' ? 'bg-violet-500/20 text-violet-200' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}><Move size={14}/> Move</button>
+         <button data-toolbar-extra onClick={onCopySelected} disabled={selectedStepIds.length === 0} className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"><Copy size={14}/> Copy selected{selectedStepIds.length > 0 ? ` (${selectedStepIds.length})` : ''}</button>
+         <button data-toolbar-extra onClick={onDeleteSelected} disabled={selectedStepIds.length === 0} className="flex items-center gap-1.5 rounded-xl bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"><Trash2 size={14}/> Delete selected{selectedStepIds.length > 0 ? ` (${selectedStepIds.length})` : ''}</button>
+         <button data-toolbar-extra onClick={onClearCanvas} disabled={steps.length === 0} className="flex items-center gap-1.5 rounded-xl bg-red-500/10 px-3 py-2 text-xs font-semibold text-red-300 hover:bg-red-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"><Trash2 size={14}/> Clear canvas</button>
+         <button data-toolbar-extra onClick={() => setAllStepsCollapsed(true)} className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors"><Minimize2 size={14}/> Compact all</button>
+         <button data-toolbar-extra onClick={() => setAllStepsCollapsed(false)} className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors"><PanelsTopLeft size={14}/> Expand all</button>
        </div>
 
        <div className="absolute top-4 right-4 z-50 flex flex-col gap-2 bg-slate-950/85 p-2 rounded-2xl backdrop-blur-sm border border-slate-800 shadow-2xl">
@@ -887,16 +1175,29 @@ export const ProcessMap: React.FC<Props> = ({
           onMouseDown={handlePanStart}
           onMouseMove={handlePanMove}
           onMouseUp={handlePanEnd}
-          onMouseLeave={handlePanEnd}
+          onMouseLeave={() => {
+            if (!selectionBoxRef.current) {
+              handlePanEnd();
+            }
+          }}
            onContextMenu={handleContextMenu}
        >
           <div 
+            ref={canvasContentRef}
+            className={isSelectionBoxActive ? 'pointer-events-none' : undefined}
             style={{ 
-                transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
+                transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${scale})`,
                 transformOrigin: '0 0',
+                willChange: isSelectionBoxActive || isPanning ? 'transform' : undefined,
                 width: '100%', height: '100%'
             }}
           >
+              <div
+                ref={selectionRectElementRef}
+                className="pointer-events-none absolute left-0 top-0 z-20 hidden border border-blue-400/80 bg-blue-500/10 shadow-[0_0_0_1px_rgba(59,130,246,0.2)]"
+                style={{ willChange: 'transform, width, height' }}
+              />
+
               <svg className="absolute top-0 left-0 w-[5000px] h-[5000px] pointer-events-none z-0 overflow-visible">
                 <defs>
                    {steps.map(s => (
@@ -1021,18 +1322,6 @@ export const ProcessMap: React.FC<Props> = ({
               })}
 
           </div>
-
-          {viewportSelectionRect && (
-            <div
-              className="pointer-events-none absolute z-20 border border-blue-400/80 bg-blue-500/10 shadow-[0_0_0_1px_rgba(59,130,246,0.2)]"
-              style={{
-                left: viewportSelectionRect.left,
-                top: viewportSelectionRect.top,
-                width: viewportSelectionRect.width,
-                height: viewportSelectionRect.height,
-              }}
-            />
-          )}
        </div>
     </div>
   );

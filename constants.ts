@@ -128,4 +128,5 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   isRunning: false,
   speedMultiplier: 1,
   timeCompression: 1,
+  simulationMode: 'realistic',
 };

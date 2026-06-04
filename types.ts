@@ -5,6 +5,7 @@ export type RandomnessMode = 'fixed' | 'range';
 export type StepSimulationMode = 'resource' | 'delay';
 export type DurationUnit = 'ms' | 's' | 'min' | 'h' | 'day' | 'week' | 'month' | 'year';
 export type ArrivalInputMode = 'rate' | 'interval';
+export type SimulationMode = 'realistic' | 'worst-case';
 
 export interface StepConnection {
   targetId: string;
@@ -88,6 +89,7 @@ export interface SimulationConfig {
   isRunning: boolean;
   speedMultiplier: number;
   timeCompression: number; // simulated ms advanced per real ms
+  simulationMode?: SimulationMode; // realistic (default) or worst-case planning
 }
 
 export interface SimulationStats {

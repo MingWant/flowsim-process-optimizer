@@ -323,6 +323,9 @@ const sanitizeConfig = (rawConfig: unknown, migrateDefaultVariance = false): Sim
     isRunning: false,
     speedMultiplier: Math.max(1, Math.round(toFiniteNumber(rawConfig.speedMultiplier, 1))),
     timeCompression: toPositiveNumber(rawConfig.timeCompression, 1),
+    simulationMode: typeof rawConfig.simulationMode === 'string' && ['realistic', 'worst-case'].includes(rawConfig.simulationMode)
+      ? rawConfig.simulationMode as 'realistic' | 'worst-case'
+      : 'realistic',
   };
 };
 
@@ -443,6 +446,27 @@ const App: React.FC = () => {
 
   const removeSelectedSteps = () => {
     removeSteps(selectedStepIds, 'selected steps');
+  };
+
+  const clearCanvas = () => {
+    if (config.steps.length === 0) {
+      return;
+    }
+
+    if (!window.confirm(`Clear all ${config.steps.length} steps from the canvas?`)) {
+      return;
+    }
+
+    setConfig((previous) => ({
+      ...previous,
+      isRunning: false,
+      steps: [],
+    }));
+    setSelectedStepIds([]);
+    setEditingStep(null);
+    setAiAnalysis(null);
+    resetSimulation();
+    setImportExportNotice('Cleared the canvas.');
   };
 
   const updateStepPosition = (id: string, position: CanvasSpawnPosition) => {
@@ -829,6 +853,14 @@ const App: React.FC = () => {
             <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">FlowSim</h1>
             <p className="text-[11px] text-slate-500 hidden sm:block">Process optimizer workspace</p>
           </div>
+          <button
+            onClick={() => setIsDesktopSidebarCollapsed((value) => !value)}
+            className="hidden items-center gap-2 rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-300 shadow-sm transition hover:border-blue-500/50 hover:bg-slate-800 hover:text-white lg:flex"
+            title={isDesktopSidebarCollapsed ? 'Show sidebar' : 'Hide sidebar for presentation'}
+          >
+            {isDesktopSidebarCollapsed ? <Menu size={14} /> : <X size={14} />}
+            {isDesktopSidebarCollapsed ? 'Show controls' : 'Hide controls'}
+          </button>
         </div>
         
         <div className="flex items-center gap-3">
@@ -974,6 +1006,43 @@ const App: React.FC = () => {
                     <span className="font-mono text-cyan-300">{simulationClockLabel}</span>
                   </div>
                 </div>
+                <div>
+                  <div className="flex justify-between text-sm mb-2">
+                    <span className="text-slate-400">Simulation Mode</span>
+                    <span className={`text-xs font-semibold ${config.simulationMode === 'worst-case' ? 'text-orange-400' : 'text-emerald-400'}`}>
+                      {config.simulationMode === 'worst-case' ? 'Worst-Case' : 'Realistic'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setConfig(p => ({ ...p, simulationMode: 'realistic' }))}
+                      className={`flex flex-col items-center justify-center rounded-lg border px-3 py-2.5 text-xs font-semibold transition-colors ${
+                        (config.simulationMode || 'realistic') === 'realistic'
+                          ? 'border-emerald-500 bg-emerald-500/10 text-emerald-300'
+                          : 'border-slate-800 bg-slate-900 text-slate-400 hover:bg-slate-800'
+                      }`}
+                    >
+                      <PlayCircle size={16} className="mb-1" />
+                      Realistic
+                    </button>
+                    <button
+                      onClick={() => setConfig(p => ({ ...p, simulationMode: 'worst-case' }))}
+                      className={`flex flex-col items-center justify-center rounded-lg border px-3 py-2.5 text-xs font-semibold transition-colors ${
+                        config.simulationMode === 'worst-case'
+                          ? 'border-orange-500 bg-orange-500/10 text-orange-300'
+                          : 'border-slate-800 bg-slate-900 text-slate-400 hover:bg-slate-800'
+                      }`}
+                    >
+                      <AlertTriangle size={16} className="mb-1" />
+                      Worst-Case
+                    </button>
+                  </div>
+                  <p className="mt-2 text-xs leading-relaxed text-slate-500">
+                    {config.simulationMode === 'worst-case'
+                      ? '⚠️ Stress testing mode: batches arrive instantly, cancellations happen faster, variance produces extreme values. Use for capacity planning.'
+                      : '✓ Normal mode: realistic distributions and timing for everyday simulation.'}
+                  </p>
+                </div>
               </div>
             </div>
 
@@ -1053,20 +1122,11 @@ const App: React.FC = () => {
            />
         )}
 
-        <button
-          onClick={() => setIsDesktopSidebarCollapsed((value) => !value)}
-          className="fixed left-4 top-[4.25rem] z-40 hidden items-center gap-2 rounded-full border border-slate-700 bg-slate-950/90 px-3 py-2 text-xs font-semibold text-slate-300 shadow-2xl backdrop-blur transition hover:border-blue-500/50 hover:bg-slate-900 lg:flex"
-          title={isDesktopSidebarCollapsed ? 'Show sidebar' : 'Hide sidebar for presentation'}
-        >
-          {isDesktopSidebarCollapsed ? <Menu size={15} /> : <X size={15} />}
-          {isDesktopSidebarCollapsed ? 'Show controls' : 'Hide controls'}
-        </button>
-
         {/* Main Content */}
         <main className="flex-1 overflow-y-auto h-[calc(100vh-3.5rem)] p-3 lg:p-4 scroll-smooth relative bg-[radial-gradient(circle_at_top_right,rgba(37,99,235,0.10),transparent_35%),radial-gradient(circle_at_bottom_left,rgba(16,185,129,0.08),transparent_30%)]">
           <div className="max-w-none mx-auto space-y-4">
              <section className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3 shadow-2xl shadow-black/20">
-               <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between mb-3 pl-0 lg:pl-24">
+               <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between mb-3">
                  <div>
                    <h2 className="text-lg font-semibold text-slate-100">Process Map</h2>
                    <p className="text-xs text-slate-500">
@@ -1111,7 +1171,7 @@ const App: React.FC = () => {
                       <Trash2 size={16}/> Delete Selected{selectedStepIds.length > 0 ? ` (${selectedStepIds.length})` : ''}
                     </button>
                     <button
-                      onClick={copyFlow}
+                      onClick={() => copyFlow()}
                       className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors"
                       title="Copy the full current flow graph"
                     >
@@ -1188,6 +1248,7 @@ const App: React.FC = () => {
                       onSelectionChange={setSelectedStepIds}
                       onCopySelected={copySelectedFlow}
                     onDeleteSelected={removeSelectedSteps}
+                    onClearCanvas={clearCanvas}
                    />
                    <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500">
                      <span className="rounded-full bg-slate-900 px-3 py-1 border border-slate-800">Ctrl/Cmd + Wheel = Zoom</span>

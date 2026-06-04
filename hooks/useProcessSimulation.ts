@@ -18,8 +18,18 @@ const MIN_ARRIVAL_RATE = 0.000000001;
 const MIN_PROCESSING_DURATION_MS = 1;
 const MAX_SPAWNS_PER_START_PER_TICK = 1000;
 const MAX_BUSINESS_EVENTS_PER_TICK = 5000;
+const MAX_SAFE_DURATION_MS = Number.MAX_SAFE_INTEGER / 2; // Safety margin for calculations
 
 const BUSINESS_TRANSMISSION_SIM_MS = 0;
+
+// Generate a normally distributed random number using Box-Muller transform
+// Returns a value with mean=0 and standard deviation=1
+const generateNormalRandom = (): number => {
+  const u1 = Math.max(Number.EPSILON, Math.random());
+  const u2 = Math.random();
+  // Box-Muller transform
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+};
 
 const getSimulationSignature = (steps: ProcessStep[]) => JSON.stringify(steps.map((step) => ({
   id: step.id,
@@ -187,30 +197,76 @@ export const useProcessSimulation = (config: SimulationConfig) => {
       const fixedUnitMultiplier = TIME_UNIT_TO_MS[step.processingTimeUnit || 'ms'];
       const rangeUnitMultiplier = TIME_UNIT_TO_MS[step.rangeTimeUnit || step.processingTimeUnit || 'ms'];
       const isDelayMode = step.simulationMode === 'delay';
+      const simulationMode = config.simulationMode || 'realistic';
 
     // 1. Check Source Rule Override (Fixed Mode only usually, but applies generally)
     if (!isDelayMode && step.randomnessMode === 'fixed' && item.previousStepId && step.sourceProcessingTimes && step.sourceProcessingTimes[item.previousStepId]) {
-        const base = safeNumber(step.sourceProcessingTimes[item.previousStepId], 1000) * fixedUnitMultiplier;
-         const speedNoise = 1 + (Math.random() * 2 - 1) * safeNumber(step.variance, 0);
-         return Math.max(MIN_PROCESSING_DURATION_MS, base * speedNoise);
+        const baseValue = safeNumber(step.sourceProcessingTimes[item.previousStepId], 1000);
+        const baseMs = baseValue * fixedUnitMultiplier;
+        // Boundary check: prevent overflow
+        if (baseMs > MAX_SAFE_DURATION_MS) {
+          console.warn(`Processing time exceeds safe limit: ${baseValue} ${step.processingTimeUnit}`);
+          return MAX_SAFE_DURATION_MS;
+        }
+        const variance = safeNumber(step.variance, 0);
+        if (variance > 0) {
+          if (simulationMode === 'worst-case') {
+            // Worst-case: uniform distribution, can produce extreme values
+            const speedNoise = 1 + (Math.random() * 2 - 1) * variance;
+            return Math.max(MIN_PROCESSING_DURATION_MS, baseMs * speedNoise);
+          } else {
+            // Realistic: normal distribution with bounds
+            const normalRandom = generateNormalRandom();
+            const duration = baseMs + baseMs * variance * normalRandom;
+            // Clamp to reasonable bounds: not less than 20% of base, not more than 3x base
+            return Math.max(baseMs * 0.2, Math.min(baseMs * 3, duration));
+          }
+        }
+        return Math.max(MIN_PROCESSING_DURATION_MS, baseMs);
     }
 
     // 2. Range Mode
     if (step.randomnessMode === 'range') {
-      const min = safeNumber(step.minProcessingTime, 500) * rangeUnitMultiplier;
-      const max = safeNumber(step.maxProcessingTime, 2000) * rangeUnitMultiplier;
-        // Independent random number for this call
-        return min + Math.random() * (max - min);
+      const minValue = safeNumber(step.minProcessingTime, 500);
+      const maxValue = safeNumber(step.maxProcessingTime, 2000);
+      const min = minValue * rangeUnitMultiplier;
+      const max = maxValue * rangeUnitMultiplier;
+      // Boundary check
+      if (max > MAX_SAFE_DURATION_MS) {
+        console.warn(`Processing time range exceeds safe limit: ${minValue}-${maxValue} ${step.rangeTimeUnit || step.processingTimeUnit}`);
+        return Math.min(min, MAX_SAFE_DURATION_MS);
+      }
+      // Independent random number for this call
+      return min + Math.random() * (max - min);
     }
 
     // 3. Default Fixed Mode
-    const base = safeNumber(step.processingTime, 1000) * fixedUnitMultiplier;
+    const baseValue = safeNumber(step.processingTime, 1000);
+    const baseMs = baseValue * fixedUnitMultiplier;
+    // Boundary check
+    if (baseMs > MAX_SAFE_DURATION_MS) {
+      console.warn(`Processing time exceeds safe limit: ${baseValue} ${step.processingTimeUnit}`);
+      return MAX_SAFE_DURATION_MS;
+    }
     if (isDelayMode) {
-      return Math.max(MIN_PROCESSING_DURATION_MS, base);
+      return Math.max(MIN_PROCESSING_DURATION_MS, baseMs);
     }
 
-    const speedNoise = 1 + (Math.random() * 2 - 1) * safeNumber(step.variance, 0);
-    return Math.max(MIN_PROCESSING_DURATION_MS, base * speedNoise);
+    const variance = safeNumber(step.variance, 0);
+    if (variance > 0) {
+      if (simulationMode === 'worst-case') {
+        // Worst-case: uniform distribution, can produce extreme values
+        const speedNoise = 1 + (Math.random() * 2 - 1) * variance;
+        return Math.max(MIN_PROCESSING_DURATION_MS, baseMs * speedNoise);
+      } else {
+        // Realistic: normal distribution with bounds
+        const normalRandom = generateNormalRandom();
+        const duration = baseMs + baseMs * variance * normalRandom;
+        // Clamp to reasonable bounds: not less than 20% of base, not more than 3x base
+        return Math.max(baseMs * 0.2, Math.min(baseMs * 3, duration));
+      }
+    }
+    return Math.max(MIN_PROCESSING_DURATION_MS, baseMs);
   };
 
   const beginTransmission = (
@@ -330,6 +386,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           
             while (nextSpawnAt <= simulationTimeRef.current && spawnedThisTick < MAX_SPAWNS_PER_START_PER_TICK) {
               const batchSize = getArrivalBatchSize(startNode);
+              const simulationMode = config.simulationMode || 'realistic';
 
               for (let batchIndex = 0; batchIndex < batchSize; batchIndex++) {
                 // SPAWN
@@ -340,6 +397,17 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                 }
 
                 if (firstTargetId !== 'finished') {
+                  // Calculate spawn time based on simulation mode
+                  let itemSpawnTime: number;
+                  if (simulationMode === 'worst-case') {
+                    // Worst-case: all items arrive at exactly the same time (instant surge)
+                    itemSpawnTime = nextSpawnAt;
+                  } else {
+                    // Realistic: small time offset to simulate physical arrival sequence
+                    // Each item arrives 0.1ms after the previous one in the batch
+                    itemSpawnTime = nextSpawnAt + (batchIndex * 0.1);
+                  }
+
                   const newItem: WorkItem = {
                     id: `item-${statsRef.current.totalItemsCreated + 1}`,
                   currentStepId: startNode.id,
@@ -349,12 +417,12 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                     progress: 0,
                     transmissionProgress: 0,
                     createdAt: now, // Wall clock for UI creation
-                    createdAtSimulationMs: nextSpawnAt,
+                    createdAtSimulationMs: itemSpawnTime,
                     completedAtSimulationMs: undefined,
                     totalTransmissionTime: 0,
                     totalWaitTime: 0,
                     totalProcessingTime: 0,
-                      stepEntryTime: nextSpawnAt,
+                      stepEntryTime: itemSpawnTime,
                       queuedAtSimulationMs: undefined,
                       queueCancellationCheckedAtSimulationMs: undefined,
                     visualPreviousStepId: undefined,
@@ -364,7 +432,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
                     visualTransmissionProgress: undefined,
                   };
 
-                    beginTransmission(newItem, startNode.id, firstTargetId, nextSpawnAt, now);
+                    beginTransmission(newItem, startNode.id, firstTargetId, itemSpawnTime, now);
 
                   itemsRef.current.push(newItem);
                   statsRef.current.totalItemsCreated++;
@@ -416,7 +484,17 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           return false;
         }
 
-        const cancelChance = Math.min(1, step.cancellationProbability * (exposureMs / 1000));
+        const simulationMode = config.simulationMode || 'realistic';
+        let cancelChance: number;
+
+        if (simulationMode === 'worst-case') {
+          // Worst-case: linear model, reaches 100% quickly for stress testing
+          cancelChance = Math.min(1, step.cancellationProbability * (exposureMs / 1000));
+        } else {
+          // Realistic: exponential distribution (Poisson process)
+          cancelChance = 1 - Math.exp(-step.cancellationProbability * (exposureMs / 1000));
+        }
+
         item.queueCancellationCheckedAtSimulationMs = throughSimulationMs;
         if (Math.random() < cancelChance) {
           cancelQueuedItem(item, step);
@@ -504,7 +582,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
           const completedAtSimulationMs = item.completedAtSimulationMs ?? simulationTimeRef.current;
           const cycleTime = Math.max(
             0,
-            completedAtSimulationMs - item.createdAtSimulationMs - item.totalTransmissionTime
+            completedAtSimulationMs - item.createdAtSimulationMs
           );
           statsRef.current.avgCycleTime =
             ((statsRef.current.avgCycleTime * (statsRef.current.totalItemsFinished - 1)) + cycleTime) / statsRef.current.totalItemsFinished;
@@ -780,7 +858,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     animationFrameId = requestAnimationFrame(tick);
 
     return () => cancelAnimationFrame(animationFrameId);
-  }, [config.isRunning, config.speedMultiplier, config.timeCompression, config.steps]);
+  }, [config.isRunning, config.speedMultiplier, config.timeCompression, config.simulationMode, config.steps]);
 
   return {
     items,

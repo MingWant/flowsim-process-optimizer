@@ -44,8 +44,31 @@ const UNIT_LABELS: Record<DurationUnit, string> = {
 };
 
 const getPreferredThroughputUnit = (steps: ProcessStep[]): DurationUnit => {
-  const startUnits = steps.filter(step => step.type === 'start').map(step => step.arrivalUnit || 's');
-  return startUnits[0] || 'min';
+  const startSteps = steps.filter(step => step.type === 'start');
+
+  if (startSteps.length === 0) {
+    return 'min';
+  }
+
+  // Find the most common unit among start nodes
+  const unitCounts = new Map<DurationUnit, number>();
+  startSteps.forEach(step => {
+    const unit = step.arrivalUnit || 's';
+    unitCounts.set(unit, (unitCounts.get(unit) || 0) + 1);
+  });
+
+  // Return the most frequently used unit
+  let maxCount = 0;
+  let preferredUnit: DurationUnit = 'min';
+
+  unitCounts.forEach((count, unit) => {
+    if (count > maxCount) {
+      maxCount = count;
+      preferredUnit = unit;
+    }
+  });
+
+  return preferredUnit;
 };
 
 const getFlowGroups = (steps: ProcessStep[]): FlowGroup[] => {
