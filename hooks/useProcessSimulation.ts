@@ -19,8 +19,48 @@ const MIN_PROCESSING_DURATION_MS = 1;
 const MAX_SPAWNS_PER_START_PER_TICK = 1000;
 const MAX_BUSINESS_EVENTS_PER_TICK = 5000;
 const MAX_SAFE_DURATION_MS = Number.MAX_SAFE_INTEGER / 2; // Safety margin for calculations
+const UI_FRAME_INTERVAL_MS = 33; // Keep simulation logic smooth while avoiding 60 React tree renders/sec
+const MAX_RENDER_ITEMS_FOR_UI = 900;
+const MAX_TRANSMITTING_ITEMS_FOR_UI = 420;
+const MAX_PROCESSING_ITEMS_FOR_UI = 320;
+const MAX_QUEUED_ITEMS_FOR_UI = 120;
+const MAX_TERMINAL_ITEMS_FOR_UI = 60;
 
 const BUSINESS_TRANSMISSION_SIM_MS = 0;
+
+const buildVisibleItemsForUi = (allItems: WorkItem[]): WorkItem[] => {
+  if (allItems.length <= MAX_RENDER_ITEMS_FOR_UI) {
+    return [...allItems];
+  }
+
+  const transmitting: WorkItem[] = [];
+  const processing: WorkItem[] = [];
+  const queued: WorkItem[] = [];
+  const terminal: WorkItem[] = [];
+
+  for (const item of allItems) {
+    if (transmitting.length < MAX_TRANSMITTING_ITEMS_FOR_UI && (item.status === 'transmitting' || typeof item.visualTransmissionProgress === 'number')) {
+      transmitting.push(item);
+      continue;
+    }
+
+    if (processing.length < MAX_PROCESSING_ITEMS_FOR_UI && item.status === 'processing') {
+      processing.push(item);
+      continue;
+    }
+
+    if (queued.length < MAX_QUEUED_ITEMS_FOR_UI && item.status === 'queued') {
+      queued.push(item);
+      continue;
+    }
+
+    if (terminal.length < MAX_TERMINAL_ITEMS_FOR_UI && (item.status === 'finished' || item.status === 'cancelled' || item.status === 'error')) {
+      terminal.push(item);
+    }
+  }
+
+  return [...transmitting, ...processing, ...queued, ...terminal].slice(0, MAX_RENDER_ITEMS_FOR_UI);
+};
 
 // Generate a normally distributed random number using Box-Muller transform
 // Returns a value with mean=0 and standard deviation=1
@@ -75,6 +115,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
   const statsRef = useRef<SimulationStats>({ ...globalStats });
   const stepsRef = useRef<ProcessStep[]>(config.steps);
   const simulationSignatureRef = useRef(getSimulationSignature(config.steps));
+  const lastUiUpdateRef = useRef(0);
   
   // Track the absolute simulated timestamp when the next item should spawn for each start node
   const nextSpawnTimeRef = useRef<Record<string, number>>({});
@@ -101,6 +142,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
     statsRef.current = initialStats;
     setGlobalStats(initialStats);
     setStepStats([]);
+    lastUiUpdateRef.current = 0;
     nextSpawnTimeRef.current = {};
     stepCountersRef.current = {}; 
     config.steps.forEach(s => {
@@ -658,22 +700,7 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         }
       }
 
-      const itemsInEventOrder = [...currentItems].sort((a: WorkItem, b: WorkItem) => {
-        const getEventTime = (item: WorkItem) => {
-          if (item.status === 'processing') {
-            return item.processingEndsAtSimulationMs ?? Number.POSITIVE_INFINITY;
-          }
-          if (item.status === 'transmitting') {
-            return item.transmissionEndsAtSimulationMs ?? Number.POSITIVE_INFINITY;
-          }
-          if (item.status === 'queued') {
-            return item.queuedAtSimulationMs ?? item.stepEntryTime ?? Number.POSITIVE_INFINITY;
-          }
-          return Number.POSITIVE_INFINITY;
-        };
-
-        return getEventTime(a) - getEventTime(b);
-      });
+      const itemsInEventOrder = currentItems;
 
       // Pass 2: Process Items in simulated event order
       for (let i = 0; i < itemsInEventOrder.length; i++) {
@@ -808,49 +835,73 @@ export const useProcessSimulation = (config: SimulationConfig) => {
         return true;
       });
 
-      // Construct Step Stats for UI
+      if (now - lastUiUpdateRef.current >= UI_FRAME_INTERVAL_MS) {
+        const stepRuntimeById = new Map<string, { queueLength: number; activeProcessing: number }>();
+        steps.forEach((s: ProcessStep) => stepRuntimeById.set(s.id, { queueLength: 0, activeProcessing: 0 }));
+
+        let activeItems = 0;
+        for (const item of itemsRef.current) {
+          if (!['finished', 'error', 'cancelled'].includes(item.status)) {
+            activeItems++;
+          }
+
+          const runtime = stepRuntimeById.get(item.currentStepId);
+          if (!runtime) {
+            continue;
+          }
+
+          if (item.status === 'queued') {
+            runtime.queueLength++;
+          } else if (item.status === 'processing') {
+            runtime.activeProcessing++;
+          }
+        }
+
+        // Construct Step Stats for UI only when React is about to render.
         const newStepStats: StepStats[] = steps.map((s: ProcessStep) => {
           const counters = stepCountersRef.current[s.id] || { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
-          const stepActiveItems = itemsRef.current.filter((i: WorkItem) => i.currentStepId === s.id);
-          const queueLength = stepActiveItems.filter((i: WorkItem) => i.status === 'queued').length;
-          const activeProcessing = stepActiveItems.filter((i: WorkItem) => i.status === 'processing').length;
-          
+          const runtime = stepRuntimeById.get(s.id) || { queueLength: 0, activeProcessing: 0 };
+          const queueLength = runtime.queueLength;
+          const activeProcessing = runtime.activeProcessing;
+
           let utilization = 0;
-            if (s.type === 'process' && s.simulationMode !== 'delay') {
-              const cap = Math.max(1, s.capacity || 1);
-              const used = stepUsage.get(s.id) || 0;
-              utilization = used / cap;
+          if (s.type === 'process' && s.simulationMode !== 'delay') {
+            const cap = Math.max(1, s.capacity || 1);
+            const used = stepUsage.get(s.id) || 0;
+            utilization = used / cap;
           }
 
           return {
-              stepId: s.id,
-              queueLength,
-              activeProcessing,
-              utilization,
-              avgWaitTime: counters.totalStarted > 0 ? counters.totalWaitTime / counters.totalStarted : 0,
-              avgCompletionTime: counters.processed > 0
-                ? s.type === 'end'
-                  ? counters.totalCompletionTime / counters.processed
-                  : counters.totalProcessingTime / counters.processed
-                : 0,
-              totalProcessed: counters.processed,
-              totalFailed: counters.failed,
-              totalCancelled: counters.cancelled
+            stepId: s.id,
+            queueLength,
+            activeProcessing,
+            utilization,
+            avgWaitTime: counters.totalStarted > 0 ? counters.totalWaitTime / counters.totalStarted : 0,
+            avgCompletionTime: counters.processed > 0
+              ? s.type === 'end'
+                ? counters.totalCompletionTime / counters.processed
+                : counters.totalProcessingTime / counters.processed
+              : 0,
+            totalProcessed: counters.processed,
+            totalFailed: counters.failed,
+            totalCancelled: counters.cancelled
           };
-      });
+        });
 
-      setItems([...itemsRef.current]);
-      setStepStats(newStepStats);
-      setSimulationTimeMs(simulationTimeRef.current);
-      const simulatedMinutesElapsed = simulationTimeRef.current / (60 * 1000);
-      const avgThroughput = simulatedMinutesElapsed > 0
-        ? statsRef.current.totalItemsFinished / simulatedMinutesElapsed
-        : 0;
-      setGlobalStats({
-        ...statsRef.current,
-        avgThroughput,
-        activeItems: itemsRef.current.filter((i: WorkItem) => !['finished', 'error', 'cancelled'].includes(i.status)).length,
-      });
+        lastUiUpdateRef.current = now;
+        setItems(buildVisibleItemsForUi(itemsRef.current));
+        setStepStats(newStepStats);
+        setSimulationTimeMs(simulationTimeRef.current);
+        const simulatedMinutesElapsed = simulationTimeRef.current / (60 * 1000);
+        const avgThroughput = simulatedMinutesElapsed > 0
+          ? statsRef.current.totalItemsFinished / simulatedMinutesElapsed
+          : 0;
+        setGlobalStats({
+          ...statsRef.current,
+          avgThroughput,
+          activeItems,
+        });
+      }
 
       animationFrameId = requestAnimationFrame(tick);
     };

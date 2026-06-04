@@ -54,6 +54,7 @@ const NODE_SPAWN_OFFSETS: Position[] = [
   { x: -72, y: -28 },
   { x: 0, y: 72 },
 ];
+const MAX_VISIBLE_TRANSMISSION_DOTS = 360;
 
 // Helper to calculate point on Cubic Bezier Curve
 const getPointOnBezier = (t: number, p0: Position, p1: Position, p2: Position, p3: Position): Position => {
@@ -964,7 +965,20 @@ export const ProcessMap: React.FC<Props> = ({
   }, [items]);
 
   const transmittingItems = useMemo(
-    () => items.filter((item) => item.status === 'transmitting' || typeof item.visualTransmissionProgress === 'number'),
+    () => {
+      const visible: WorkItem[] = [];
+
+      for (const item of items) {
+        if (item.status === 'transmitting' || typeof item.visualTransmissionProgress === 'number') {
+          visible.push(item);
+          if (visible.length >= MAX_VISIBLE_TRANSMISSION_DOTS) {
+            break;
+          }
+        }
+      }
+
+      return visible;
+    },
     [items]
   );
 

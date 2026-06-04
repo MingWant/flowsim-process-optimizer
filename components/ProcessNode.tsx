@@ -41,6 +41,9 @@ const ARRIVAL_UNIT_TO_MS: Record<string, number> = {
   year: 365 * 24 * 60 * 60 * 1000,
 };
 
+const MAX_VISIBLE_PROCESSING_BARS = 16;
+const MAX_VISIBLE_QUEUE_ROWS = 18;
+
 const DURATION_UNIT_LABELS: Record<string, string> = {
   ms: 'ms',
   s: 's',
@@ -115,6 +118,10 @@ const CompactStatChip: React.FC<{ label: string; value: string | number; tone?: 
 const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, items, simulationTimeMs, onEdit, onRemove, onToggleCollapse, style, onMouseDown, isDragging = false, isCollapsed = false, isSelected = false, dragHandleCursor = 'grab' }, ref) => {
   const queuedItems = items.filter(i => i.status === 'queued');
   const processingItems = items.filter(i => i.status === 'processing');
+  const visibleQueuedItems = queuedItems.slice(0, MAX_VISIBLE_QUEUE_ROWS);
+  const visibleProcessingItems = processingItems.slice(0, MAX_VISIBLE_PROCESSING_BARS);
+  const queueCount = stats?.queueLength ?? queuedItems.length;
+  const processingCount = stats?.activeProcessing ?? processingItems.length;
   const totalCompleted = stats?.totalProcessed || 0;
   const avgCompletedTime = stats?.avgCompletionTime || 0;
   const endTimeUnit = step.endTimeUnit || 'min';
@@ -180,8 +187,8 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
           )}
           {step.type === 'process' && (
             <>
-              <CompactStatChip label="Q" value={queuedItems.length} tone={queuedItems.length > 0 ? 'text-amber-300' : 'text-slate-300'} />
-              <CompactStatChip label={isDelayMode ? 'A' : 'P'} value={processingItems.length} tone={isDelayMode ? 'text-cyan-300' : 'text-blue-300'} />
+              <CompactStatChip label="Q" value={queueCount} tone={queueCount > 0 ? 'text-amber-300' : 'text-slate-300'} />
+              <CompactStatChip label={isDelayMode ? 'A' : 'P'} value={processingCount} tone={isDelayMode ? 'text-cyan-300' : 'text-blue-300'} />
               <CompactStatChip label="U" value={isDelayMode ? 'Delay' : `${((stats?.utilization || 0) * 100).toFixed(0)}%`} tone={isDelayMode ? 'text-cyan-300' : isBottleneck ? 'text-red-300' : 'text-emerald-300'} />
               <CompactStatChip label="Out" value={totalCompleted} tone="text-emerald-300" />
             </>
@@ -379,10 +386,10 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
         >
           <div className="text-xs mb-1 flex justify-between font-medium" style={{ color: baseColor }}>
             <span>{isDelayMode ? 'Timed Delay' : 'Processing'}</span>
-            <span>{processingItems.length}{isDelayMode ? ' active' : ` / ${step.capacity}`}</span>
+            <span>{processingCount}{isDelayMode ? ' active' : ` / ${step.capacity}`}</span>
           </div>
           <div className="flex flex-col gap-1 min-h-[2.5rem]">
-            {processingItems.length > 0 ? processingItems.map(item => (
+            {visibleProcessingItems.length > 0 ? visibleProcessingItems.map(item => (
                <div key={item.id} className="w-full relative h-3 bg-slate-900 rounded-full overflow-hidden">
                   <div 
                     className="h-full transition-all duration-75 ease-linear"
@@ -395,6 +402,9 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
             )) : (
               <span className="text-xs text-slate-500 opacity-60 text-center py-2">{isDelayMode ? 'No active timers' : 'Resources Idle'}</span>
             )}
+            {processingCount > visibleProcessingItems.length && (
+              <div className="text-center text-[10px] font-mono text-slate-500">+{processingCount - visibleProcessingItems.length} more active</div>
+            )}
           </div>
         </div>
 
@@ -402,20 +412,25 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
         {!isDelayMode && <div className="bg-slate-950/70 rounded-xl border border-slate-800 flex flex-col flex-grow overflow-hidden">
           <div className="text-xs text-slate-400 p-2 flex justify-between border-b border-slate-800">
             <span className="flex items-center gap-1"><ListFilter size={10}/> Queue</span>
-            <span className="font-mono">{queuedItems.length}</span>
+            <span className="font-mono">{queueCount}</span>
           </div>
           
           <div className="overflow-y-auto custom-scrollbar p-1 max-h-[100px] space-y-1">
-             {queuedItems.length === 0 && (
+             {queueCount === 0 && (
                 <div className="text-center py-4 text-xs text-slate-600 italic">Queue Empty</div>
              )}
-             {queuedItems.map((item, idx) => (
+             {visibleQueuedItems.map((item) => (
                 <div key={item.id} className="flex items-center justify-between text-[10px] bg-slate-900 px-2 py-1 rounded-lg text-slate-300 border border-slate-800">
                     <span className="font-mono text-slate-500">#{item.id.split('-')[1]}</span>
                 <span className="text-slate-400">Wait: {((item.totalWaitTime + Math.max(0, simulationTimeMs - (item.queuedAtSimulationMs ?? simulationTimeMs))) / 1000).toFixed(1)}s</span>
                     <div className={`w-2 h-2 rounded-full ${item.status === 'queued' ? 'bg-amber-500' : 'bg-slate-500'}`}></div>
                 </div>
              ))}
+             {queueCount > visibleQueuedItems.length && (
+               <div className="rounded-lg border border-slate-800 bg-slate-900/70 px-2 py-1 text-center text-[10px] font-mono text-slate-500">
+                +{queueCount - visibleQueuedItems.length} more queued
+               </div>
+             )}
           </div>
         </div>}
 
