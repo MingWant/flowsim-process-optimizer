@@ -463,7 +463,9 @@ export const MetroDemoBoard: React.FC<Props> = ({ steps, stepStats, items, simul
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-          <span className="rounded-full border border-slate-800 bg-slate-900 px-3 py-1">Sim {formatMetricTimeInUnit(simulationTimeMs, 's')}</span>
+          <span className="inline-flex min-w-[5.75rem] items-center justify-center rounded-full border border-slate-800 bg-slate-900 px-3 py-1">
+            Sim <span className="ml-1 min-w-[4ch] text-right font-mono tabular-nums">{formatMetricTimeInUnit(simulationTimeMs, 's')}</span>
+          </span>
           <span className="rounded-full border border-slate-800 bg-slate-900 px-3 py-1">{visibleFlows.length} visible flow{visibleFlows.length === 1 ? '' : 's'}</span>
           {autoTourEnabled && <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-emerald-200">Auto tour cycles every 6.5s</span>}
           <span className="rounded-full border border-slate-800 bg-slate-900 px-3 py-1">Animated transfer dots</span>

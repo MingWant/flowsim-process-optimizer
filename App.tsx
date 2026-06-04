@@ -882,9 +882,9 @@ const App: React.FC = () => {
              <span className={`h-2 w-2 rounded-full ${config.isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
              {runningLabel}
            </div>
-           <div className="hidden xl:flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-200">
+           <div className="hidden xl:flex min-w-[8.5rem] items-center justify-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-200">
              <Clock size={14} />
-             {simulationClockLabel}
+             <span className="min-w-[8ch] text-right font-mono tabular-nums">{simulationClockLabel}</span>
            </div>
            {!hasApiKey && (
              <button onClick={selectApiKey} className="text-xs bg-indigo-600 hover:bg-indigo-500 px-3 py-1.5 rounded-full transition-colors font-medium">
@@ -1126,19 +1126,29 @@ const App: React.FC = () => {
         <main className="flex-1 overflow-y-auto h-[calc(100vh-3.5rem)] p-3 lg:p-4 scroll-smooth relative bg-[radial-gradient(circle_at_top_right,rgba(37,99,235,0.10),transparent_35%),radial-gradient(circle_at_bottom_left,rgba(16,185,129,0.08),transparent_30%)]">
           <div className="max-w-none mx-auto space-y-4">
              <section className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3 shadow-2xl shadow-black/20">
-               <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between mb-3">
-                 <div>
-                   <h2 className="text-lg font-semibold text-slate-100">Process Map</h2>
+               <div className="mb-3 flex flex-col gap-3">
+                 <div className="w-full min-w-0">
+                   <h2 className="whitespace-nowrap text-lg font-semibold text-slate-100">Process Map</h2>
                    <p className="text-xs text-slate-500">
-                     {canvasViewMode === 'map'
-                       ? `Presentation canvas · Sim time: ${simulationClockLabel} · Ctrl/Cmd + wheel to zoom, drag to pan.`
-                       : `Metro demo mode · Sim time: ${simulationClockLabel} · Compact horizontal presentation lane with focus, zoom, and bottleneck highlights.`}
+                     {canvasViewMode === 'map' ? (
+                       <>
+                         Presentation canvas · Sim time:{' '}
+                         <span className="inline-block min-w-[8ch] text-right font-mono tabular-nums text-cyan-300">{simulationClockLabel}</span>
+                         {' '}· Ctrl/Cmd + wheel to zoom, drag to pan.
+                       </>
+                     ) : (
+                       <>
+                         Metro demo mode · Sim time:{' '}
+                         <span className="inline-block min-w-[8ch] text-right font-mono tabular-nums text-cyan-300">{simulationClockLabel}</span>
+                         {' '}· Compact horizontal presentation lane with focus, zoom, and bottleneck highlights.
+                       </>
+                     )}
                    </p>
                    {importExportNotice && <p className="mt-1 text-xs text-cyan-300">{importExportNotice}</p>}
                    {draftStatusMessage && <p className={`mt-1 text-xs ${draftStatus === 'save-failed' ? 'text-rose-300' : 'text-emerald-300'}`}>{draftStatusMessage}</p>}
                  </div>
-                 <div className="flex flex-wrap items-center gap-2">
-                    <div className="flex items-center gap-1 rounded-xl border border-slate-800 bg-slate-900 p-1">
+                 <div className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-1 custom-scrollbar">
+                    <div className="flex shrink-0 items-center gap-1 rounded-xl border border-slate-800 bg-slate-900 p-1">
                       <button
                         onClick={() => setCanvasViewMode('map')}
                         className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${canvasViewMode === 'map' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'}`}
@@ -1157,7 +1167,7 @@ const App: React.FC = () => {
                     <button
                       onClick={copySelectedFlow}
                       disabled={selectedStepIds.length === 0}
-                      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="flex shrink-0 items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                       title="Copy only the selected nodes"
                     >
                       <Copy size={16}/> Copy Selected{selectedStepIds.length > 0 ? ` (${selectedStepIds.length})` : ''}
@@ -1165,14 +1175,14 @@ const App: React.FC = () => {
                     <button
                       onClick={removeSelectedSteps}
                       disabled={selectedStepIds.length === 0}
-                      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 text-sm text-rose-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="flex shrink-0 items-center gap-2 px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 text-sm text-rose-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                       title="Delete only the selected nodes"
                     >
                       <Trash2 size={16}/> Delete Selected{selectedStepIds.length > 0 ? ` (${selectedStepIds.length})` : ''}
                     </button>
                     <button
                       onClick={() => copyFlow()}
-                      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors"
+                      className="flex shrink-0 items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors"
                       title="Copy the full current flow graph"
                     >
                       <Copy size={16}/> Copy Flow
@@ -1180,33 +1190,33 @@ const App: React.FC = () => {
                     <button
                       onClick={pasteFlow}
                       disabled={!flowClipboard || flowClipboard.length === 0}
-                      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="flex shrink-0 items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                       title="Paste the copied flow to the right"
                     >
                       <ClipboardPaste size={16}/> Paste Flow
                     </button>
                     <button
                       onClick={triggerImport}
-                      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors"
+                      className="flex shrink-0 items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors"
                     >
                       <Upload size={16}/> Import
                     </button>
                     <button
                       onClick={exportConfig}
-                      className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors"
+                      className="flex shrink-0 items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors"
                     >
                       <Download size={16}/> Export
                     </button>
                     <button 
                       onClick={togglePlay}
-                      className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${config.isRunning ? 'bg-amber-500/10 text-amber-300 border border-amber-500/40' : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400'}`}
+                      className={`flex shrink-0 items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${config.isRunning ? 'bg-amber-500/10 text-amber-300 border border-amber-500/40' : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400'}`}
                     >
                       {config.isRunning ? <><Pause size={16}/> Pause</> : <><Play size={16}/> Start</>}
                     </button>
-                    <button onClick={resetSimulation} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors">
+                    <button onClick={resetSimulation} className="flex shrink-0 items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors">
                       <RotateCcw size={16}/> Reset
                     </button>
-                    <div className="hidden md:flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2">
+                    <div className="hidden shrink-0 md:flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2">
                       <span className="text-xs text-slate-500">Speed</span>
                       <input 
                         type="range" min="1" max="10" step="1"
@@ -1216,7 +1226,7 @@ const App: React.FC = () => {
                       />
                       <span className="w-8 text-right font-mono text-xs text-purple-300">{config.speedMultiplier}x</span>
                     </div>
-                    <div className="hidden md:flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2">
+                    <div className="hidden shrink-0 md:flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2">
                       <span className="text-xs text-slate-500">Clock</span>
                       <select
                         value={compressionSelectValue}
