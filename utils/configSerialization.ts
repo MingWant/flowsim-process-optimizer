@@ -18,6 +18,7 @@ import type {
   ProcessStep,
   RandomnessMode,
   ResourceExecutionMode,
+  ScheduledArrivalDispatchMode,
   ScheduledArrivalEvent,
   ScheduledArrivalRepeat,
   ScheduledArrivalSpreadMode,
@@ -36,9 +37,11 @@ const VALID_RESOURCE_EXECUTION_MODES: ResourceExecutionMode[] = ['single', 'coll
 const VALID_TEAM_ALLOCATION_MODES: TeamAllocationMode[] = ['auto', 'explicit'];
 export const VALID_NON_WORKING_POLICIES: NonWorkingArrivalPolicy[] = ['queue', 'delay', 'reject'];
 const VALID_SCHEDULED_SPREAD_MODES: ScheduledArrivalSpreadMode[] = ['spread', 'burst'];
-const VALID_SCHEDULED_REPEATS: ScheduledArrivalRepeat[] = ['none', 'daily', 'weekly', 'monthly', 'yearly'];
+const VALID_SCHEDULED_REPEATS: ScheduledArrivalRepeat[] = ['none', 'daily', 'workingDay', 'weekly', 'monthly', 'yearly'];
+const VALID_SCHEDULED_DISPATCH_MODES: ScheduledArrivalDispatchMode[] = ['burst', 'sequence'];
 export const MAX_SCHEDULED_ARRIVAL_QUANTITY = 50000;
 const DEFAULT_ZERO_VARIANCE_STEP_IDS = new Set(['step-1', 'step-2', 'step-3', 'step-4']);
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> => (
   typeof value === 'object' && value !== null
@@ -76,10 +79,32 @@ const sanitizeWorkingHours = (value: unknown) => {
     }));
 };
 
+const sanitizeDateOnly = (value: unknown) => (
+  typeof value === 'string' && DATE_ONLY_PATTERN.test(value) ? value : undefined
+);
+
+const sanitizeNumberSet = (value: unknown, min: number, max: number) => {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const values = Array.from(new Set(
+    value.map((entry) => Math.round(Number(entry))).filter((entry) => entry >= min && entry <= max)
+  )).sort((a, b) => a - b);
+  return values.length > 0 ? values : undefined;
+};
+
 const sanitizeAutoPause = (value: unknown): AutoPauseConfig => {
   if (!isObjectRecord(value)) {
     return { enabled: false };
   }
+
+  const simulationTimeUnit = typeof value.simulationTimeUnit === 'string' && DURATION_UNITS.some((unit) => unit.value === value.simulationTimeUnit)
+    ? value.simulationTimeUnit as DurationUnit
+    : undefined;
+  const stopDateIso = typeof value.stopDateIso === 'string' && Number.isFinite(Date.parse(value.stopDateIso))
+    ? value.stopDateIso
+    : undefined;
 
   const getOptionalTarget = (target: unknown) => {
     const parsed = Number(target);
@@ -89,6 +114,8 @@ const sanitizeAutoPause = (value: unknown): AutoPauseConfig => {
   return {
     enabled: Boolean(value.enabled),
     simulationTimeMs: getOptionalTarget(value.simulationTimeMs),
+    simulationTimeUnit,
+    stopDateIso,
     totalItemsCreated: getOptionalTarget(value.totalItemsCreated),
     totalItemsFinished: getOptionalTarget(value.totalItemsFinished),
     totalItemsFailed: getOptionalTarget(value.totalItemsFailed),
@@ -207,8 +234,8 @@ export const sanitizeScheduledArrivalWindows = (value: unknown): ScheduledArriva
         months: Array.isArray(window.months)
           ? Array.from(new Set(window.months.map(month => Math.round(Number(month))).filter(month => month >= 1 && month <= 12)))
           : undefined,
-        startDate: typeof window.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(window.startDate) ? window.startDate : undefined,
-        endDate: typeof window.endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(window.endDate) ? window.endDate : undefined,
+        startDate: sanitizeDateOnly(window.startDate),
+        endDate: sanitizeDateOnly(window.endDate),
       };
     })
     .filter((window) => window.quantity > 0);
@@ -231,6 +258,22 @@ export const sanitizeScheduledArrivalEvents = (value: unknown): ScheduledArrival
       repeat: typeof event.repeat === 'string' && VALID_SCHEDULED_REPEATS.includes(event.repeat as ScheduledArrivalRepeat)
         ? event.repeat as ScheduledArrivalRepeat
         : 'none',
+      repeatEvery: Math.max(1, Math.min(1000, Math.round(toFiniteNumber(event.repeatEvery, 1)))),
+      startDate: sanitizeDateOnly(event.startDate),
+      endDate: sanitizeDateOnly(event.endDate),
+      occurrenceLimit: Number.isFinite(Number(event.occurrenceLimit)) && Number(event.occurrenceLimit) > 0
+        ? Math.max(1, Math.min(100000, Math.round(Number(event.occurrenceLimit))))
+        : undefined,
+      daysOfWeek: sanitizeNumberSet(event.daysOfWeek, 0, 6),
+      months: sanitizeNumberSet(event.months, 1, 12),
+      daysOfMonth: sanitizeNumberSet(event.daysOfMonth, 1, 31),
+      dispatchMode: typeof event.dispatchMode === 'string' && VALID_SCHEDULED_DISPATCH_MODES.includes(event.dispatchMode as ScheduledArrivalDispatchMode)
+        ? event.dispatchMode as ScheduledArrivalDispatchMode
+        : 'burst',
+      itemInterval: Math.max(0, toFiniteNumber(event.itemInterval, 0)),
+      itemIntervalUnit: typeof event.itemIntervalUnit === 'string' && DURATION_UNITS.some(unit => unit.value === event.itemIntervalUnit)
+        ? event.itemIntervalUnit as DurationUnit
+        : 's',
     }))
     .filter((event) => event.quantity > 0);
 };

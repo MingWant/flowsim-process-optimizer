@@ -3,7 +3,7 @@ export type ColorTheme = 'blue' | 'emerald' | 'amber' | 'rose' | 'purple' | 'cya
 export type NodeType = 'start' | 'process' | 'end';
 export type RandomnessMode = 'fixed' | 'range';
 export type StepSimulationMode = 'resource' | 'delay';
-export type DurationUnit = 'ms' | 's' | 'min' | 'h' | 'day' | 'week' | 'month' | 'year';
+export type DurationUnit = 'ms' | 's' | 'min' | 'h' | 'workingDay' | 'day' | 'week' | 'month' | 'year';
 export type ArrivalInputMode = 'rate' | 'interval';
 export type SimulationMode = 'realistic' | 'worst-case';
 export type ResourceExecutionMode = 'single' | 'collaborative' | 'multitask';
@@ -11,7 +11,8 @@ export type TeamAllocationMode = 'auto' | 'explicit';
 export type NonWorkingArrivalPolicy = 'queue' | 'delay' | 'reject';
 export type ArrivalModel = 'simple' | 'schedule' | 'events';
 export type ScheduledArrivalSpreadMode = 'spread' | 'burst';
-export type ScheduledArrivalRepeat = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly';
+export type ScheduledArrivalRepeat = 'none' | 'daily' | 'workingDay' | 'weekly' | 'monthly' | 'yearly';
+export type ScheduledArrivalDispatchMode = 'burst' | 'sequence';
 
 export interface WorkingHourSegment {
   start: number; // 0-24, local hour (e.g., 9 = 9:00, 9.5 = 9:30)
@@ -64,11 +65,23 @@ export interface ScheduledArrivalEvent {
   hour: number; // 0-24 local hour within the day
   quantity: number;
   repeat: ScheduledArrivalRepeat;
+  repeatEvery?: number;
+  startDate?: string; // yyyy-mm-dd, overrides dayOffset when present
+  endDate?: string; // yyyy-mm-dd inclusive
+  occurrenceLimit?: number;
+  daysOfWeek?: number[];
+  months?: number[];
+  daysOfMonth?: number[];
+  dispatchMode?: ScheduledArrivalDispatchMode;
+  itemInterval?: number;
+  itemIntervalUnit?: DurationUnit;
 }
 
 export interface AutoPauseConfig {
   enabled: boolean;
   simulationTimeMs?: number;
+  simulationTimeUnit?: DurationUnit;
+  stopDateIso?: string;
   totalItemsCreated?: number;
   totalItemsFinished?: number;
   totalItemsFailed?: number;
@@ -217,6 +230,7 @@ export interface SimulationStats {
   totalItemsCancelled: number;
   totalItemsFailed: number;
   avgCycleTime: number;
+  avgBusinessCycleTime: number;
   avgThroughput: number;
   activeItems: number;
 }
@@ -232,6 +246,7 @@ export interface StepStats {
   avgResourceLoadFactor: number;
   avgWaitTime: number;
   avgCompletionTime: number;
+  avgBusinessCompletionTime: number;
   // Cumulative History
   totalProcessed: number;
   totalFailed: number;

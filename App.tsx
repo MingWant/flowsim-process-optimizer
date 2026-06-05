@@ -9,7 +9,7 @@ import { AppSidebar } from './components/AppSidebar';
 import { StepEditorModal, type StepEditorTab } from './components/StepEditorModal';
 import { generateScenario, analyzeBottlenecks } from './services/geminiService';
 import { getActiveDemandModifiers, getBusinessDate, getDemandMultiplier, isWorkingTime, normalizeBusinessCalendar, normalizeDemandModifiers } from './services/simulationCalendar';
-import { FLOWSIM_DRAFT_STORAGE_KEY, FLOWSIM_EXPORT_VERSION, FLOWSIM_METRICS_CYCLE_UNIT_KEY } from './constants/storage';
+import { FLOWSIM_DRAFT_STORAGE_KEY, FLOWSIM_EXPORT_VERSION, FLOWSIM_METRICS_CYCLE_UNIT_KEY, FLOWSIM_METRICS_EXCLUDE_NON_WORKING_KEY } from './constants/storage';
 import { CUSTOM_CLOCK_VALUE, DURATION_UNITS, TIME_COMPRESSION_PRESETS } from './constants/timeUnits';
 import { UI_THEMES, type CanvasViewMode, type UiTheme } from './constants/uiOptions';
 import { formatSimulationTime, getAutoPauseProgressRows } from './utils/formatters';
@@ -56,6 +56,13 @@ const App: React.FC = () => {
 
     const savedUnit = window.localStorage.getItem(FLOWSIM_METRICS_CYCLE_UNIT_KEY);
     return DURATION_UNITS.some((unit) => unit.value === savedUnit) ? savedUnit as DurationUnit : 'min';
+  });
+  const [excludeNonWorkingFromCycleTime, setExcludeNonWorkingFromCycleTime] = useState(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+
+    return window.localStorage.getItem(FLOWSIM_METRICS_EXCLUDE_NON_WORKING_KEY) === 'true';
   });
   const [canvasViewMode, setCanvasViewMode] = useState<CanvasViewMode>('map');
   const [flowClipboard, setFlowClipboard] = useState<ProcessStep[] | null>(null);
@@ -361,6 +368,10 @@ const App: React.FC = () => {
           hour: 9,
           quantity: 10,
           repeat: 'none',
+          repeatEvery: 1,
+          dispatchMode: 'burst',
+          itemInterval: 0,
+          itemIntervalUnit: 's',
         },
       ]),
     });
@@ -403,6 +414,10 @@ const App: React.FC = () => {
   useEffect(() => {
     window.localStorage.setItem(FLOWSIM_METRICS_CYCLE_UNIT_KEY, metricsCycleTimeUnit);
   }, [metricsCycleTimeUnit]);
+
+  useEffect(() => {
+    window.localStorage.setItem(FLOWSIM_METRICS_EXCLUDE_NON_WORKING_KEY, String(excludeNonWorkingFromCycleTime));
+  }, [excludeNonWorkingFromCycleTime]);
 
   useEffect(() => {
     try {
@@ -593,7 +608,7 @@ const App: React.FC = () => {
   const activeDemandModifiers = getActiveDemandModifiers(demandModifiers, config.calendarStartIso, simulationTimeMs);
   const activeDemandModifierIds = new Set(activeDemandModifiers.map((modifier) => modifier.id));
   const currentDemandMultiplier = getDemandMultiplier(demandModifiers, config.calendarStartIso, simulationTimeMs);
-  const autoPauseProgressRows = getAutoPauseProgressRows(config.autoPause, globalStats, simulationTimeMs);
+  const autoPauseProgressRows = getAutoPauseProgressRows(config.autoPause, globalStats, simulationTimeMs, config.calendarStartIso);
   const updateBusinessCalendar = (updates: Partial<typeof businessCalendar>) => {
     setConfig((previous) => ({
       ...previous,
@@ -926,10 +941,19 @@ const App: React.FC = () => {
                         ))}
                       </select>
                     </label>
+                    <label className="flex items-center gap-2 text-xs font-semibold text-slate-400">
+                      <input
+                        type="checkbox"
+                        checked={excludeNonWorkingFromCycleTime}
+                        onChange={(event) => setExcludeNonWorkingFromCycleTime(event.target.checked)}
+                        className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-blue-500 focus:ring-blue-500"
+                      />
+                      <span>Exclude non-working</span>
+                    </label>
                     <div className="text-xs text-slate-500">Queue: <span className="font-mono text-amber-300">{totalQueue}</span></div>
                   </div>
                 </div>
-                 <StatsBoard globalStats={globalStats} stepStats={stepStats} steps={config.steps} items={items} simulationTimeMs={simulationTimeMs} cycleTimeUnit={metricsCycleTimeUnit} />
+                 <StatsBoard globalStats={globalStats} stepStats={stepStats} steps={config.steps} items={items} simulationTimeMs={simulationTimeMs} cycleTimeUnit={metricsCycleTimeUnit} excludeNonWorkingFromCycleTime={excludeNonWorkingFromCycleTime} />
              </section>
           </div>
           

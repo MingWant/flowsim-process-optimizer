@@ -4,10 +4,12 @@ import type {
   ArrivalModel,
   DurationUnit,
   ProcessStep,
+  ScheduledArrivalDispatchMode,
   ScheduledArrivalRepeat,
   ScheduledArrivalSpreadMode,
 } from '../../types';
 import { ARRIVAL_UNITS, getArrivalMinValue, getArrivalUnitLabel } from '../../constants/timeUnits';
+import { WEEKDAY_OPTIONS } from '../../constants/uiOptions';
 import { normalizeDemandModifiers } from '../../services/simulationCalendar';
 import {
   MAX_SCHEDULED_ARRIVAL_QUANTITY,
@@ -44,6 +46,47 @@ const ARRIVAL_MODEL_OPTIONS: Array<{ id: ArrivalModel; label: string }> = [
   { id: 'schedule', label: 'Schedule' },
   { id: 'events', label: 'Events' },
 ];
+
+const ARRIVAL_REPEAT_OPTIONS: Array<{ id: ScheduledArrivalRepeat; label: string }> = [
+  { id: 'none', label: 'Once' },
+  { id: 'daily', label: 'Daily' },
+  { id: 'workingDay', label: 'Working days' },
+  { id: 'weekly', label: 'Weekly' },
+  { id: 'monthly', label: 'Monthly' },
+  { id: 'yearly', label: 'Yearly' },
+];
+
+const ARRIVAL_DISPATCH_OPTIONS: Array<{ id: ScheduledArrivalDispatchMode; label: string }> = [
+  { id: 'burst', label: 'All at once' },
+  { id: 'sequence', label: 'One by one' },
+];
+
+const MONTH_OPTIONS = [
+  { value: 1, label: 'Jan' },
+  { value: 2, label: 'Feb' },
+  { value: 3, label: 'Mar' },
+  { value: 4, label: 'Apr' },
+  { value: 5, label: 'May' },
+  { value: 6, label: 'Jun' },
+  { value: 7, label: 'Jul' },
+  { value: 8, label: 'Aug' },
+  { value: 9, label: 'Sep' },
+  { value: 10, label: 'Oct' },
+  { value: 11, label: 'Nov' },
+  { value: 12, label: 'Dec' },
+];
+
+const toggleNumber = (values: number[] | undefined, value: number) => {
+  const selected = new Set(values || []);
+  if (selected.has(value)) {
+    selected.delete(value);
+  } else {
+    selected.add(value);
+  }
+
+  const nextValues = Array.from(selected).sort((a, b) => a - b);
+  return nextValues.length > 0 ? nextValues : undefined;
+};
 
 export const StartNodeSettings: React.FC<StartNodeSettingsProps> = ({
   editingStep,
@@ -382,19 +425,19 @@ const ExactArrivalEventsSection: React.FC<StartSectionProps & { addArrivalEvent:
     <div className="mb-4 rounded-xl border border-fuchsia-500/20 bg-fuchsia-500/10 p-3">
       <div className="mb-2 flex items-center justify-between gap-3">
         <div>
-          <label className="block text-xs font-semibold uppercase text-fuchsia-200">Exact Arrival Events</label>
-          <p className="mt-1 text-[11px] text-slate-500">Set exact spawn times with optional calendar repeats.</p>
+          <label className="block text-xs font-semibold uppercase text-fuchsia-200">Dispatch Plans</label>
+          <p className="mt-1 text-[11px] text-slate-500">Set dated, recurring, one-time, batch, or sequential Start Point dispatches.</p>
         </div>
         <button
           onClick={addArrivalEvent}
           className="rounded-lg border border-fuchsia-500/40 bg-fuchsia-500/10 px-3 py-1.5 text-xs font-semibold text-fuchsia-100 hover:bg-fuchsia-500/20"
         >
-          + Add Event
+          + Add Plan
         </button>
       </div>
       <div className="space-y-2">
         {arrivalEvents.length === 0 ? (
-          <div className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-500">No exact events yet.</div>
+          <div className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-500">No dispatch plans yet.</div>
         ) : (
           arrivalEvents.map((arrivalEvent) => (
             <div key={arrivalEvent.id} className="rounded-lg border border-fuchsia-500/20 bg-slate-950/60 p-2.5">
@@ -423,7 +466,16 @@ const ExactArrivalEventsSection: React.FC<StartSectionProps & { addArrivalEvent:
               </div>
               <div className="grid grid-cols-4 gap-2">
                 <div>
-                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Day Offset</label>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Start date</label>
+                  <input
+                    type="date"
+                    value={arrivalEvent.startDate || ''}
+                    onChange={(event) => setEditingStep(updateScheduledArrivalEvent(editingStep, arrivalEvent.id, { startDate: event.target.value || undefined }))}
+                    className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Sim day</label>
                   <input
                     type="number"
                     min="0"
@@ -434,7 +486,7 @@ const ExactArrivalEventsSection: React.FC<StartSectionProps & { addArrivalEvent:
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Hour</label>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Time</label>
                   <input
                     type="number"
                     min="0"
@@ -446,7 +498,7 @@ const ExactArrivalEventsSection: React.FC<StartSectionProps & { addArrivalEvent:
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Qty</label>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Items</label>
                   <input
                     type="number"
                     min="1"
@@ -457,6 +509,8 @@ const ExactArrivalEventsSection: React.FC<StartSectionProps & { addArrivalEvent:
                     className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500"
                   />
                 </div>
+              </div>
+              <div className="mt-2 grid grid-cols-4 gap-2">
                 <div>
                   <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Repeat</label>
                   <select
@@ -464,12 +518,132 @@ const ExactArrivalEventsSection: React.FC<StartSectionProps & { addArrivalEvent:
                     onChange={(event) => setEditingStep(updateScheduledArrivalEvent(editingStep, arrivalEvent.id, { repeat: event.target.value as ScheduledArrivalRepeat }))}
                     className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500"
                   >
-                    <option value="none">None</option>
-                    <option value="daily">Daily</option>
-                    <option value="weekly">Weekly</option>
-                    <option value="monthly">Monthly</option>
-                    <option value="yearly">Yearly</option>
+                    {ARRIVAL_REPEAT_OPTIONS.map((option) => (
+                      <option key={option.id} value={option.id}>{option.label}</option>
+                    ))}
                   </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Every</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    disabled={arrivalEvent.repeat === 'none'}
+                    value={arrivalEvent.repeatEvery ?? 1}
+                    onChange={(event) => setEditingStep(updateScheduledArrivalEvent(editingStep, arrivalEvent.id, { repeatEvery: Number(event.target.value) }))}
+                    className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500 disabled:opacity-40"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">End date</label>
+                  <input
+                    type="date"
+                    value={arrivalEvent.endDate || ''}
+                    onChange={(event) => setEditingStep(updateScheduledArrivalEvent(editingStep, arrivalEvent.id, { endDate: event.target.value || undefined }))}
+                    className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Max runs</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={arrivalEvent.occurrenceLimit ?? ''}
+                    onChange={(event) => setEditingStep(updateScheduledArrivalEvent(editingStep, arrivalEvent.id, { occurrenceLimit: event.target.value ? Number(event.target.value) : undefined }))}
+                    className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500"
+                  />
+                </div>
+              </div>
+              <div className="mt-2 grid grid-cols-4 gap-2">
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Dispatch</label>
+                  <select
+                    value={arrivalEvent.dispatchMode || 'burst'}
+                    onChange={(event) => setEditingStep(updateScheduledArrivalEvent(editingStep, arrivalEvent.id, { dispatchMode: event.target.value as ScheduledArrivalDispatchMode }))}
+                    className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500"
+                  >
+                    {ARRIVAL_DISPATCH_OPTIONS.map((option) => (
+                      <option key={option.id} value={option.id}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Item interval</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    disabled={(arrivalEvent.dispatchMode || 'burst') !== 'sequence'}
+                    value={arrivalEvent.itemInterval ?? 0}
+                    onChange={(event) => setEditingStep(updateScheduledArrivalEvent(editingStep, arrivalEvent.id, { itemInterval: Number(event.target.value) }))}
+                    className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500 disabled:opacity-40"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Unit</label>
+                  <select
+                    disabled={(arrivalEvent.dispatchMode || 'burst') !== 'sequence'}
+                    value={arrivalEvent.itemIntervalUnit || 's'}
+                    onChange={(event) => setEditingStep(updateScheduledArrivalEvent(editingStep, arrivalEvent.id, { itemIntervalUnit: event.target.value as DurationUnit }))}
+                    className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500 disabled:opacity-40"
+                  >
+                    {ARRIVAL_UNITS.map((unit) => (
+                      <option key={unit.value} value={unit.value}>{unit.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="mt-2 space-y-2 rounded-lg border border-fuchsia-500/10 bg-fuchsia-500/5 p-2">
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Weekdays</label>
+                  <div className="grid grid-cols-7 gap-1">
+                    {WEEKDAY_OPTIONS.map((day) => {
+                      const selected = Boolean(arrivalEvent.daysOfWeek?.includes(day.value));
+                      return (
+                        <button
+                          key={day.value}
+                          onClick={() => setEditingStep(updateScheduledArrivalEvent(editingStep, arrivalEvent.id, { daysOfWeek: toggleNumber(arrivalEvent.daysOfWeek, day.value) }))}
+                          className={`rounded border px-1 py-1 text-[10px] font-semibold ${selected ? 'border-fuchsia-300 bg-fuchsia-500 text-white' : 'border-slate-700 bg-slate-900 text-slate-500'}`}
+                        >
+                          {day.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Months</label>
+                  <div className="grid grid-cols-6 gap-1">
+                    {MONTH_OPTIONS.map((month) => {
+                      const selected = Boolean(arrivalEvent.months?.includes(month.value));
+                      return (
+                        <button
+                          key={month.value}
+                          onClick={() => setEditingStep(updateScheduledArrivalEvent(editingStep, arrivalEvent.id, { months: toggleNumber(arrivalEvent.months, month.value) }))}
+                          className={`rounded border px-1 py-1 text-[10px] font-semibold ${selected ? 'border-fuchsia-300 bg-fuchsia-500 text-white' : 'border-slate-700 bg-slate-900 text-slate-500'}`}
+                        >
+                          {month.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Days of month</label>
+                  <input
+                    type="text"
+                    value={(arrivalEvent.daysOfMonth || []).join(', ')}
+                    onChange={(event) => setEditingStep(updateScheduledArrivalEvent(editingStep, arrivalEvent.id, {
+                      daysOfMonth: event.target.value
+                        .split(',')
+                        .map((value) => Number(value.trim()))
+                        .filter((value) => Number.isFinite(value)),
+                    }))}
+                    placeholder="1, 15, 31"
+                    className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500"
+                  />
                 </div>
               </div>
             </div>

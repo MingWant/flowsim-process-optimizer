@@ -35,6 +35,8 @@ interface AutoPauseProgressRow {
   label: string;
   target: number;
   value: number;
+  targetLabel?: string;
+  valueLabel?: string;
 }
 
 interface Props {
@@ -75,8 +77,19 @@ interface Props {
   updateDemandModifier: (modifierId: string, updates: Partial<DemandModifier>) => void;
 }
 
+const AUTO_PAUSE_TIME_UNITS: Array<{ value: DurationUnit; label: string; ms: number }> = [
+  { value: 'ms', label: 'ms', ms: 1 },
+  { value: 's', label: 'sec', ms: 1000 },
+  { value: 'min', label: 'min', ms: 60 * 1000 },
+  { value: 'h', label: 'hours', ms: 60 * 60 * 1000 },
+  { value: 'workingDay', label: 'working days', ms: 8 * 60 * 60 * 1000 },
+  { value: 'day', label: 'days', ms: 24 * 60 * 60 * 1000 },
+  { value: 'week', label: 'weeks', ms: 7 * 24 * 60 * 60 * 1000 },
+  { value: 'month', label: 'months', ms: 30 * 24 * 60 * 60 * 1000 },
+  { value: 'year', label: 'years', ms: 365 * 24 * 60 * 60 * 1000 },
+];
+
 const autoPauseFields = [
-  { key: 'simulationTimeMs' as const, label: 'Sim time', step: 1000, placeholder: 'ms' },
   { key: 'totalItemsCreated' as const, label: 'Created', step: 1, placeholder: 'items' },
   { key: 'totalItemsFinished' as const, label: 'Finished', step: 1, placeholder: 'items' },
   { key: 'activeItems' as const, label: 'Active', step: 1, placeholder: 'items' },
@@ -123,6 +136,11 @@ export const AppSidebar: React.FC<Props> = ({
 }) => {
   const activeCompressionPreset = TIME_COMPRESSION_PRESETS.find((preset) => preset.value === config.timeCompression);
   const compressionSelectValue = activeCompressionPreset ? String(activeCompressionPreset.value) : CUSTOM_CLOCK_VALUE;
+  const autoPauseTimeUnit = config.autoPause?.simulationTimeUnit || 'ms';
+  const autoPauseTimeUnitMs = AUTO_PAUSE_TIME_UNITS.find((unit) => unit.value === autoPauseTimeUnit)?.ms || 1;
+  const autoPauseTimeValue = typeof config.autoPause?.simulationTimeMs === 'number'
+    ? Number((config.autoPause.simulationTimeMs / autoPauseTimeUnitMs).toFixed(3))
+    : '';
 
   return (
     <aside className={`
@@ -268,7 +286,7 @@ export const AppSidebar: React.FC<Props> = ({
                       <div key={row.label}>
                         <div className="mb-0.5 flex justify-between gap-2 text-[9px] text-slate-400">
                           <span>{row.label}</span>
-                          <span className="font-mono text-rose-100">{Math.floor(row.value)}/{row.target}</span>
+                          <span className="font-mono text-rose-100">{row.valueLabel || Math.floor(row.value)}/{row.targetLabel || row.target}</span>
                         </div>
                         <div className="h-1 overflow-hidden rounded-full bg-slate-800">
                           <div className="h-full rounded-full bg-rose-400" style={{ width: `${pct}%` }} />
@@ -300,9 +318,73 @@ export const AppSidebar: React.FC<Props> = ({
             </div>
           )}
           {config.autoPause?.enabled && (
-            <div className="grid grid-cols-2 gap-2">
-              {autoPauseFields.map((field) => (
-                <div key={field.key}>
+            <div className="space-y-2">
+              <div>
+                <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-rose-200">Sim time</label>
+                <div className="grid grid-cols-[1fr_96px] gap-2">
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.001"
+                    placeholder="duration"
+                    value={autoPauseTimeValue}
+                    onChange={(event) => setConfig((previous) => {
+                      const unit = previous.autoPause?.simulationTimeUnit || autoPauseTimeUnit;
+                      const unitMs = AUTO_PAUSE_TIME_UNITS.find((option) => option.value === unit)?.ms || 1;
+                      return {
+                        ...previous,
+                        autoPause: {
+                          ...(previous.autoPause || { enabled: true }),
+                          enabled: true,
+                          simulationTimeUnit: unit,
+                          simulationTimeMs: event.target.value ? Number(event.target.value) * unitMs : undefined,
+                        },
+                      };
+                    })}
+                    className="w-full rounded-lg border border-rose-500/30 bg-slate-900 px-2 py-1.5 text-xs text-rose-100 outline-none focus:ring-1 focus:ring-rose-500"
+                  />
+                  <select
+                    value={autoPauseTimeUnit}
+                    onChange={(event) => setConfig((previous) => {
+                      const nextUnit = event.target.value as DurationUnit;
+                      const currentMs = previous.autoPause?.simulationTimeMs;
+                      return {
+                        ...previous,
+                        autoPause: {
+                          ...(previous.autoPause || { enabled: true }),
+                          enabled: true,
+                          simulationTimeUnit: nextUnit,
+                          simulationTimeMs: typeof currentMs === 'number' ? currentMs : undefined,
+                        },
+                      };
+                    })}
+                    className="w-full rounded-lg border border-rose-500/30 bg-slate-900 px-2 py-1.5 text-xs text-rose-100 outline-none focus:ring-1 focus:ring-rose-500"
+                  >
+                    {AUTO_PAUSE_TIME_UNITS.map((unit) => (
+                      <option key={unit.value} value={unit.value}>{unit.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-rose-200">Stop date</label>
+                <input
+                  type="datetime-local"
+                  value={config.autoPause.stopDateIso ? config.autoPause.stopDateIso.slice(0, 16) : ''}
+                  onChange={(event) => setConfig((previous) => ({
+                    ...previous,
+                    autoPause: {
+                      ...(previous.autoPause || { enabled: true }),
+                      enabled: true,
+                      stopDateIso: event.target.value ? `${event.target.value}:00` : undefined,
+                    },
+                  }))}
+                  className="w-full rounded-lg border border-rose-500/30 bg-slate-900 px-2 py-1.5 text-xs text-rose-100 outline-none focus:ring-1 focus:ring-rose-500"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {autoPauseFields.map((field) => (
+                  <div key={field.key}>
                   <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-rose-200">{field.label}</label>
                   <input
                     type="number"
@@ -320,8 +402,9 @@ export const AppSidebar: React.FC<Props> = ({
                     }))}
                     className="w-full rounded-lg border border-rose-500/30 bg-slate-900 px-2 py-1.5 text-xs text-rose-100 outline-none focus:ring-1 focus:ring-rose-500"
                   />
-                </div>
-              ))}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>

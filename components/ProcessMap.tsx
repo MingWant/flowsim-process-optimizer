@@ -1248,8 +1248,13 @@ export const ProcessMap: React.FC<Props> = ({
                     queueLength: 0,
                     activeProcessing: 0,
                     utilization: 0,
+                    resourceUsage: 0,
+                    totalResources: 0,
+                    avgResourcesPerItem: 0,
+                    avgResourceLoadFactor: 0,
                     avgWaitTime: 0,
                     avgCompletionTime: 0,
+                    avgBusinessCompletionTime: 0,
                     totalProcessed: 0,
                     totalFailed: 0,
                     totalCancelled: 0

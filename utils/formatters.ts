@@ -1,11 +1,21 @@
 import type { AutoPauseConfig } from '../types';
 
+const DEFAULT_CALENDAR_START_ISO = '2026-01-05T00:00:00';
+
 interface AutoPauseProgressStats {
   totalItemsCreated: number;
   totalItemsFinished: number;
   totalItemsFailed: number;
   totalItemsCancelled: number;
   activeItems: number;
+}
+
+interface AutoPauseProgressRow {
+  label: string;
+  target?: number;
+  value: number;
+  targetLabel?: string;
+  valueLabel?: string;
 }
 
 export const formatSimulationTime = (totalMs: number) => {
@@ -34,21 +44,51 @@ export const formatBusinessDateTime = (date: Date) => {
   return `${year}-${month}-${day} ${hours}:${minutes}`;
 };
 
+const getCalendarStartMs = (calendarStartIso: string | undefined) => {
+  const parsed = calendarStartIso ? Date.parse(calendarStartIso) : Date.parse(DEFAULT_CALENDAR_START_ISO);
+  return Number.isFinite(parsed) ? parsed : Date.parse(DEFAULT_CALENDAR_START_ISO);
+};
+
+const getAutoPauseTimeTarget = (autoPause: AutoPauseConfig, calendarStartIso: string | undefined) => {
+  if (autoPause.stopDateIso) {
+    const stopDateMs = Date.parse(autoPause.stopDateIso);
+    const targetMs = stopDateMs - getCalendarStartMs(calendarStartIso);
+    if (Number.isFinite(targetMs) && targetMs > 0) {
+      return targetMs;
+    }
+  }
+
+  return autoPause.simulationTimeMs;
+};
+
 export const getAutoPauseProgressRows = (
   autoPause: AutoPauseConfig | undefined,
   stats: AutoPauseProgressStats,
-  simMs: number
+  simMs: number,
+  calendarStartIso?: string
 ) => {
   if (!autoPause?.enabled) {
     return [];
   }
 
-  return [
-    { label: 'Sim time', target: autoPause.simulationTimeMs, value: simMs },
+  const calendarStartMs = getCalendarStartMs(calendarStartIso);
+  const timeTarget = getAutoPauseTimeTarget(autoPause, calendarStartIso);
+  const currentBusinessDate = new Date(calendarStartMs + Math.max(0, simMs));
+
+  const rows: AutoPauseProgressRow[] = [
+    {
+      label: autoPause.stopDateIso ? 'Stop date' : 'Sim time',
+      target: timeTarget,
+      value: simMs,
+      targetLabel: autoPause.stopDateIso ? formatBusinessDateTime(new Date(Date.parse(autoPause.stopDateIso))) : typeof timeTarget === 'number' ? formatSimulationTime(timeTarget) : undefined,
+      valueLabel: autoPause.stopDateIso ? formatBusinessDateTime(currentBusinessDate) : formatSimulationTime(simMs),
+    },
     { label: 'Created', target: autoPause.totalItemsCreated, value: stats.totalItemsCreated },
     { label: 'Finished', target: autoPause.totalItemsFinished, value: stats.totalItemsFinished },
     { label: 'Active', target: autoPause.activeItems, value: stats.activeItems },
     { label: 'Failed', target: autoPause.totalItemsFailed, value: stats.totalItemsFailed },
     { label: 'Cancelled', target: autoPause.totalItemsCancelled, value: stats.totalItemsCancelled },
-  ].filter((row): row is { label: string; target: number; value: number } => typeof row.target === 'number' && row.target > 0);
+  ];
+
+  return rows.filter((row): row is AutoPauseProgressRow & { target: number } => typeof row.target === 'number' && row.target > 0);
 };

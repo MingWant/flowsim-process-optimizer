@@ -11,6 +11,7 @@ interface Props {
   items?: WorkItem[];
   simulationTimeMs: number;
   cycleTimeUnit: DurationUnit;
+  excludeNonWorkingFromCycleTime: boolean;
 }
 
 interface FlowGroup {
@@ -26,6 +27,7 @@ const TIME_UNIT_TO_MS: Record<DurationUnit, number> = {
   s: 1000,
   min: 60 * 1000,
   h: 60 * 60 * 1000,
+  workingDay: 8 * 60 * 60 * 1000,
   day: 24 * 60 * 60 * 1000,
   week: 7 * 24 * 60 * 60 * 1000,
   month: 30 * 24 * 60 * 60 * 1000,
@@ -37,6 +39,7 @@ const UNIT_LABELS: Record<DurationUnit, string> = {
   s: 'sec',
   min: 'min',
   h: 'hour',
+  workingDay: 'working day',
   day: 'day',
   week: 'week',
   month: 'month',
@@ -166,7 +169,7 @@ const getFlowGroups = (steps: ProcessStep[]): FlowGroup[] => {
   return flowGroups;
 };
 
-export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, items = [], simulationTimeMs, cycleTimeUnit }) => {
+export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, items = [], simulationTimeMs, cycleTimeUnit, excludeNonWorkingFromCycleTime }) => {
   const flowGroups = getFlowGroups(steps);
   const stepStatsById = new Map(stepStats.map(stats => [stats.stepId, stats]));
 
@@ -186,7 +189,8 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, ite
   const throughputValue = simulationTimeMs > 0
     ? (globalStats.totalItemsFinished / simulationTimeMs) * throughputUnitMs
     : 0;
-  const cycleTimeValue = globalStats.avgCycleTime / cycleTimeUnitMs;
+  const selectedAvgCycleTime = excludeNonWorkingFromCycleTime ? globalStats.avgBusinessCycleTime : globalStats.avgCycleTime;
+  const cycleTimeValue = selectedAvgCycleTime / cycleTimeUnitMs;
 
   const flowMetrics = flowGroups.map((flow, index) => {
     const statsForFlow = flow.steps.map(step => stepStatsById.get(step.id)).filter((stats): stats is StepStats => Boolean(stats));
@@ -211,7 +215,10 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, ite
       && flow.stepIds.has(item.currentStepId)
     )).length;
     const averageCycleTime = finished > 0
-      ? endStats.reduce((sum, stats) => sum + stats.avgCompletionTime * stats.totalProcessed, 0) / finished
+      ? endStats.reduce((sum, stats) => {
+        const cycleTime = excludeNonWorkingFromCycleTime ? stats.avgBusinessCompletionTime : stats.avgCompletionTime;
+        return sum + cycleTime * stats.totalProcessed;
+      }, 0) / finished
       : 0;
     const unit = getPreferredThroughputUnit(flow.steps);
     const flowThroughput = simulationTimeMs > 0 ? (finished / simulationTimeMs) * TIME_UNIT_TO_MS[unit] : 0;
@@ -261,7 +268,7 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, steps, ite
       suffix: `/ ${UNIT_LABELS[throughputUnit]}`
     },
     {
-      label: 'Avg Cycle Time',
+      label: excludeNonWorkingFromCycleTime ? 'Avg Business Cycle' : 'Avg Cycle Time',
       value: cycleTimeValue.toFixed(cycleTimeUnit === 'ms' ? 0 : 2),
       color: 'text-blue-400',
       icon: <Timer size={22} className="text-blue-400" />,

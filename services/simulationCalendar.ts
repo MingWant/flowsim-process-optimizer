@@ -148,6 +148,46 @@ export const getNextWorkingSimulationTime = (calendar: BusinessCalendar | undefi
   return simulationMs + DAY_MS;
 };
 
+export const getWorkingDurationBetween = (calendar: BusinessCalendar | undefined, calendarStartIso: string | undefined, startSimulationMs: number, endSimulationMs: number) => {
+  const start = Math.max(0, Math.min(startSimulationMs, endSimulationMs));
+  const end = Math.max(0, Math.max(startSimulationMs, endSimulationMs));
+  if (end <= start) {
+    return 0;
+  }
+
+  const normalized = normalizeBusinessCalendar(calendar);
+  if (!normalized.enabled) {
+    return end - start;
+  }
+
+  const startMs = calendarStartIso ? Date.parse(calendarStartIso) : Date.parse('2026-01-05T00:00:00');
+  const safeStartMs = Number.isFinite(startMs) ? startMs : Date.parse('2026-01-05T00:00:00');
+  const absoluteStartMs = safeStartMs + start;
+  const absoluteEndMs = safeStartMs + end;
+  let cursorDate = new Date(absoluteStartMs);
+  cursorDate.setHours(0, 0, 0, 0);
+  let workingDuration = 0;
+
+  while (cursorDate.getTime() <= absoluteEndMs) {
+    if (normalized.daysOfWeek.includes(cursorDate.getDay())) {
+      const dayStartMs = cursorDate.getTime();
+      for (const segment of normalized.workingHours) {
+        const segmentStartMs = dayStartMs + segment.start * HOUR_MS;
+        const segmentEndMs = dayStartMs + segment.end * HOUR_MS;
+        const overlapStart = Math.max(absoluteStartMs, segmentStartMs);
+        const overlapEnd = Math.min(absoluteEndMs, segmentEndMs);
+        if (overlapEnd > overlapStart) {
+          workingDuration += overlapEnd - overlapStart;
+        }
+      }
+    }
+
+    cursorDate = new Date(cursorDate.getTime() + DAY_MS);
+  }
+
+  return Math.max(0, workingDuration);
+};
+
 export const normalizeDemandModifiers = (modifiers: Partial<DemandModifier>[] | undefined): DemandModifier[] => {
   if (!Array.isArray(modifiers)) {
     return [];
