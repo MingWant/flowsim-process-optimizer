@@ -1,8 +1,23 @@
 
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import { flushSync } from 'react-dom';
-import { ProcessStep, StepStats, WorkItem } from '../types';
+import type { ProcessStep, StepStats, WorkItem } from '../types';
 import { ProcessNode } from './ProcessNode';
+import {
+  END_HEIGHT,
+  MAX_VISIBLE_TRANSMISSION_DOTS,
+  NODE_HEIGHT,
+  NODE_SPAWN_OFFSETS,
+  NODE_WIDTH,
+  START_END_WIDTH,
+  START_HEIGHT,
+  getPointOnBezier,
+  getStepDimensions,
+  haveSameIds,
+  type InteractionMode,
+  type Position,
+  type SelectionBox,
+} from './process-map/processMapUtils';
 import { Move, ZoomIn, ZoomOut, Maximize, PlayCircle, Box, StopCircle, MousePointer2, Minimize2, PanelsTopLeft, Hand, Copy, ScanSearch, Trash2, Wrench } from 'lucide-react';
 
 interface Props {
@@ -21,77 +36,6 @@ interface Props {
   onDeleteSelected: () => void;
   onClearCanvas: () => void;
 }
-
-interface Position {
-  x: number;
-  y: number;
-}
-
-type InteractionMode = 'mixed' | 'pan' | 'select' | 'move';
-
-interface SelectionBox {
-  // Stored in canvas/world coordinates so the anchor stays attached to the
-  // process canvas while the viewport pans or scrolls during selection.
-  startX: number;
-  startY: number;
-  currentX: number;
-  currentY: number;
-}
-
-const NODE_WIDTH = 320;
-const NODE_HEIGHT = 300; 
-const START_END_WIDTH = 280;
-const START_HEIGHT = 118;
-const END_HEIGHT = 186;
-const COLLAPSED_PROCESS_HEIGHT = 104;
-const COLLAPSED_START_HEIGHT = 104;
-const COLLAPSED_END_HEIGHT = 104;
-const NODE_SPAWN_OFFSETS: Position[] = [
-  { x: 0, y: 0 },
-  { x: 48, y: 36 },
-  { x: -48, y: 36 },
-  { x: 72, y: -28 },
-  { x: -72, y: -28 },
-  { x: 0, y: 72 },
-];
-const MAX_VISIBLE_TRANSMISSION_DOTS = 360;
-
-// Helper to calculate point on Cubic Bezier Curve
-const getPointOnBezier = (t: number, p0: Position, p1: Position, p2: Position, p3: Position): Position => {
-    const mt = 1 - t;
-    const mt2 = mt * mt;
-    const mt3 = mt2 * mt;
-    const t2 = t * t;
-    const t3 = t2 * t;
-
-    const x = mt3 * p0.x + 3 * mt2 * t * p1.x + 3 * mt * t2 * p2.x + t3 * p3.x;
-    const y = mt3 * p0.y + 3 * mt2 * t * p1.y + 3 * mt * t2 * p2.y + t3 * p3.y;
-    return { x, y };
-};
-
-const getStepDimensions = (type?: ProcessStep['type'], collapsed = false) => ({
-  width: type === 'process' ? NODE_WIDTH : type === 'start' ? 260 : START_END_WIDTH,
-  height: collapsed
-    ? type === 'process'
-      ? COLLAPSED_PROCESS_HEIGHT
-      : type === 'start'
-        ? COLLAPSED_START_HEIGHT
-        : COLLAPSED_END_HEIGHT
-    : type === 'process'
-      ? NODE_HEIGHT
-      : type === 'start'
-        ? START_HEIGHT
-        : END_HEIGHT,
-});
-
-const haveSameIds = (a: string[], b: string[]) => {
-  if (a.length !== b.length) {
-    return false;
-  }
-
-  const ids = new Set(a);
-  return b.every((id) => ids.has(id));
-};
 
 export const ProcessMap: React.FC<Props> = ({ 
   steps, 
