@@ -9,6 +9,9 @@ export type SimulationMode = 'realistic' | 'worst-case';
 export type ResourceExecutionMode = 'single' | 'collaborative' | 'multitask';
 export type TeamAllocationMode = 'auto' | 'explicit';
 export type NonWorkingArrivalPolicy = 'queue' | 'delay' | 'reject';
+export type ArrivalModel = 'simple' | 'schedule' | 'events';
+export type ScheduledArrivalSpreadMode = 'spread' | 'burst';
+export type ScheduledArrivalRepeat = 'none' | 'daily' | 'weekly';
 
 export interface WorkingHourSegment {
   start: number; // 0-24, local hour (e.g., 9 = 9:00, 9.5 = 9:30)
@@ -37,6 +40,30 @@ export interface DemandModifier {
   months?: number[]; // 1-12
   startDate?: string; // yyyy-mm-dd
   endDate?: string; // yyyy-mm-dd inclusive
+}
+
+export interface ScheduledArrivalWindow {
+  id: string;
+  name: string;
+  enabled: boolean;
+  startHour: number; // 0-24 local business hour
+  endHour: number; // 0-24, must be after startHour
+  quantity: number; // Items generated within this window before demand multipliers
+  spreadMode: ScheduledArrivalSpreadMode;
+  daysOfWeek?: number[];
+  months?: number[];
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface ScheduledArrivalEvent {
+  id: string;
+  name: string;
+  enabled: boolean;
+  dayOffset: number; // Simulation day offset from calendarStartIso
+  hour: number; // 0-24 local hour within the day
+  quantity: number;
+  repeat: ScheduledArrivalRepeat;
 }
 
 export interface AutoPauseConfig {
@@ -101,6 +128,7 @@ export interface ProcessStep {
   rangeTimeUnit?: DurationUnit;
 
   // Start Node Fields
+  arrivalModel?: ArrivalModel;
   arrivalInputMode?: ArrivalInputMode;
   arrivalUnit?: DurationUnit;
   arrivalRate?: number; // Items per selected simulated unit (Fixed Mode)
@@ -108,6 +136,9 @@ export interface ProcessStep {
   maxArrivalRate?: number; // Items per selected simulated unit (Range Mode)
   arrivalBatchSize?: number; // Number of items created at each arrival event
   arrivalBatchIntervalMs?: number; // Time interval between items within a batch (ms), default 0 (simultaneous arrival)
+  demandModifiers?: DemandModifier[];
+  arrivalSchedule?: ScheduledArrivalWindow[];
+  arrivalEvents?: ScheduledArrivalEvent[];
   itemProfiles?: ItemProfile[];
 
   // End Node Fields

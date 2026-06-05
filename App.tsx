@@ -2,7 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { DEFAULT_CONFIG } from './constants';
 import { useProcessSimulation } from './hooks/useProcessSimulation';
-import { ProcessStep, SimulationConfig, NodeType, DurationUnit, RandomnessMode, StepSimulationMode, ArrivalInputMode, ResourceExecutionMode, TeamAllocationMode, NonWorkingArrivalPolicy, DemandModifier, AutoPauseConfig, ItemProfile } from './types';
+import { ProcessStep, SimulationConfig, NodeType, DurationUnit, RandomnessMode, StepSimulationMode, ArrivalInputMode, ResourceExecutionMode, TeamAllocationMode, NonWorkingArrivalPolicy, DemandModifier, AutoPauseConfig, ItemProfile, ArrivalModel, ScheduledArrivalWindow, ScheduledArrivalEvent, ScheduledArrivalSpreadMode, ScheduledArrivalRepeat } from './types';
 import { ProcessMap } from './components/ProcessMap';
 import { StatsBoard } from './components/StatsBoard';
 import { MetroDemoBoard } from './components/MetroDemoBoard';
@@ -121,10 +121,13 @@ const FLOWSIM_METRICS_CYCLE_UNIT_KEY = 'flowsim-metrics-cycle-unit';
 const VALID_NODE_TYPES: NodeType[] = ['start', 'process', 'end'];
 const VALID_RANDOMNESS_MODES: RandomnessMode[] = ['fixed', 'range'];
 const VALID_SIMULATION_MODES: StepSimulationMode[] = ['resource', 'delay'];
+const VALID_ARRIVAL_MODELS: ArrivalModel[] = ['simple', 'schedule', 'events'];
 const VALID_ARRIVAL_INPUT_MODES: ArrivalInputMode[] = ['rate', 'interval'];
 const VALID_RESOURCE_EXECUTION_MODES: ResourceExecutionMode[] = ['single', 'collaborative', 'multitask'];
 const VALID_TEAM_ALLOCATION_MODES: TeamAllocationMode[] = ['auto', 'explicit'];
 const VALID_NON_WORKING_POLICIES: NonWorkingArrivalPolicy[] = ['queue', 'delay', 'reject'];
+const VALID_SCHEDULED_SPREAD_MODES: ScheduledArrivalSpreadMode[] = ['spread', 'burst'];
+const VALID_SCHEDULED_REPEATS: ScheduledArrivalRepeat[] = ['none', 'daily', 'weekly'];
 const DEFAULT_ZERO_VARIANCE_STEP_IDS = new Set(['step-1', 'step-2', 'step-3', 'step-4']);
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> => (
@@ -152,6 +155,19 @@ const getBatchSize = (value: unknown) => Math.max(1, Math.min(1000, Math.round(t
 const toPositiveInteger = (value: unknown, fallback: number, min = 1, max = 50) => {
   const parsed = Math.round(toFiniteNumber(value, fallback));
   return Math.max(min, Math.min(max, parsed));
+};
+
+const sanitizeWorkingHours = (value: unknown) => {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  return value
+    .filter(isObjectRecord)
+    .map((segment) => ({
+      start: toFiniteNumber(segment.start, 9),
+      end: toFiniteNumber(segment.end, 17),
+    }));
 };
 
 const sanitizeAutoPause = (value: unknown): AutoPauseConfig => {
@@ -258,12 +274,88 @@ const sanitizeItemProfiles = (value: unknown): ItemProfile[] => {
     }));
 };
 
+const sanitizeScheduledArrivalWindows = (value: unknown): ScheduledArrivalWindow[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter(isObjectRecord)
+    .map((window, index) => {
+      const startHour = Math.max(0, Math.min(23.99, toFiniteNumber(window.startHour, 9)));
+      const endHour = Math.max(startHour + 0.01, Math.min(24, toFiniteNumber(window.endHour, startHour + 1)));
+
+      return {
+        id: typeof window.id === 'string' && window.id.trim() ? window.id : `schedule-${index + 1}`,
+        name: typeof window.name === 'string' && window.name.trim() ? window.name : `Window ${index + 1}`,
+        enabled: window.enabled !== false,
+        startHour,
+        endHour,
+        quantity: Math.max(0, Math.min(1000, Math.round(toFiniteNumber(window.quantity, 10)))),
+        spreadMode: typeof window.spreadMode === 'string' && VALID_SCHEDULED_SPREAD_MODES.includes(window.spreadMode as ScheduledArrivalSpreadMode)
+          ? window.spreadMode as ScheduledArrivalSpreadMode
+          : 'spread',
+        daysOfWeek: Array.isArray(window.daysOfWeek)
+          ? Array.from(new Set(window.daysOfWeek.map(day => Math.round(Number(day))).filter(day => day >= 0 && day <= 6)))
+          : undefined,
+        months: Array.isArray(window.months)
+          ? Array.from(new Set(window.months.map(month => Math.round(Number(month))).filter(month => month >= 1 && month <= 12)))
+          : undefined,
+        startDate: typeof window.startDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(window.startDate) ? window.startDate : undefined,
+        endDate: typeof window.endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(window.endDate) ? window.endDate : undefined,
+      };
+    })
+    .filter((window) => window.quantity > 0);
+};
+
+const sanitizeScheduledArrivalEvents = (value: unknown): ScheduledArrivalEvent[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter(isObjectRecord)
+    .map((event, index) => ({
+      id: typeof event.id === 'string' && event.id.trim() ? event.id : `event-${index + 1}`,
+      name: typeof event.name === 'string' && event.name.trim() ? event.name : `Event ${index + 1}`,
+      enabled: event.enabled !== false,
+      dayOffset: Math.max(0, Math.round(toFiniteNumber(event.dayOffset, 0))),
+      hour: Math.max(0, Math.min(23.99, toFiniteNumber(event.hour, 9))),
+      quantity: Math.max(0, Math.min(1000, Math.round(toFiniteNumber(event.quantity, 10)))),
+      repeat: typeof event.repeat === 'string' && VALID_SCHEDULED_REPEATS.includes(event.repeat as ScheduledArrivalRepeat)
+        ? event.repeat as ScheduledArrivalRepeat
+        : 'none',
+    }))
+    .filter((event) => event.quantity > 0);
+};
+
 const getProfileProbabilityTotal = (step: ProcessStep) => (step.itemProfiles || []).reduce((sum, profile) => sum + (profile.probability || 0), 0);
 
 const updateItemProfile = (step: ProcessStep, profileId: string, updates: Partial<ItemProfile>): ProcessStep => ({
   ...step,
   itemProfiles: sanitizeItemProfiles((step.itemProfiles || [DEFAULT_ITEM_PROFILE]).map((profile) => (
     profile.id === profileId ? { ...profile, ...updates } : profile
+  ))),
+});
+
+const updateStepDemandModifier = (step: ProcessStep, modifierId: string, updates: Partial<DemandModifier>): ProcessStep => ({
+  ...step,
+  demandModifiers: normalizeDemandModifiers((step.demandModifiers || []).map((modifier) => (
+    modifier.id === modifierId ? { ...modifier, ...updates } : modifier
+  ))),
+});
+
+const updateScheduledArrivalWindow = (step: ProcessStep, windowId: string, updates: Partial<ScheduledArrivalWindow>): ProcessStep => ({
+  ...step,
+  arrivalSchedule: sanitizeScheduledArrivalWindows((step.arrivalSchedule || []).map((window) => (
+    window.id === windowId ? { ...window, ...updates } : window
+  ))),
+});
+
+const updateScheduledArrivalEvent = (step: ProcessStep, eventId: string, updates: Partial<ScheduledArrivalEvent>): ProcessStep => ({
+  ...step,
+  arrivalEvents: sanitizeScheduledArrivalEvents((step.arrivalEvents || []).map((event) => (
+    event.id === eventId ? { ...event, ...updates } : event
   ))),
 });
 
@@ -440,14 +532,19 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
     ? normalizeBusinessCalendar({
         enabled: rawStep.businessCalendar.enabled !== false,
         daysOfWeek: Array.isArray(rawStep.businessCalendar.daysOfWeek) ? rawStep.businessCalendar.daysOfWeek.map(day => Number(day)) : DEFAULT_BUSINESS_CALENDAR.daysOfWeek,
-        startHour: toFiniteNumber(rawStep.businessCalendar.startHour, DEFAULT_BUSINESS_CALENDAR.startHour),
-        endHour: toFiniteNumber(rawStep.businessCalendar.endHour, DEFAULT_BUSINESS_CALENDAR.endHour),
+        startHour: toFiniteNumber(rawStep.businessCalendar.startHour, 9),
+        endHour: toFiniteNumber(rawStep.businessCalendar.endHour, 17),
+        workingHours: sanitizeWorkingHours(rawStep.businessCalendar.workingHours),
         nonWorkingArrivalPolicy: typeof rawStep.businessCalendar.nonWorkingArrivalPolicy === 'string' && VALID_NON_WORKING_POLICIES.includes(rawStep.businessCalendar.nonWorkingArrivalPolicy as NonWorkingArrivalPolicy)
           ? rawStep.businessCalendar.nonWorkingArrivalPolicy as NonWorkingArrivalPolicy
           : DEFAULT_BUSINESS_CALENDAR.nonWorkingArrivalPolicy,
       })
     : undefined;
   const rawArrivalInputMode = rawStep.arrivalInputMode;
+  const rawArrivalModel = rawStep.arrivalModel;
+  const arrivalModel = isStart && typeof rawArrivalModel === 'string' && VALID_ARRIVAL_MODELS.includes(rawArrivalModel as ArrivalModel)
+    ? rawArrivalModel as ArrivalModel
+    : 'simple';
   const arrivalInputMode = isStart && typeof rawArrivalInputMode === 'string' && VALID_ARRIVAL_INPUT_MODES.includes(rawArrivalInputMode as ArrivalInputMode)
     ? rawArrivalInputMode as ArrivalInputMode
     : isStart ? 'rate' : undefined;
@@ -478,6 +575,11 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
     ? rawStep.arrivalUnit as DurationUnit
     : isStart ? 's' : undefined;
   const itemProfiles = isStart ? sanitizeItemProfiles(rawStep.itemProfiles) : undefined;
+  const stepDemandModifiers = isStart && Array.isArray(rawStep.demandModifiers)
+    ? normalizeDemandModifiers(rawStep.demandModifiers.filter(isObjectRecord) as Partial<DemandModifier>[])
+    : undefined;
+  const arrivalSchedule = isStart ? sanitizeScheduledArrivalWindows(rawStep.arrivalSchedule) : undefined;
+  const arrivalEvents = isStart ? sanitizeScheduledArrivalEvents(rawStep.arrivalEvents) : undefined;
   const endTimeUnit = isEnd && typeof rawStep.endTimeUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.endTimeUnit)
     ? rawStep.endTimeUnit as DurationUnit
     : isEnd ? 'min' : undefined;
@@ -517,6 +619,7 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
     randomnessMode,
     calendarMode,
     businessCalendar: calendarMode === 'custom' ? stepBusinessCalendar || normalizeBusinessCalendar({ ...DEFAULT_BUSINESS_CALENDAR, enabled: true }) : undefined,
+    arrivalModel: isStart ? arrivalModel : undefined,
     arrivalInputMode,
     arrivalUnit,
     endTimeUnit,
@@ -542,6 +645,9 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
     maxArrivalRate: isStart ? toPositiveNumber(rawStep.maxArrivalRate, 0.8, 0.000000001) : undefined,
     arrivalBatchSize: isStart ? getBatchSize(rawStep.arrivalBatchSize) : undefined,
     arrivalBatchIntervalMs: isStart ? Math.max(0, toFiniteNumber(rawStep.arrivalBatchIntervalMs, 0)) : undefined,
+    demandModifiers: stepDemandModifiers,
+    arrivalSchedule,
+    arrivalEvents,
     itemProfiles,
     failureProbability: Math.max(0, Math.min(1, toFiniteNumber(rawStep.failureProbability, 0))),
     cancellationProbability: Math.max(0, Math.min(1, toFiniteNumber(rawStep.cancellationProbability, 0))),
@@ -586,10 +692,14 @@ const sanitizeConfig = (rawConfig: unknown, migrateDefaultVariance = false): Sim
       sourceProcessingTimes: filteredSourceRules,
       calendarMode: step.calendarMode || 'inherit',
       businessCalendar: step.calendarMode === 'custom' ? normalizeBusinessCalendar(step.businessCalendar || { ...DEFAULT_BUSINESS_CALENDAR, enabled: true }) : undefined,
+      arrivalModel: step.type === 'start' ? step.arrivalModel || 'simple' : undefined,
       minArrivalRate: step.type === 'start' ? Math.min(step.minArrivalRate ?? 0.2, step.maxArrivalRate ?? 0.8) : undefined,
       maxArrivalRate: step.type === 'start' ? Math.max(step.minArrivalRate ?? 0.2, step.maxArrivalRate ?? 0.8) : undefined,
       arrivalBatchSize: step.type === 'start' ? getBatchSize(step.arrivalBatchSize) : undefined,
       arrivalBatchIntervalMs: step.type === 'start' ? Math.max(0, toFiniteNumber(step.arrivalBatchIntervalMs, 0)) : undefined,
+      demandModifiers: step.type === 'start' ? normalizeDemandModifiers(step.demandModifiers) : undefined,
+      arrivalSchedule: step.type === 'start' ? sanitizeScheduledArrivalWindows(step.arrivalSchedule) : undefined,
+      arrivalEvents: step.type === 'start' ? sanitizeScheduledArrivalEvents(step.arrivalEvents) : undefined,
       itemProfiles: step.type === 'start' ? sanitizeItemProfiles(step.itemProfiles) : undefined,
       minProcessingTime: step.type === 'process' ? Math.min(step.minProcessingTime ?? 1000, step.maxProcessingTime ?? 3000) : 0,
       maxProcessingTime: step.type === 'process' ? Math.max(step.minProcessingTime ?? 1000, step.maxProcessingTime ?? 3000) : 0,
@@ -618,8 +728,9 @@ const sanitizeConfig = (rawConfig: unknown, migrateDefaultVariance = false): Sim
       ? normalizeBusinessCalendar({
           enabled: Boolean(rawConfig.businessCalendar.enabled),
           daysOfWeek: Array.isArray(rawConfig.businessCalendar.daysOfWeek) ? rawConfig.businessCalendar.daysOfWeek.map(day => Number(day)) : DEFAULT_BUSINESS_CALENDAR.daysOfWeek,
-          startHour: toFiniteNumber(rawConfig.businessCalendar.startHour, DEFAULT_BUSINESS_CALENDAR.startHour),
-          endHour: toFiniteNumber(rawConfig.businessCalendar.endHour, DEFAULT_BUSINESS_CALENDAR.endHour),
+          startHour: toFiniteNumber(rawConfig.businessCalendar.startHour, 9),
+          endHour: toFiniteNumber(rawConfig.businessCalendar.endHour, 17),
+          workingHours: sanitizeWorkingHours(rawConfig.businessCalendar.workingHours),
           nonWorkingArrivalPolicy: typeof rawConfig.businessCalendar.nonWorkingArrivalPolicy === 'string' && VALID_NON_WORKING_POLICIES.includes(rawConfig.businessCalendar.nonWorkingArrivalPolicy as NonWorkingArrivalPolicy)
             ? rawConfig.businessCalendar.nonWorkingArrivalPolicy as NonWorkingArrivalPolicy
             : DEFAULT_BUSINESS_CALENDAR.nonWorkingArrivalPolicy,
@@ -797,6 +908,7 @@ const App: React.FC = () => {
       type: type,
       name: isStart ? 'Start Point' : isEnd ? 'End Point' : 'New Step',
       randomnessMode: 'fixed',
+      arrivalModel: isStart ? 'simple' : undefined,
       arrivalInputMode: isStart ? 'rate' : undefined,
       arrivalUnit: isStart ? 'h' : undefined,
       endTimeUnit: isEnd ? 'min' : undefined,
@@ -813,6 +925,9 @@ const App: React.FC = () => {
       maxArrivalRate: isStart ? 20 : undefined,
       arrivalBatchSize: isStart ? 1 : undefined,
       arrivalBatchIntervalMs: isStart ? 0 : undefined,
+      demandModifiers: isStart ? [] : undefined,
+      arrivalSchedule: isStart ? [] : undefined,
+      arrivalEvents: isStart ? [] : undefined,
       failureProbability: 0,
       cancellationProbability: 0,
       color: isStart ? '#10b981' : isEnd ? '#ef4444' : '#3b82f6',
@@ -925,6 +1040,72 @@ const App: React.FC = () => {
       if (!editingStep) return;
       const newRules = { ...editingStep.sourceProcessingTimes, [sourceId]: time };
       setEditingStep({ ...editingStep, sourceProcessingTimes: newRules });
+  };
+
+  const addStartDemandModifier = () => {
+    if (!editingStep) return;
+
+    const modifiers = normalizeDemandModifiers(editingStep.demandModifiers);
+    setEditingStep({
+      ...editingStep,
+      demandModifiers: normalizeDemandModifiers([
+        ...modifiers,
+        {
+          id: `modifier-${Date.now()}`,
+          name: `Peak ${modifiers.length + 1}`,
+          enabled: true,
+          multiplier: 2,
+          startHour: 9,
+          endHour: 11,
+        },
+      ]),
+    });
+  };
+
+  const addArrivalWindow = () => {
+    if (!editingStep) return;
+
+    const windows = sanitizeScheduledArrivalWindows(editingStep.arrivalSchedule);
+    const lastWindow = windows[windows.length - 1];
+    const startHour = lastWindow ? Math.min(23.5, lastWindow.endHour) : 9;
+    const endHour = Math.min(24, startHour + 1);
+
+    setEditingStep({
+      ...editingStep,
+      arrivalSchedule: sanitizeScheduledArrivalWindows([
+        ...windows,
+        {
+          id: `window-${Date.now()}`,
+          name: `Window ${windows.length + 1}`,
+          enabled: true,
+          startHour,
+          endHour,
+          quantity: 10,
+          spreadMode: 'spread',
+        },
+      ]),
+    });
+  };
+
+  const addArrivalEvent = () => {
+    if (!editingStep) return;
+
+    const events = sanitizeScheduledArrivalEvents(editingStep.arrivalEvents);
+    setEditingStep({
+      ...editingStep,
+      arrivalEvents: sanitizeScheduledArrivalEvents([
+        ...events,
+        {
+          id: `event-${Date.now()}`,
+          name: `Event ${events.length + 1}`,
+          enabled: true,
+          dayOffset: 0,
+          hour: 9,
+          quantity: 10,
+          repeat: 'none',
+        },
+      ]),
+    });
   };
 
   const handleGenerateScenario = async () => {
@@ -2269,6 +2450,320 @@ const App: React.FC = () => {
                                     ))}
                                   </select>
                                 </div>
+
+                                <div className="mb-4 rounded-xl border border-slate-700 bg-slate-900/60 p-3">
+                                  <div className="mb-2 flex items-center justify-between gap-3">
+                                    <div>
+                                      <label className="block text-xs font-semibold uppercase text-emerald-300">Arrival Model</label>
+                                      <p className="mt-1 text-[11px] text-slate-500">Use a simple flow, a time schedule, or exact event times.</p>
+                                    </div>
+                                    <div className="flex rounded-lg bg-slate-950 p-1 text-xs">
+                                      {[
+                                        { id: 'simple' as ArrivalModel, label: 'Simple' },
+                                        { id: 'schedule' as ArrivalModel, label: 'Schedule' },
+                                        { id: 'events' as ArrivalModel, label: 'Events' },
+                                      ].map((mode) => (
+                                        <button
+                                          key={mode.id}
+                                          onClick={() => setEditingStep({
+                                            ...editingStep,
+                                            arrivalModel: mode.id,
+                                            demandModifiers: editingStep.demandModifiers || [],
+                                            arrivalSchedule: editingStep.arrivalSchedule || [],
+                                            arrivalEvents: editingStep.arrivalEvents || [],
+                                          })}
+                                          className={`rounded px-3 py-1.5 font-semibold transition-colors ${ (editingStep.arrivalModel || 'simple') === mode.id ? 'bg-emerald-500 text-slate-950' : 'text-slate-400 hover:text-slate-200' }`}
+                                        >
+                                          {mode.label}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="mb-4 rounded-xl border border-amber-500/20 bg-amber-500/10 p-3">
+                                  <div className="mb-2 flex items-center justify-between gap-3">
+                                    <div>
+                                      <label className="block text-xs font-semibold uppercase text-amber-200">Demand Peaks</label>
+                                      <p className="mt-1 text-[11px] text-slate-500">These are Start Point local multipliers and stack with the global demand peaks.</p>
+                                    </div>
+                                    <button
+                                      onClick={addStartDemandModifier}
+                                      className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-100 hover:bg-amber-500/20"
+                                    >
+                                      + Add Peak
+                                    </button>
+                                  </div>
+                                  {(editingStep.demandModifiers || []).length === 0 ? (
+                                    <div className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-500">No local peaks yet.</div>
+                                  ) : (
+                                    <div className="space-y-2">
+                                      {normalizeDemandModifiers(editingStep.demandModifiers).map((modifier) => (
+                                        <div key={modifier.id} className="rounded-lg border border-amber-500/20 bg-slate-950/60 p-2.5">
+                                          <div className="mb-2 flex items-center gap-2">
+                                            <input
+                                              type="checkbox"
+                                              checked={modifier.enabled}
+                                              onChange={(e) => setEditingStep(updateStepDemandModifier(editingStep, modifier.id, { enabled: e.target.checked }))}
+                                              className="h-3.5 w-3.5 rounded border-slate-600 bg-slate-900 accent-amber-500"
+                                            />
+                                            <input
+                                              type="text"
+                                              value={modifier.name}
+                                              onChange={(e) => setEditingStep(updateStepDemandModifier(editingStep, modifier.id, { name: e.target.value }))}
+                                              className="min-w-0 flex-1 rounded border border-amber-500/30 bg-slate-900 px-2 py-1 text-xs text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
+                                            />
+                                            <button
+                                              onClick={() => setEditingStep({
+                                                ...editingStep,
+                                                demandModifiers: normalizeDemandModifiers((editingStep.demandModifiers || []).filter((item) => item.id !== modifier.id)),
+                                              })}
+                                              className="rounded border border-rose-500/30 px-2 py-1 text-[10px] text-rose-200 hover:bg-rose-500/10"
+                                            >
+                                              Remove
+                                            </button>
+                                          </div>
+                                          <div className="grid grid-cols-3 gap-2">
+                                            <div>
+                                              <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">Multiplier</label>
+                                              <input
+                                                type="number"
+                                                min="0.01"
+                                                step="0.05"
+                                                value={modifier.multiplier}
+                                                onChange={(e) => setEditingStep(updateStepDemandModifier(editingStep, modifier.id, { multiplier: Number(e.target.value) }))}
+                                                className="w-full rounded border border-amber-500/30 bg-slate-900 px-2 py-1 text-xs text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
+                                              />
+                                            </div>
+                                            <div>
+                                              <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">Start</label>
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                max="23.5"
+                                                step="0.5"
+                                                value={modifier.startHour ?? 0}
+                                                onChange={(e) => setEditingStep(updateStepDemandModifier(editingStep, modifier.id, { startHour: Number(e.target.value) }))}
+                                                className="w-full rounded border border-amber-500/30 bg-slate-900 px-2 py-1 text-xs text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
+                                              />
+                                            </div>
+                                            <div>
+                                              <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">End</label>
+                                              <input
+                                                type="number"
+                                                min="0.5"
+                                                max="24"
+                                                step="0.5"
+                                                value={modifier.endHour ?? 24}
+                                                onChange={(e) => setEditingStep(updateStepDemandModifier(editingStep, modifier.id, { endHour: Number(e.target.value) }))}
+                                                className="w-full rounded border border-amber-500/30 bg-slate-900 px-2 py-1 text-xs text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
+                                              />
+                                            </div>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {(editingStep.arrivalModel || 'simple') === 'schedule' && (
+                                  <div className="mb-4 rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-3">
+                                    <div className="mb-2 flex items-center justify-between gap-3">
+                                      <div>
+                                        <label className="block text-xs font-semibold uppercase text-cyan-200">Scheduled Windows</label>
+                                        <p className="mt-1 text-[11px] text-slate-500">Set quantity per time window. Spread mode distributes items across the window.</p>
+                                      </div>
+                                      <button
+                                        onClick={addArrivalWindow}
+                                        className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/20"
+                                      >
+                                        + Add Window
+                                      </button>
+                                    </div>
+                                    <div className="space-y-2">
+                                      {sanitizeScheduledArrivalWindows(editingStep.arrivalSchedule).length === 0 ? (
+                                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-500">No schedule windows yet.</div>
+                                      ) : (
+                                        sanitizeScheduledArrivalWindows(editingStep.arrivalSchedule).map((window) => (
+                                          <div key={window.id} className="rounded-lg border border-cyan-500/20 bg-slate-950/60 p-2.5">
+                                            <div className="mb-2 flex items-center gap-2">
+                                              <input
+                                                type="checkbox"
+                                                checked={window.enabled}
+                                                onChange={(e) => setEditingStep(updateScheduledArrivalWindow(editingStep, window.id, { enabled: e.target.checked }))}
+                                                className="h-3.5 w-3.5 rounded border-slate-600 bg-slate-900 accent-cyan-500"
+                                              />
+                                              <input
+                                                type="text"
+                                                value={window.name}
+                                                onChange={(e) => setEditingStep(updateScheduledArrivalWindow(editingStep, window.id, { name: e.target.value }))}
+                                                className="min-w-0 flex-1 rounded border border-cyan-500/30 bg-slate-900 px-2 py-1 text-xs text-cyan-100 outline-none focus:ring-1 focus:ring-cyan-500"
+                                              />
+                                              <button
+                                                onClick={() => setEditingStep({
+                                                  ...editingStep,
+                                                  arrivalSchedule: sanitizeScheduledArrivalWindows((editingStep.arrivalSchedule || []).filter((item) => item.id !== window.id)),
+                                                })}
+                                                className="rounded border border-rose-500/30 px-2 py-1 text-[10px] text-rose-200 hover:bg-rose-500/10"
+                                              >
+                                                Remove
+                                              </button>
+                                            </div>
+                                            <div className="grid grid-cols-4 gap-2">
+                                              <div>
+                                                <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-cyan-200">Start</label>
+                                                <input
+                                                  type="number"
+                                                  min="0"
+                                                  max="23.5"
+                                                  step="0.5"
+                                                  value={window.startHour}
+                                                  onChange={(e) => setEditingStep(updateScheduledArrivalWindow(editingStep, window.id, { startHour: Number(e.target.value) }))}
+                                                  className="w-full rounded border border-cyan-500/30 bg-slate-900 px-2 py-1 text-xs text-cyan-100 outline-none focus:ring-1 focus:ring-cyan-500"
+                                                />
+                                              </div>
+                                              <div>
+                                                <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-cyan-200">End</label>
+                                                <input
+                                                  type="number"
+                                                  min="0.5"
+                                                  max="24"
+                                                  step="0.5"
+                                                  value={window.endHour}
+                                                  onChange={(e) => setEditingStep(updateScheduledArrivalWindow(editingStep, window.id, { endHour: Number(e.target.value) }))}
+                                                  className="w-full rounded border border-cyan-500/30 bg-slate-900 px-2 py-1 text-xs text-cyan-100 outline-none focus:ring-1 focus:ring-cyan-500"
+                                                />
+                                              </div>
+                                              <div>
+                                                <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-cyan-200">Qty</label>
+                                                <input
+                                                  type="number"
+                                                  min="1"
+                                                  max="1000"
+                                                  step="1"
+                                                  value={window.quantity}
+                                                  onChange={(e) => setEditingStep(updateScheduledArrivalWindow(editingStep, window.id, { quantity: Number(e.target.value) }))}
+                                                  className="w-full rounded border border-cyan-500/30 bg-slate-900 px-2 py-1 text-xs text-cyan-100 outline-none focus:ring-1 focus:ring-cyan-500"
+                                                />
+                                              </div>
+                                              <div>
+                                                <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-cyan-200">Mode</label>
+                                                <select
+                                                  value={window.spreadMode}
+                                                  onChange={(e) => setEditingStep(updateScheduledArrivalWindow(editingStep, window.id, { spreadMode: e.target.value as ScheduledArrivalSpreadMode }))}
+                                                  className="w-full rounded border border-cyan-500/30 bg-slate-900 px-2 py-1 text-xs text-cyan-100 outline-none focus:ring-1 focus:ring-cyan-500"
+                                                >
+                                                  <option value="spread">Spread</option>
+                                                  <option value="burst">Burst</option>
+                                                </select>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        ))
+                                      )}
+                                    </div>
+                                  </div>
+                                )}
+
+                                {(editingStep.arrivalModel || 'simple') === 'events' && (
+                                  <div className="mb-4 rounded-xl border border-fuchsia-500/20 bg-fuchsia-500/10 p-3">
+                                    <div className="mb-2 flex items-center justify-between gap-3">
+                                      <div>
+                                        <label className="block text-xs font-semibold uppercase text-fuchsia-200">Exact Arrival Events</label>
+                                        <p className="mt-1 text-[11px] text-slate-500">Set exact spawn times. Daily and weekly repeats are supported.</p>
+                                      </div>
+                                      <button
+                                        onClick={addArrivalEvent}
+                                        className="rounded-lg border border-fuchsia-500/40 bg-fuchsia-500/10 px-3 py-1.5 text-xs font-semibold text-fuchsia-100 hover:bg-fuchsia-500/20"
+                                      >
+                                        + Add Event
+                                      </button>
+                                    </div>
+                                    <div className="space-y-2">
+                                      {sanitizeScheduledArrivalEvents(editingStep.arrivalEvents).length === 0 ? (
+                                        <div className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-500">No exact events yet.</div>
+                                      ) : (
+                                        sanitizeScheduledArrivalEvents(editingStep.arrivalEvents).map((event) => (
+                                          <div key={event.id} className="rounded-lg border border-fuchsia-500/20 bg-slate-950/60 p-2.5">
+                                            <div className="mb-2 flex items-center gap-2">
+                                              <input
+                                                type="checkbox"
+                                                checked={event.enabled}
+                                                onChange={(e) => setEditingStep(updateScheduledArrivalEvent(editingStep, event.id, { enabled: e.target.checked }))}
+                                                className="h-3.5 w-3.5 rounded border-slate-600 bg-slate-900 accent-fuchsia-500"
+                                              />
+                                              <input
+                                                type="text"
+                                                value={event.name}
+                                                onChange={(e) => setEditingStep(updateScheduledArrivalEvent(editingStep, event.id, { name: e.target.value }))}
+                                                className="min-w-0 flex-1 rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500"
+                                              />
+                                              <button
+                                                onClick={() => setEditingStep({
+                                                  ...editingStep,
+                                                  arrivalEvents: sanitizeScheduledArrivalEvents((editingStep.arrivalEvents || []).filter((item) => item.id !== event.id)),
+                                                })}
+                                                className="rounded border border-rose-500/30 px-2 py-1 text-[10px] text-rose-200 hover:bg-rose-500/10"
+                                              >
+                                                Remove
+                                              </button>
+                                            </div>
+                                            <div className="grid grid-cols-4 gap-2">
+                                              <div>
+                                                <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Day Offset</label>
+                                                <input
+                                                  type="number"
+                                                  min="0"
+                                                  step="1"
+                                                  value={event.dayOffset}
+                                                  onChange={(e) => setEditingStep(updateScheduledArrivalEvent(editingStep, event.id, { dayOffset: Number(e.target.value) }))}
+                                                  className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500"
+                                                />
+                                              </div>
+                                              <div>
+                                                <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Hour</label>
+                                                <input
+                                                  type="number"
+                                                  min="0"
+                                                  max="23.5"
+                                                  step="0.5"
+                                                  value={event.hour}
+                                                  onChange={(e) => setEditingStep(updateScheduledArrivalEvent(editingStep, event.id, { hour: Number(e.target.value) }))}
+                                                  className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500"
+                                                />
+                                              </div>
+                                              <div>
+                                                <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Qty</label>
+                                                <input
+                                                  type="number"
+                                                  min="1"
+                                                  max="1000"
+                                                  step="1"
+                                                  value={event.quantity}
+                                                  onChange={(e) => setEditingStep(updateScheduledArrivalEvent(editingStep, event.id, { quantity: Number(e.target.value) }))}
+                                                  className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500"
+                                                />
+                                              </div>
+                                              <div>
+                                                <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-fuchsia-200">Repeat</label>
+                                                <select
+                                                  value={event.repeat}
+                                                  onChange={(e) => setEditingStep(updateScheduledArrivalEvent(editingStep, event.id, { repeat: e.target.value as ScheduledArrivalRepeat }))}
+                                                  className="w-full rounded border border-fuchsia-500/30 bg-slate-900 px-2 py-1 text-xs text-fuchsia-100 outline-none focus:ring-1 focus:ring-fuchsia-500"
+                                                >
+                                                  <option value="none">None</option>
+                                                  <option value="daily">Daily</option>
+                                                  <option value="weekly">Weekly</option>
+                                                </select>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        ))
+                                      )}
+                                    </div>
+                                  </div>
+                                )}
+
                                 <div className="mb-4">
                                   <label className="block text-xs font-semibold text-emerald-400 uppercase mb-2">Batch Size</label>
                                   <div className="grid grid-cols-[160px_1fr] gap-3 items-center">
