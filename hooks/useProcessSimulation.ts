@@ -264,6 +264,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
   
   // Track the absolute simulated timestamp when the next item should spawn for each start node
   const nextSpawnTimeRef = useRef<Record<string, number>>({});
+  const delayedScheduledArrivalRef = useRef<Record<string, ArrivalEvent | undefined>>({});
 
   // Persistent Counters for Steps (Map<StepId, Counts>)
   // We need this because 'stepStats' state is regenerated every frame
@@ -290,6 +291,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     setStepStats([]);
     lastUiUpdateRef.current = 0;
     nextSpawnTimeRef.current = {};
+    delayedScheduledArrivalRef.current = {};
     stepCountersRef.current = {}; 
     config.steps.forEach(s => {
       stepCountersRef.current[s.id] = { processed: 0, failed: 0, cancelled: 0, totalCompletionTime: 0, totalProcessingTime: 0, totalWaitTime: 0, totalStarted: 0 };
@@ -760,7 +762,8 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
           
             while (nextSpawnAt <= simulationTimeRef.current && spawnedThisTick < MAX_SPAWNS_PER_START_PER_TICK) {
               const arrivalModel = startNode.arrivalModel || 'simple';
-              const scheduledArrival = arrivalModel === 'simple' ? null : calculateNextScheduledArrival(startNode, nextSpawnAt);
+              const delayedScheduledArrival = delayedScheduledArrivalRef.current[startNode.id];
+              const scheduledArrival = arrivalModel === 'simple' ? null : delayedScheduledArrival || calculateNextScheduledArrival(startNode, nextSpawnAt);
               if (arrivalModel !== 'simple' && !scheduledArrival) {
                 nextSpawnAt = simulationTimeRef.current + TIME_UNIT_TO_MS.day;
                 break;
@@ -783,7 +786,14 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
               const isStartWorking = isWorkingTime(startCalendar, config.calendarStartIso, nextSpawnAt);
 
               if (!isStartWorking && startCalendar.nonWorkingArrivalPolicy === 'delay') {
-                nextSpawnAt = getNextWorkingSimulationTime(startCalendar, config.calendarStartIso, nextSpawnAt);
+                const delayedSpawnAt = getNextWorkingSimulationTime(startCalendar, config.calendarStartIso, nextSpawnAt);
+                if (arrivalModel !== 'simple') {
+                  delayedScheduledArrivalRef.current[startNode.id] = {
+                    time: delayedSpawnAt,
+                    quantity: batchSize,
+                  };
+                }
+                nextSpawnAt = delayedSpawnAt;
                 if (nextSpawnAt > simulationTimeRef.current) {
                   break;
                 }
@@ -801,6 +811,10 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
                 continue;
               }
 
+              if (arrivalModel !== 'simple') {
+                delayedScheduledArrivalRef.current[startNode.id] = undefined;
+              }
+
               for (let batchIndex = 0; batchIndex < batchSize; batchIndex++) {
                 // SPAWN
                 // Determine immediate target independently for each item
@@ -813,7 +827,6 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
                   firstTargetId = 'finished';
                 }
 
-                if (firstTargetId !== 'finished') {
                   // Calculate spawn time based on simulation mode and batch interval
                   let itemSpawnTime: number;
                   const batchInterval = typeof startNode.arrivalBatchIntervalMs === 'number' && Number.isFinite(startNode.arrivalBatchIntervalMs)
@@ -875,7 +888,6 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
                   if (stepCountersRef.current[startNode.id]) {
                     stepCountersRef.current[startNode.id].processed++;
                   }
-                }
               }
 
               nextSpawnAt = arrivalModel === 'simple'

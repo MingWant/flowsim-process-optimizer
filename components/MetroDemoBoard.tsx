@@ -237,6 +237,64 @@ const getMetroPath = (points: Array<{ x: number; y: number }>) => {
   }, '');
 };
 
+const getMetroRoutePoints = (from: StationLayout, to: StationLayout) => {
+  const fromCenterY = from.y + CARD_HEIGHT / 2;
+  const toCenterY = to.y + CARD_HEIGHT / 2;
+  const fromCenterX = from.x + CARD_WIDTH / 2;
+  const toCenterX = to.x + CARD_WIDTH / 2;
+  const fromRight = from.x + CARD_WIDTH;
+  const toLeft = to.x;
+  const toRight = to.x + CARD_WIDTH;
+  const forward = toLeft >= fromRight;
+  const laneX = forward
+    ? fromRight + Math.max(32, (toLeft - fromRight) / 2)
+    : Math.max(from.x, to.x) + CARD_WIDTH + 34;
+
+  if (from.row === to.row) {
+    if (from.row > 0) {
+      const branchLaneY = from.y - Math.max(14, (ROW_GAP - CARD_HEIGHT) / 2);
+
+      return [
+        { x: fromCenterX, y: from.y },
+        { x: fromCenterX, y: branchLaneY },
+        { x: toCenterX, y: branchLaneY },
+        { x: toCenterX, y: to.y },
+      ];
+    }
+
+    return forward
+      ? [
+          { x: fromRight, y: fromCenterY },
+          { x: laneX, y: fromCenterY },
+          { x: toLeft, y: toCenterY },
+        ]
+      : [
+          { x: fromRight, y: fromCenterY },
+          { x: laneX, y: fromCenterY },
+          { x: laneX, y: toCenterY },
+          { x: toRight, y: toCenterY },
+        ];
+  }
+
+  const branchLaneY = toCenterY > fromCenterY
+    ? (from.y + CARD_HEIGHT + to.y) / 2
+    : (to.y + CARD_HEIGHT + from.y) / 2;
+
+  return toCenterY > fromCenterY
+    ? [
+        { x: fromCenterX, y: from.y + CARD_HEIGHT },
+        { x: fromCenterX, y: branchLaneY },
+        { x: toCenterX, y: branchLaneY },
+        { x: toCenterX, y: to.y },
+      ]
+    : [
+        { x: fromCenterX, y: from.y },
+        { x: fromCenterX, y: branchLaneY },
+        { x: toCenterX, y: branchLaneY },
+        { x: toCenterX, y: to.y + CARD_HEIGHT },
+      ];
+};
+
 const getPointOnPolyline = (progress: number, points: Array<{ x: number; y: number }>) => {
   if (points.length === 0) {
     return { x: 0, y: 0 };
@@ -502,27 +560,7 @@ export const MetroDemoBoard: React.FC<Props> = ({ steps, stepStats, items, simul
                 return null;
               }
 
-              const fromCenterY = from.y + CARD_HEIGHT / 2;
-              const toCenterY = to.y + CARD_HEIGHT / 2;
-              const fromRight = from.x + CARD_WIDTH;
-              const toLeft = to.x;
-              const forward = toLeft >= fromRight;
-              const laneX = forward
-                ? fromRight + Math.max(32, (toLeft - fromRight) / 2)
-                : Math.max(from.x, to.x) + CARD_WIDTH + 34;
-              const points = forward
-                ? [
-                    { x: fromRight, y: fromCenterY },
-                    { x: laneX, y: fromCenterY },
-                    { x: laneX, y: toCenterY },
-                    { x: toLeft, y: toCenterY },
-                  ]
-                : [
-                    { x: fromRight, y: fromCenterY },
-                    { x: laneX, y: fromCenterY },
-                    { x: laneX, y: toCenterY },
-                    { x: to.x + CARD_WIDTH, y: toCenterY },
-                  ];
+              const points = getMetroRoutePoints(from, to);
 
               return {
                 id: `${step.id}-${connection.targetId}`,
