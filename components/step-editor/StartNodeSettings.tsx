@@ -383,7 +383,7 @@ const ExactArrivalEventsSection: React.FC<StartSectionProps & { addArrivalEvent:
       <div className="mb-2 flex items-center justify-between gap-3">
         <div>
           <label className="block text-xs font-semibold uppercase text-fuchsia-200">Exact Arrival Events</label>
-          <p className="mt-1 text-[11px] text-slate-500">Set exact spawn times. Daily and weekly repeats are supported.</p>
+          <p className="mt-1 text-[11px] text-slate-500">Set exact spawn times with optional calendar repeats.</p>
         </div>
         <button
           onClick={addArrivalEvent}
@@ -467,6 +467,8 @@ const ExactArrivalEventsSection: React.FC<StartSectionProps & { addArrivalEvent:
                     <option value="none">None</option>
                     <option value="daily">Daily</option>
                     <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="yearly">Yearly</option>
                   </select>
                 </div>
               </div>

@@ -11,7 +11,7 @@ export type TeamAllocationMode = 'auto' | 'explicit';
 export type NonWorkingArrivalPolicy = 'queue' | 'delay' | 'reject';
 export type ArrivalModel = 'simple' | 'schedule' | 'events';
 export type ScheduledArrivalSpreadMode = 'spread' | 'burst';
-export type ScheduledArrivalRepeat = 'none' | 'daily' | 'weekly';
+export type ScheduledArrivalRepeat = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly';
 
 export interface WorkingHourSegment {
   start: number; // 0-24, local hour (e.g., 9 = 9:00, 9.5 = 9:30)

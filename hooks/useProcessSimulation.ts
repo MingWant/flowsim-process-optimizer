@@ -28,6 +28,7 @@ const MAX_TRANSMITTING_ITEMS_FOR_UI = 420;
 const MAX_PROCESSING_ITEMS_FOR_UI = 320;
 const MAX_QUEUED_ITEMS_FOR_UI = 120;
 const MAX_TERMINAL_ITEMS_FOR_UI = 60;
+const DEFAULT_CALENDAR_START_ISO = '2026-01-05T00:00:00';
 
 const BUSINESS_TRANSMISSION_SIM_MS = 0;
 
@@ -381,6 +382,55 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     step.calendarMode === 'custom' ? step.businessCalendar : config.businessCalendar
   );
 
+  const getCalendarStartMs = () => {
+    const parsed = config.calendarStartIso ? Date.parse(config.calendarStartIso) : Date.parse(DEFAULT_CALENDAR_START_ISO);
+    return Number.isFinite(parsed) ? parsed : Date.parse(DEFAULT_CALENDAR_START_ISO);
+  };
+
+  const getDaysInMonth = (year: number, monthIndex: number) => new Date(year, monthIndex + 1, 0).getDate();
+
+  const buildCalendarRepeatDate = (baseDate: Date, repeat: 'monthly' | 'yearly', occurrencesToSkip: number) => {
+    const baseYear = baseDate.getFullYear();
+    const baseMonth = baseDate.getMonth();
+    const targetYear = repeat === 'yearly'
+      ? baseYear + occurrencesToSkip
+      : baseYear + Math.floor((baseMonth + occurrencesToSkip) / 12);
+    const targetMonth = repeat === 'yearly'
+      ? baseMonth
+      : (baseMonth + occurrencesToSkip) % 12;
+    const targetDay = Math.min(baseDate.getDate(), getDaysInMonth(targetYear, targetMonth));
+
+    return new Date(
+      targetYear,
+      targetMonth,
+      targetDay,
+      baseDate.getHours(),
+      baseDate.getMinutes(),
+      baseDate.getSeconds(),
+      baseDate.getMilliseconds(),
+    );
+  };
+
+  const getCalendarRepeatedEventTime = (baseTime: number, repeat: 'monthly' | 'yearly', cursorMs: number): number => {
+    const calendarStartMs = getCalendarStartMs();
+    const baseDate = getBusinessDate(config.calendarStartIso, baseTime);
+    const cursorDate = getBusinessDate(config.calendarStartIso, cursorMs);
+    let occurrencesToSkip = repeat === 'yearly'
+      ? cursorDate.getFullYear() - baseDate.getFullYear()
+      : (cursorDate.getFullYear() - baseDate.getFullYear()) * 12 + cursorDate.getMonth() - baseDate.getMonth();
+
+    occurrencesToSkip = Math.max(0, occurrencesToSkip);
+    let candidateDate = buildCalendarRepeatDate(baseDate, repeat, occurrencesToSkip);
+    let candidateMs = candidateDate.getTime() - calendarStartMs;
+
+    if (candidateMs < cursorMs) {
+      candidateDate = buildCalendarRepeatDate(baseDate, repeat, occurrencesToSkip + 1);
+      candidateMs = candidateDate.getTime() - calendarStartMs;
+    }
+
+    return Math.max(0, candidateMs);
+  };
+
   const getEffectiveDemandMultiplier = (step: ProcessStep, eventSimulationMs: number): number => {
     const globalMultiplier = getDemandMultiplier(config.demandModifiers, config.calendarStartIso, eventSimulationMs);
     const stepMultiplier = getDemandMultiplier(step.demandModifiers, config.calendarStartIso, eventSimulationMs);
@@ -469,6 +519,10 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     const baseTime = (event.dayOffset * TIME_UNIT_TO_MS.day) + (event.hour * TIME_UNIT_TO_MS.h);
     if (event.repeat === 'none') {
       return baseTime >= cursorMs ? baseTime : null;
+    }
+
+    if (event.repeat === 'monthly' || event.repeat === 'yearly') {
+      return getCalendarRepeatedEventTime(baseTime, event.repeat, cursorMs);
     }
 
     const periodMs = event.repeat === 'weekly' ? TIME_UNIT_TO_MS.week : TIME_UNIT_TO_MS.day;

@@ -36,7 +36,7 @@ const VALID_RESOURCE_EXECUTION_MODES: ResourceExecutionMode[] = ['single', 'coll
 const VALID_TEAM_ALLOCATION_MODES: TeamAllocationMode[] = ['auto', 'explicit'];
 export const VALID_NON_WORKING_POLICIES: NonWorkingArrivalPolicy[] = ['queue', 'delay', 'reject'];
 const VALID_SCHEDULED_SPREAD_MODES: ScheduledArrivalSpreadMode[] = ['spread', 'burst'];
-const VALID_SCHEDULED_REPEATS: ScheduledArrivalRepeat[] = ['none', 'daily', 'weekly'];
+const VALID_SCHEDULED_REPEATS: ScheduledArrivalRepeat[] = ['none', 'daily', 'weekly', 'monthly', 'yearly'];
 export const MAX_SCHEDULED_ARRIVAL_QUANTITY = 50000;
 const DEFAULT_ZERO_VARIANCE_STEP_IDS = new Set(['step-1', 'step-2', 'step-3', 'step-4']);
 
