@@ -17,6 +17,8 @@ const TIME_UNIT_TO_MS = {
 
 const MIN_ARRIVAL_RATE = 0.000000001;
 const MIN_PROCESSING_DURATION_MS = 1;
+const MAX_SCHEDULED_ARRIVAL_QUANTITY = 50000;
+const MAX_SCHEDULED_SPREAD_EVENTS = 5000;
 const MAX_SPAWNS_PER_START_PER_TICK = 1000;
 const MAX_BUSINESS_EVENTS_PER_TICK = 5000;
 const MAX_SAFE_DURATION_MS = Number.MAX_SAFE_INTEGER / 2; // Safety margin for calculations
@@ -385,6 +387,10 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     return Math.max(0.01, globalMultiplier * stepMultiplier);
   };
 
+  const getScheduledArrivalQuantity = (step: ProcessStep, baseQuantity: number, eventSimulationMs: number): number => (
+    Math.max(1, Math.min(MAX_SCHEDULED_ARRIVAL_QUANTITY, Math.round(baseQuantity * getEffectiveDemandMultiplier(step, eventSimulationMs))))
+  );
+
   const dateMatchesScheduledWindow = (window: ScheduledArrivalWindow, simulationMs: number): boolean => {
     if (!window.enabled || window.quantity <= 0) {
       return false;
@@ -430,9 +436,9 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         continue;
       }
 
-      const quantity = Math.max(1, Math.round(window.quantity * getEffectiveDemandMultiplier(step, dayStartMs + window.startHour * TIME_UNIT_TO_MS.h)));
       const startMs = dayStartMs + window.startHour * TIME_UNIT_TO_MS.h;
       const endMs = dayStartMs + window.endHour * TIME_UNIT_TO_MS.h;
+      const quantity = getScheduledArrivalQuantity(step, window.quantity, startMs);
       const windowDuration = Math.max(0, endMs - startMs);
 
       if (window.spreadMode === 'burst' || quantity <= 1 || windowDuration <= 0) {
@@ -440,9 +446,15 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         continue;
       }
 
-      const interval = windowDuration / quantity;
-      for (let index = 0; index < quantity; index++) {
-        events.push({ time: startMs + index * interval, quantity: 1 });
+      const spreadEventCount = Math.min(quantity, MAX_SCHEDULED_SPREAD_EVENTS);
+      const interval = windowDuration / spreadEventCount;
+      const baseQuantityPerEvent = Math.floor(quantity / spreadEventCount);
+      const remainder = quantity % spreadEventCount;
+      for (let index = 0; index < spreadEventCount; index++) {
+        events.push({
+          time: startMs + index * interval,
+          quantity: baseQuantityPerEvent + (index < remainder ? 1 : 0),
+        });
       }
     }
 
@@ -480,7 +492,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         .filter((event) => Math.abs(event.time - firstTime) < MIN_PROCESSING_DURATION_MS)
         .reduce((sum, event) => sum + event.quantity, 0);
 
-      return { time: firstTime, quantity: Math.max(1, Math.min(1000, Math.round(quantity))) };
+      return { time: firstTime, quantity: Math.max(1, Math.min(MAX_SCHEDULED_ARRIVAL_QUANTITY, Math.round(quantity))) };
     };
 
     const arrivalModel = step.arrivalModel || 'simple';
@@ -507,7 +519,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
 
           return {
             time,
-            quantity: Math.max(1, Math.round(event.quantity * getEffectiveDemandMultiplier(step, time))),
+            quantity: getScheduledArrivalQuantity(step, event.quantity, time),
           };
         })
         .filter((event): event is ArrivalEvent => event !== null)
@@ -517,6 +529,31 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     }
 
     return null;
+  };
+
+  const collectDelayedScheduledArrival = (step: ProcessStep, cursorMs: number, delayedSpawnAt: number, startCalendar: ReturnType<typeof normalizeBusinessCalendar>): ArrivalEvent => {
+    let searchCursorMs = cursorMs;
+    let quantity = 0;
+
+    for (let guard = 0; guard < MAX_BUSINESS_EVENTS_PER_TICK; guard++) {
+      const arrival = calculateNextScheduledArrival(step, searchCursorMs);
+      if (!arrival || arrival.time >= delayedSpawnAt || isWorkingTime(startCalendar, config.calendarStartIso, arrival.time)) {
+        break;
+      }
+
+      quantity += arrival.quantity;
+      if (quantity >= MAX_SCHEDULED_ARRIVAL_QUANTITY) {
+        quantity = MAX_SCHEDULED_ARRIVAL_QUANTITY;
+        break;
+      }
+
+      searchCursorMs = arrival.time + MIN_PROCESSING_DURATION_MS;
+    }
+
+    return {
+      time: delayedSpawnAt,
+      quantity: Math.max(1, Math.min(MAX_SCHEDULED_ARRIVAL_QUANTITY, Math.round(quantity))),
+    };
   };
 
   const calculateNextSpawnDelay = (step: ProcessStep, eventSimulationMs = simulationTimeRef.current): number => {
@@ -778,9 +815,9 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
                 nextSpawnAt = scheduledArrival.time;
               }
 
-              const batchSize = arrivalModel === 'simple'
+              let batchSize = arrivalModel === 'simple'
                 ? getArrivalBatchSize(startNode)
-                : Math.max(1, Math.min(1000, Math.round(scheduledArrival?.quantity ?? 1)));
+                : Math.max(1, Math.min(MAX_SCHEDULED_ARRIVAL_QUANTITY, Math.round(scheduledArrival?.quantity ?? 1)));
               const simulationMode = config.simulationMode || 'realistic';
               const startCalendar = getEffectiveBusinessCalendar(startNode);
               const isStartWorking = isWorkingTime(startCalendar, config.calendarStartIso, nextSpawnAt);
@@ -788,10 +825,9 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
               if (!isStartWorking && startCalendar.nonWorkingArrivalPolicy === 'delay') {
                 const delayedSpawnAt = getNextWorkingSimulationTime(startCalendar, config.calendarStartIso, nextSpawnAt);
                 if (arrivalModel !== 'simple') {
-                  delayedScheduledArrivalRef.current[startNode.id] = {
-                    time: delayedSpawnAt,
-                    quantity: batchSize,
-                  };
+                  const delayedArrival = collectDelayedScheduledArrival(startNode, nextSpawnAt, delayedSpawnAt, startCalendar);
+                  delayedScheduledArrivalRef.current[startNode.id] = delayedArrival;
+                  batchSize = delayedArrival.quantity;
                 }
                 nextSpawnAt = delayedSpawnAt;
                 if (nextSpawnAt > simulationTimeRef.current) {

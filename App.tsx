@@ -128,6 +128,7 @@ const VALID_TEAM_ALLOCATION_MODES: TeamAllocationMode[] = ['auto', 'explicit'];
 const VALID_NON_WORKING_POLICIES: NonWorkingArrivalPolicy[] = ['queue', 'delay', 'reject'];
 const VALID_SCHEDULED_SPREAD_MODES: ScheduledArrivalSpreadMode[] = ['spread', 'burst'];
 const VALID_SCHEDULED_REPEATS: ScheduledArrivalRepeat[] = ['none', 'daily', 'weekly'];
+const MAX_SCHEDULED_ARRIVAL_QUANTITY = 50000;
 const DEFAULT_ZERO_VARIANCE_STEP_IDS = new Set(['step-1', 'step-2', 'step-3', 'step-4']);
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> => (
@@ -291,7 +292,7 @@ const sanitizeScheduledArrivalWindows = (value: unknown): ScheduledArrivalWindow
         enabled: window.enabled !== false,
         startHour,
         endHour,
-        quantity: Math.max(0, Math.min(1000, Math.round(toFiniteNumber(window.quantity, 10)))),
+        quantity: Math.max(0, Math.min(MAX_SCHEDULED_ARRIVAL_QUANTITY, Math.round(toFiniteNumber(window.quantity, 10)))),
         spreadMode: typeof window.spreadMode === 'string' && VALID_SCHEDULED_SPREAD_MODES.includes(window.spreadMode as ScheduledArrivalSpreadMode)
           ? window.spreadMode as ScheduledArrivalSpreadMode
           : 'spread',
@@ -321,7 +322,7 @@ const sanitizeScheduledArrivalEvents = (value: unknown): ScheduledArrivalEvent[]
       enabled: event.enabled !== false,
       dayOffset: Math.max(0, Math.round(toFiniteNumber(event.dayOffset, 0))),
       hour: Math.max(0, Math.min(23.99, toFiniteNumber(event.hour, 9))),
-      quantity: Math.max(0, Math.min(1000, Math.round(toFiniteNumber(event.quantity, 10)))),
+      quantity: Math.max(0, Math.min(MAX_SCHEDULED_ARRIVAL_QUANTITY, Math.round(toFiniteNumber(event.quantity, 10)))),
       repeat: typeof event.repeat === 'string' && VALID_SCHEDULED_REPEATS.includes(event.repeat as ScheduledArrivalRepeat)
         ? event.repeat as ScheduledArrivalRepeat
         : 'none',
@@ -2639,7 +2640,7 @@ const App: React.FC = () => {
                                                 <input
                                                   type="number"
                                                   min="1"
-                                                  max="1000"
+                                                  max={MAX_SCHEDULED_ARRIVAL_QUANTITY}
                                                   step="1"
                                                   value={window.quantity}
                                                   onChange={(e) => setEditingStep(updateScheduledArrivalWindow(editingStep, window.id, { quantity: Number(e.target.value) }))}
@@ -2737,7 +2738,7 @@ const App: React.FC = () => {
                                                 <input
                                                   type="number"
                                                   min="1"
-                                                  max="1000"
+                                                  max={MAX_SCHEDULED_ARRIVAL_QUANTITY}
                                                   step="1"
                                                   value={event.quantity}
                                                   onChange={(e) => setEditingStep(updateScheduledArrivalEvent(editingStep, event.id, { quantity: Number(e.target.value) }))}
