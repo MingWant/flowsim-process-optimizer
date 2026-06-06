@@ -2,6 +2,7 @@ import { BusinessCalendar, DemandModifier, WorkingHourSegment } from '../types';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+const DEFAULT_CALENDAR_START_ISO = '2026-01-05T00:00:00';
 
 export const DEFAULT_BUSINESS_CALENDAR: BusinessCalendar = {
   enabled: false,
@@ -72,6 +73,17 @@ const getDateOnlyTime = (value: string, endOfDay = false) => {
   return Number.isFinite(time) ? time : undefined;
 };
 
+const getCalendarStartMs = (calendarStartIso: string | undefined) => {
+  const parsed = calendarStartIso ? Date.parse(calendarStartIso) : Date.parse(DEFAULT_CALENDAR_START_ISO);
+  return Number.isFinite(parsed) ? parsed : Date.parse(DEFAULT_CALENDAR_START_ISO);
+};
+
+const getStartOfDayMs = (date: Date) => {
+  const startOfDay = new Date(date);
+  startOfDay.setHours(0, 0, 0, 0);
+  return startOfDay.getTime();
+};
+
 export const normalizeBusinessCalendar = (calendar?: Partial<BusinessCalendar>): BusinessCalendar => {
   const daysOfWeek = Array.isArray(calendar?.daysOfWeek) && calendar.daysOfWeek.length > 0
     ? Array.from(new Set(calendar.daysOfWeek.map(day => Math.round(day)).filter(day => day >= 0 && day <= 6)))
@@ -88,9 +100,7 @@ export const normalizeBusinessCalendar = (calendar?: Partial<BusinessCalendar>):
 };
 
 export const getBusinessDate = (calendarStartIso: string | undefined, simulationMs: number) => {
-  const startMs = calendarStartIso ? Date.parse(calendarStartIso) : Date.parse('2026-01-05T00:00:00');
-  const safeStartMs = Number.isFinite(startMs) ? startMs : Date.parse('2026-01-05T00:00:00');
-  return new Date(safeStartMs + Math.max(0, simulationMs));
+  return new Date(getCalendarStartMs(calendarStartIso) + Math.max(0, simulationMs));
 };
 
 export const isWorkingTime = (calendar: BusinessCalendar | undefined, calendarStartIso: string | undefined, simulationMs: number) => {
@@ -107,6 +117,8 @@ export const isWorkingTime = (calendar: BusinessCalendar | undefined, calendarSt
   const hour = date.getHours() + (date.getMinutes() / 60) + (date.getSeconds() / 3600) + (date.getMilliseconds() / HOUR_MS);
 
   // Check if current hour falls within any working hour segment
+  // Note: segment.end is exclusive (e.g., [9, 17) means 9:00:00.000 to 16:59:59.999)
+  // This ensures consistency with addWorkingDuration and getWorkingDurationBetween
   return normalized.workingHours.some(segment => hour >= segment.start && hour < segment.end);
 };
 
@@ -116,8 +128,7 @@ export const getNextWorkingSimulationTime = (calendar: BusinessCalendar | undefi
     return simulationMs;
   }
 
-  const startMs = calendarStartIso ? Date.parse(calendarStartIso) : Date.parse('2026-01-05T00:00:00');
-  const safeStartMs = Number.isFinite(startMs) ? startMs : Date.parse('2026-01-05T00:00:00');
+  const safeStartMs = getCalendarStartMs(calendarStartIso);
   let candidateDate = new Date(safeStartMs + Math.max(0, simulationMs));
 
   for (let guard = 0; guard < 14; guard++) {
@@ -134,6 +145,7 @@ export const getNextWorkingSimulationTime = (calendar: BusinessCalendar | undefi
         const workStart = startOfDay.getTime() + segment.start * HOUR_MS;
         const workEnd = startOfDay.getTime() + segment.end * HOUR_MS;
 
+        // Use <= to handle the boundary case: if candidateMs === workEnd, we've passed this segment
         if (candidateMs < workEnd) {
           const nextMs = Math.max(candidateMs, workStart);
           return Math.max(simulationMs, nextMs - safeStartMs);
@@ -148,44 +160,114 @@ export const getNextWorkingSimulationTime = (calendar: BusinessCalendar | undefi
   return simulationMs + DAY_MS;
 };
 
-export const getWorkingDurationBetween = (calendar: BusinessCalendar | undefined, calendarStartIso: string | undefined, startSimulationMs: number, endSimulationMs: number) => {
-  const start = Math.max(0, Math.min(startSimulationMs, endSimulationMs));
-  const end = Math.max(0, Math.max(startSimulationMs, endSimulationMs));
-  if (end <= start) {
-    return 0;
-  }
-
+export const addWorkingDuration = (
+  calendar: BusinessCalendar | undefined,
+  calendarStartIso: string | undefined,
+  simulationMs: number,
+  durationMs: number
+) => {
   const normalized = normalizeBusinessCalendar(calendar);
+  const safeDuration = Math.max(0, Number.isFinite(durationMs) ? durationMs : 0);
+  const safeSimulationMs = Math.max(0, simulationMs);
+
   if (!normalized.enabled) {
-    return end - start;
+    return safeSimulationMs + safeDuration;
   }
 
-  const startMs = calendarStartIso ? Date.parse(calendarStartIso) : Date.parse('2026-01-05T00:00:00');
-  const safeStartMs = Number.isFinite(startMs) ? startMs : Date.parse('2026-01-05T00:00:00');
-  const absoluteStartMs = safeStartMs + start;
-  const absoluteEndMs = safeStartMs + end;
-  let cursorDate = new Date(absoluteStartMs);
-  cursorDate.setHours(0, 0, 0, 0);
-  let workingDuration = 0;
+  if (safeDuration === 0) {
+    return getNextWorkingSimulationTime(normalized, calendarStartIso, safeSimulationMs);
+  }
 
-  while (cursorDate.getTime() <= absoluteEndMs) {
+  const safeStartMs = getCalendarStartMs(calendarStartIso);
+  let cursorMs = safeStartMs + safeSimulationMs;
+  let remainingMs = safeDuration;
+
+  for (let guard = 0; guard < 100000 && remainingMs > 0; guard++) {
+    const cursorDate = new Date(cursorMs);
+    const startOfDayMs = getStartOfDayMs(cursorDate);
+
     if (normalized.daysOfWeek.includes(cursorDate.getDay())) {
-      const dayStartMs = cursorDate.getTime();
       for (const segment of normalized.workingHours) {
-        const segmentStartMs = dayStartMs + segment.start * HOUR_MS;
-        const segmentEndMs = dayStartMs + segment.end * HOUR_MS;
-        const overlapStart = Math.max(absoluteStartMs, segmentStartMs);
-        const overlapEnd = Math.min(absoluteEndMs, segmentEndMs);
-        if (overlapEnd > overlapStart) {
-          workingDuration += overlapEnd - overlapStart;
+        const windowStartMs = startOfDayMs + segment.start * HOUR_MS;
+        const windowEndMs = startOfDayMs + segment.end * HOUR_MS;
+
+        // Skip if cursor is already past this window
+        if (cursorMs >= windowEndMs) {
+          continue;
+        }
+
+        const effectiveStartMs = Math.max(cursorMs, windowStartMs);
+
+        // Double-check: if effectiveStart is at or past the window end, skip
+        // This handles the edge case where cursorMs === windowEndMs
+        if (effectiveStartMs >= windowEndMs) {
+          continue;
+        }
+
+        const availableMs = windowEndMs - effectiveStartMs;
+        if (remainingMs <= availableMs) {
+          // Return the exact moment when the duration is exhausted
+          return effectiveStartMs + remainingMs - safeStartMs;
+        }
+
+        // Consume this window and move to the end of it
+        remainingMs -= availableMs;
+        cursorMs = windowEndMs;
+      }
+    }
+
+    // Move to the start of the next day
+    cursorMs = startOfDayMs + DAY_MS;
+  }
+
+  // Fallback: if we've exceeded the guard limit, return a fallback value
+  return safeSimulationMs + safeDuration;
+};
+
+export const getWorkingDurationBetween = (
+  calendar: BusinessCalendar | undefined,
+  calendarStartIso: string | undefined,
+  fromSimulationMs: number,
+  toSimulationMs: number
+) => {
+  const normalized = normalizeBusinessCalendar(calendar);
+  const fromMs = Math.max(0, fromSimulationMs);
+  const toMs = Math.max(fromMs, toSimulationMs);
+
+  if (!normalized.enabled) {
+    return toMs - fromMs;
+  }
+
+  const safeStartMs = getCalendarStartMs(calendarStartIso);
+  const endMs = safeStartMs + toMs;
+  let cursorMs = safeStartMs + fromMs;
+  let workingMs = 0;
+
+  for (let guard = 0; guard < 100000 && cursorMs < endMs; guard++) {
+    const cursorDate = new Date(cursorMs);
+    const startOfDayMs = getStartOfDayMs(cursorDate);
+    const nextDayMs = startOfDayMs + DAY_MS;
+
+    if (normalized.daysOfWeek.includes(cursorDate.getDay())) {
+      for (const segment of normalized.workingHours) {
+        const windowStartMs = startOfDayMs + segment.start * HOUR_MS;
+        const windowEndMs = startOfDayMs + segment.end * HOUR_MS;
+
+        // Calculate overlap between [cursorMs, endMs) and [windowStartMs, windowEndMs)
+        // Both intervals use exclusive end boundaries for consistency
+        const overlapStartMs = Math.max(cursorMs, windowStartMs);
+        const overlapEndMs = Math.min(endMs, windowEndMs);
+
+        if (overlapEndMs > overlapStartMs) {
+          workingMs += overlapEndMs - overlapStartMs;
         }
       }
     }
 
-    cursorDate = new Date(cursorDate.getTime() + DAY_MS);
+    cursorMs = Math.min(nextDayMs, endMs);
   }
 
-  return Math.max(0, workingDuration);
+  return workingMs;
 };
 
 export const normalizeDemandModifiers = (modifiers: Partial<DemandModifier>[] | undefined): DemandModifier[] => {

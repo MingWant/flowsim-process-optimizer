@@ -7,6 +7,7 @@ import type {
   ProcessStep,
   SimulationConfig,
   SimulationStats,
+  WaitTimeCalculationMode,
 } from '../types';
 import { CUSTOM_CLOCK_VALUE, TIME_COMPRESSION_PRESETS } from '../constants/timeUnits';
 import { NON_WORKING_POLICY_LABELS, UI_THEMES, WEEKDAY_OPTIONS, type UiTheme } from '../constants/uiOptions';
@@ -684,6 +685,56 @@ export const AppSidebar: React.FC<Props> = ({
               <AlertTriangle size={16} className="mb-1" />
               Worst-Case
             </button>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border-4 border-red-500 bg-slate-950/60 p-3.5 space-y-2.5">
+          <h3 className="text-lg font-bold text-red-500 uppercase tracking-wider">⚠️⚠️⚠️ Wait Time Calculation ⚠️⚠️⚠️</h3>
+          <div className="space-y-2">
+            <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-2 text-[10px] text-slate-400">
+              Choose how queue wait time is calculated and displayed in metrics.
+            </div>
+            <div className="space-y-1.5">
+              <button
+                onClick={() => setConfig((previous) => ({ ...previous, waitTimeCalculationMode: 'both' }))}
+                className={`w-full flex items-start gap-2 rounded-lg border px-3 py-2 text-xs transition-colors ${
+                  (!config.waitTimeCalculationMode || config.waitTimeCalculationMode === 'both')
+                    ? 'border-emerald-500 bg-emerald-500/10 text-emerald-200'
+                    : 'border-slate-800 bg-slate-900 text-slate-400 hover:bg-slate-800'
+                }`}
+              >
+                <div className="flex-1 text-left">
+                  <div className="font-semibold">📊 Both (Recommended)</div>
+                  <div className="mt-0.5 text-[9px] text-slate-500">Show calendar and working time for complete analysis</div>
+                </div>
+              </button>
+              <button
+                onClick={() => setConfig((previous) => ({ ...previous, waitTimeCalculationMode: 'calendar' }))}
+                className={`w-full flex items-start gap-2 rounded-lg border px-3 py-2 text-xs transition-colors ${
+                  config.waitTimeCalculationMode === 'calendar'
+                    ? 'border-amber-500 bg-amber-500/10 text-amber-200'
+                    : 'border-slate-800 bg-slate-900 text-slate-400 hover:bg-slate-800'
+                }`}
+              >
+                <div className="flex-1 text-left">
+                  <div className="font-semibold">📅 Calendar Time</div>
+                  <div className="mt-0.5 text-[9px] text-slate-500">Include non-working hours • Best for SLA/customer view</div>
+                </div>
+              </button>
+              <button
+                onClick={() => setConfig((previous) => ({ ...previous, waitTimeCalculationMode: 'working' }))}
+                className={`w-full flex items-start gap-2 rounded-lg border px-3 py-2 text-xs transition-colors ${
+                  config.waitTimeCalculationMode === 'working'
+                    ? 'border-yellow-500 bg-yellow-500/10 text-yellow-200'
+                    : 'border-slate-800 bg-slate-900 text-slate-400 hover:bg-slate-800'
+                }`}
+              >
+                <div className="flex-1 text-left">
+                  <div className="font-semibold">⏱️ Working Time</div>
+                  <div className="mt-0.5 text-[9px] text-slate-500">Exclude non-working hours • Best for queue efficiency</div>
+                </div>
+              </button>
+            </div>
           </div>
         </div>
 

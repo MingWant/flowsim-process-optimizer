@@ -24,6 +24,7 @@ const ARRIVAL_UNIT_LABELS: Record<string, string> = {
   s: 'sim sec',
   min: 'sim min',
   h: 'sim hour',
+  workingDay: 'sim workday',
   day: 'sim day',
   week: 'sim week',
   month: 'sim month',
@@ -35,6 +36,7 @@ const ARRIVAL_UNIT_TO_MS: Record<string, number> = {
   s: 1000,
   min: 60 * 1000,
   h: 60 * 60 * 1000,
+  workingDay: 8 * 60 * 60 * 1000,
   day: 24 * 60 * 60 * 1000,
   week: 7 * 24 * 60 * 60 * 1000,
   month: 30 * 24 * 60 * 60 * 1000,
@@ -49,6 +51,7 @@ const DURATION_UNIT_LABELS: Record<string, string> = {
   s: 's',
   min: 'min',
   h: 'h',
+  workingDay: 'wd',
   day: 'day',
   week: 'week',
   month: 'month',
@@ -89,6 +92,16 @@ const formatMetricTimeInUnit = (milliseconds: number, unit: string): string => {
 
 const formatCompactDuration = (step: ProcessStep, isDelayMode: boolean) => {
   if (step.type === 'start') {
+    if (step.arrivalModel === 'schedule') {
+      const windows = (step.arrivalSchedule || []).filter((window) => window.enabled !== false);
+      return windows.length > 0 ? `${windows.length} window${windows.length === 1 ? '' : 's'}` : 'No windows';
+    }
+
+    if (step.arrivalModel === 'events') {
+      const events = (step.arrivalEvents || []).filter((event) => event.enabled !== false);
+      return events.length > 0 ? `${events.length} event plan${events.length === 1 ? '' : 's'}` : 'No events';
+    }
+
     const unit = ARRIVAL_UNIT_LABELS[step.arrivalUnit || 's'] || 'sim sec';
     if (step.arrivalInputMode === 'interval') {
       return step.randomnessMode === 'range'
@@ -245,13 +258,24 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
   if (step.type === 'start') {
     const arrivalUnitLabel = ARRIVAL_UNIT_LABELS[step.arrivalUnit || 's'] || 'sim sec';
     const batchSize = Math.max(1, Math.round(step.arrivalBatchSize ?? 1));
-    const arrivalModeLabel = step.arrivalInputMode === 'interval'
-      ? step.randomnessMode === 'range'
-        ? `${batchSize} every ${(step.minArrivalRate ?? 0.2).toFixed(2)}-${(step.maxArrivalRate ?? 0.8).toFixed(2)} ${arrivalUnitLabel}`
-        : `${batchSize} every ${(step.arrivalRate ?? 0.5).toFixed(2)} ${arrivalUnitLabel}`
-      : step.randomnessMode === 'range'
-        ? `${(step.minArrivalRate ?? 0.2).toFixed(2)}-${(step.maxArrivalRate ?? 0.8).toFixed(2)} items / ${arrivalUnitLabel}`
-        : `${(step.arrivalRate ?? 0.5).toFixed(2)} items / ${arrivalUnitLabel}`;
+    const arrivalModel = step.arrivalModel || 'simple';
+    const activeWindows = (step.arrivalSchedule || []).filter((window) => window.enabled !== false);
+    const activeEvents = (step.arrivalEvents || []).filter((event) => event.enabled !== false);
+    const arrivalModeLabel = arrivalModel === 'schedule'
+      ? activeWindows.length > 0
+        ? `${activeWindows.length} scheduled window${activeWindows.length === 1 ? '' : 's'}`
+        : 'No schedule windows'
+      : arrivalModel === 'events'
+        ? activeEvents.length > 0
+          ? `${activeEvents.length} dispatch plan${activeEvents.length === 1 ? '' : 's'}`
+          : 'No dispatch plans'
+        : step.arrivalInputMode === 'interval'
+          ? step.randomnessMode === 'range'
+            ? `${batchSize} every ${(step.minArrivalRate ?? 0.2).toFixed(2)}-${(step.maxArrivalRate ?? 0.8).toFixed(2)} ${arrivalUnitLabel}`
+            : `${batchSize} every ${(step.arrivalRate ?? 0.5).toFixed(2)} ${arrivalUnitLabel}`
+          : step.randomnessMode === 'range'
+            ? `${(step.minArrivalRate ?? 0.2).toFixed(2)}-${(step.maxArrivalRate ?? 0.8).toFixed(2)} items / ${arrivalUnitLabel}`
+            : `${(step.arrivalRate ?? 0.5).toFixed(2)} items / ${arrivalUnitLabel}`;
     const fixedArrivalInterval = step.arrivalInputMode !== 'interval' && step.randomnessMode !== 'range'
       ? formatMetricTime(((ARRIVAL_UNIT_TO_MS[step.arrivalUnit || 's'] || 1000) * batchSize) / Math.max(0.000000001, step.arrivalRate ?? 0.5))
       : undefined;
@@ -288,11 +312,11 @@ const ProcessNodeComponent = forwardRef<HTMLDivElement, Props>(({ step, stats, i
           <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-3">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-300/70">Arrival</div>
             <div className="mt-1 font-mono text-sm font-bold leading-snug text-emerald-200">{arrivalModeLabel}</div>
-            <div className="text-[10px] text-slate-500">{fixedArrivalInterval ? `Batch ${batchSize} ≈ every ${fixedArrivalInterval}` : `Batch size ${batchSize}`}</div>
+            <div className="text-[10px] text-slate-500">{arrivalModel === 'simple' ? fixedArrivalInterval ? `Batch ${batchSize} ≈ every ${fixedArrivalInterval}` : `Batch size ${batchSize}` : 'Plan-driven dispatch'}</div>
           </div>
           <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Mode</div>
-            <div className="mt-1 text-sm font-semibold text-slate-200">{step.arrivalInputMode === 'interval' ? 'Interval Input' : 'Rate Input'}</div>
+            <div className="mt-1 text-sm font-semibold text-slate-200">{arrivalModel === 'schedule' ? 'Schedule' : arrivalModel === 'events' ? 'Events' : step.arrivalInputMode === 'interval' ? 'Interval Input' : 'Rate Input'}</div>
             <div className="text-[10px] text-slate-500">Feeds the first connected step</div>
           </div>
             </div>

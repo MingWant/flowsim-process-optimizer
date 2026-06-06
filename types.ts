@@ -5,14 +5,15 @@ export type RandomnessMode = 'fixed' | 'range';
 export type StepSimulationMode = 'resource' | 'delay';
 export type DurationUnit = 'ms' | 's' | 'min' | 'h' | 'workingDay' | 'day' | 'week' | 'month' | 'year';
 export type ArrivalInputMode = 'rate' | 'interval';
-export type SimulationMode = 'realistic' | 'worst-case';
-export type ResourceExecutionMode = 'single' | 'collaborative' | 'multitask';
-export type TeamAllocationMode = 'auto' | 'explicit';
-export type NonWorkingArrivalPolicy = 'queue' | 'delay' | 'reject';
 export type ArrivalModel = 'simple' | 'schedule' | 'events';
 export type ScheduledArrivalSpreadMode = 'spread' | 'burst';
 export type ScheduledArrivalRepeat = 'none' | 'daily' | 'workingDay' | 'weekly' | 'monthly' | 'yearly';
 export type ScheduledArrivalDispatchMode = 'burst' | 'sequence';
+export type SimulationMode = 'realistic' | 'worst-case';
+export type ResourceExecutionMode = 'single' | 'collaborative' | 'multitask';
+export type TeamAllocationMode = 'auto' | 'explicit';
+export type NonWorkingArrivalPolicy = 'queue' | 'delay' | 'reject';
+export type WaitTimeCalculationMode = 'calendar' | 'working' | 'both';
 
 export interface WorkingHourSegment {
   start: number; // 0-24, local hour (e.g., 9 = 9:00, 9.5 = 9:30)
@@ -43,45 +44,9 @@ export interface DemandModifier {
   endDate?: string; // yyyy-mm-dd inclusive
 }
 
-export interface ScheduledArrivalWindow {
-  id: string;
-  name: string;
-  enabled: boolean;
-  startHour: number; // 0-24 local business hour
-  endHour: number; // 0-24, must be after startHour
-  quantity: number; // Items generated within this window before demand multipliers
-  spreadMode: ScheduledArrivalSpreadMode;
-  daysOfWeek?: number[];
-  months?: number[];
-  startDate?: string;
-  endDate?: string;
-}
-
-export interface ScheduledArrivalEvent {
-  id: string;
-  name: string;
-  enabled: boolean;
-  dayOffset: number; // Simulation day offset from calendarStartIso
-  hour: number; // 0-24 local hour within the day
-  quantity: number;
-  repeat: ScheduledArrivalRepeat;
-  repeatEvery?: number;
-  startDate?: string; // yyyy-mm-dd, overrides dayOffset when present
-  endDate?: string; // yyyy-mm-dd inclusive
-  occurrenceLimit?: number;
-  daysOfWeek?: number[];
-  months?: number[];
-  daysOfMonth?: number[];
-  dispatchMode?: ScheduledArrivalDispatchMode;
-  itemInterval?: number;
-  itemIntervalUnit?: DurationUnit;
-}
-
 export interface AutoPauseConfig {
   enabled: boolean;
   simulationTimeMs?: number;
-  simulationTimeUnit?: DurationUnit;
-  stopDateIso?: string;
   totalItemsCreated?: number;
   totalItemsFinished?: number;
   totalItemsFailed?: number;
@@ -109,6 +74,40 @@ export interface ItemProfile {
   cancellationMultiplier: number;
   priority: number;
   color: string;
+}
+
+export interface ScheduledArrivalWindow {
+  id: string;
+  name: string;
+  enabled: boolean;
+  startHour: number;
+  endHour: number;
+  quantity: number;
+  spreadMode: ScheduledArrivalSpreadMode;
+  daysOfWeek?: number[];
+  months?: number[];
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface ScheduledArrivalEvent {
+  id: string;
+  name: string;
+  enabled: boolean;
+  dayOffset: number;
+  hour: number;
+  quantity: number;
+  repeat: ScheduledArrivalRepeat;
+  repeatEvery?: number;
+  startDate?: string;
+  endDate?: string;
+  occurrenceLimit?: number;
+  daysOfWeek?: number[];
+  months?: number[];
+  daysOfMonth?: number[];
+  dispatchMode?: ScheduledArrivalDispatchMode;
+  itemInterval?: number;
+  itemIntervalUnit?: DurationUnit;
 }
 
 export interface ProcessStep {
@@ -170,6 +169,7 @@ export interface ProcessStep {
 
 export interface WorkItem {
   id: string;
+  sourceFlowId?: string;
   currentStepId: string | 'finished';
   previousStepId?: string;
   targetStepId?: string;
@@ -181,8 +181,10 @@ export interface WorkItem {
   completedAtSimulationMs?: number;
   finishedAt?: number;
   totalTransmissionTime: number;
-  totalWaitTime: number;
+  totalWaitTime: number; // Calendar wait time (includes non-working hours)
+  totalWorkingWaitTime: number; // Working hours wait time only
   totalProcessingTime: number;
+  totalCalendarProcessingTime: number;
   stepEntryTime: number;
   queuedAtSimulationMs?: number;
   queueCancellationCheckedAtSimulationMs?: number;
@@ -222,6 +224,7 @@ export interface SimulationConfig {
   businessCalendar?: BusinessCalendar;
   demandModifiers?: DemandModifier[];
   autoPause?: AutoPauseConfig;
+  waitTimeCalculationMode?: WaitTimeCalculationMode; // 'both' (default), 'calendar', or 'working'
 }
 
 export interface SimulationStats {
@@ -230,9 +233,38 @@ export interface SimulationStats {
   totalItemsCancelled: number;
   totalItemsFailed: number;
   avgCycleTime: number;
-  avgBusinessCycleTime: number;
+  medianCycleTime: number;
+  p90CycleTime: number;
+  avgWorkingCycleTime: number;
+  medianWorkingCycleTime: number;
+  p90WorkingCycleTime: number;
+  avgWorkTime: number;
+  avgWaitTime: number;
+  avgNonWorkingDelay: number;
+  flowEfficiency: number;
+  oldestWipAge: number;
+  oldestQueueAge: number;
+  resourceIdleUnits: number;
+  resourceUtilization: number;
+  blockedTimeShare: number;
   avgThroughput: number;
   activeItems: number;
+}
+
+export interface FlowStats {
+  flowId: string;
+  totalItemsCreated: number;
+  totalItemsFinished: number;
+  totalItemsCancelled: number;
+  totalItemsFailed: number;
+  avgCycleTime: number;
+  avgWorkingCycleTime: number;
+  avgWorkTime: number;
+  avgWaitTime: number;
+  avgTransmissionTime: number;
+  avgOffHoursDelay: number;
+  avgNonWorkingDelay: number;
+  flowEfficiency: number;
 }
 
 export interface StepStats {
@@ -244,9 +276,9 @@ export interface StepStats {
   totalResources: number;
   avgResourcesPerItem: number;
   avgResourceLoadFactor: number;
-  avgWaitTime: number;
+  avgWaitTime: number; // Calendar wait time (includes non-working hours)
+  avgWorkingWaitTime: number; // Working hours wait time only
   avgCompletionTime: number;
-  avgBusinessCompletionTime: number;
   // Cumulative History
   totalProcessed: number;
   totalFailed: number;

@@ -6,6 +6,10 @@
 
 This contains everything you need to run your app locally.
 
+## Documentation
+
+- [FlowSim 用户文档 / User Guide](./USER_GUIDE_ZH_EN.md)
+
 View your app in AI Studio: https://ai.studio/apps/drive/1FLGE7xKQjisYGJxzXOobDGxsiyWvIopF
 
 ## Run Locally

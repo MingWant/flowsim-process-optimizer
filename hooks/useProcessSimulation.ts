@@ -1,7 +1,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ProcessStep, WorkItem, SimulationConfig, StepStats, SimulationStats, ScheduledArrivalWindow, ScheduledArrivalEvent } from '../types';
-import { getBusinessDate, getDemandMultiplier, getNextWorkingSimulationTime, getWorkingDurationBetween, isWorkingTime, normalizeBusinessCalendar } from '../services/simulationCalendar';
+import { FlowStats, ProcessStep, ScheduledArrivalEvent, ScheduledArrivalWindow, WorkItem, SimulationConfig, StepStats, SimulationStats } from '../types';
+import { addWorkingDuration, getDemandMultiplier, getNextWorkingSimulationTime, getWorkingDurationBetween, isWorkingTime, normalizeBusinessCalendar } from '../services/simulationCalendar';
 
 const TRANSMISSION_DURATION = 900; // visual ms to travel between nodes
 const TIME_UNIT_TO_MS = {
@@ -18,8 +18,6 @@ const TIME_UNIT_TO_MS = {
 
 const MIN_ARRIVAL_RATE = 0.000000001;
 const MIN_PROCESSING_DURATION_MS = 1;
-const MAX_SCHEDULED_ARRIVAL_QUANTITY = 50000;
-const MAX_SCHEDULED_SPREAD_EVENTS = 5000;
 const MAX_SPAWNS_PER_START_PER_TICK = 1000;
 const MAX_BUSINESS_EVENTS_PER_TICK = 5000;
 const MAX_SAFE_DURATION_MS = Number.MAX_SAFE_INTEGER / 2; // Safety margin for calculations
@@ -29,41 +27,160 @@ const MAX_TRANSMITTING_ITEMS_FOR_UI = 420;
 const MAX_PROCESSING_ITEMS_FOR_UI = 320;
 const MAX_QUEUED_ITEMS_FOR_UI = 120;
 const MAX_TERMINAL_ITEMS_FOR_UI = 60;
-const DEFAULT_CALENDAR_START_ISO = '2026-01-05T00:00:00';
 
 const BUSINESS_TRANSMISSION_SIM_MS = 0;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const DEFAULT_CALENDAR_START_ISO = '2026-01-05T00:00:00';
 
-interface StepCounter {
+type StepCounter = {
   processed: number;
   failed: number;
   cancelled: number;
   totalCompletionTime: number;
-  totalBusinessCompletionTime: number;
   totalProcessingTime: number;
+  totalCalendarProcessingTime: number;
   totalWaitTime: number;
+  totalWorkingWaitTime: number;
   totalStarted: number;
-}
+};
+
+type ArrivalSlot = {
+  time: number;
+  quantity: number;
+  itemIntervalMs: number;
+};
+
+type FlowCounter = {
+  flowId: string;
+  created: number;
+  finished: number;
+  cancelled: number;
+  failed: number;
+  cycleTimeSamples: number[];
+  workingCycleTimeSamples: number[];
+  totalCycleTime: number;
+  totalWorkingCycleTime: number;
+  totalWorkTime: number;
+  totalWaitTime: number;
+  totalTransmissionTime: number;
+  totalOffHoursDelay: number;
+  totalNonWorkingDelay: number;
+};
 
 const createStepCounter = (): StepCounter => ({
   processed: 0,
   failed: 0,
   cancelled: 0,
   totalCompletionTime: 0,
-  totalBusinessCompletionTime: 0,
   totalProcessingTime: 0,
+  totalCalendarProcessingTime: 0,
   totalWaitTime: 0,
+  totalWorkingWaitTime: 0,
   totalStarted: 0,
 });
 
-type ArrivalEvent = {
-  time: number;
-  quantity: number;
+const createFlowCounter = (flowId: string): FlowCounter => ({
+  flowId,
+  created: 0,
+  finished: 0,
+  cancelled: 0,
+  failed: 0,
+  cycleTimeSamples: [],
+  workingCycleTimeSamples: [],
+  totalCycleTime: 0,
+  totalWorkingCycleTime: 0,
+  totalWorkTime: 0,
+  totalWaitTime: 0,
+  totalTransmissionTime: 0,
+  totalOffHoursDelay: 0,
+  totalNonWorkingDelay: 0,
+});
+
+const getPercentile = (samples: number[], percentile: number) => {
+  if (samples.length === 0) {
+    return 0;
+  }
+
+  const sorted = [...samples].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(percentile * sorted.length) - 1));
+  return sorted[index];
 };
 
-type ScheduledEventOccurrence = {
-  time: number;
-  occurrenceIndex: number;
+const buildStepFlowLookup = (steps: ProcessStep[]) => {
+  const stepById = new Map(steps.map((step) => [step.id, step]));
+  const adjacency = new Map<string, Set<string>>();
+
+  steps.forEach((step) => {
+    if (!adjacency.has(step.id)) {
+      adjacency.set(step.id, new Set());
+    }
+
+    step.connections.forEach((connection) => {
+      if (!adjacency.has(connection.targetId)) {
+        adjacency.set(connection.targetId, new Set());
+      }
+
+      adjacency.get(step.id)?.add(connection.targetId);
+      adjacency.get(connection.targetId)?.add(step.id);
+    });
+  });
+
+  const lookup = new Map<string, string>();
+  const visited = new Set<string>();
+
+  steps.forEach((seedStep, index) => {
+    if (visited.has(seedStep.id)) {
+      return;
+    }
+
+    const stack = [seedStep.id];
+    const componentIds = new Set<string>();
+
+    while (stack.length > 0) {
+      const stepId = stack.pop();
+      if (!stepId || visited.has(stepId)) {
+        continue;
+      }
+
+      const step = stepById.get(stepId);
+      if (!step) {
+        continue;
+      }
+
+      visited.add(stepId);
+      componentIds.add(stepId);
+      adjacency.get(stepId)?.forEach((neighborId) => stack.push(neighborId));
+    }
+
+    const componentSteps = steps.filter((step) => componentIds.has(step.id));
+    const primaryStart = componentSteps.find((step) => step.type === 'start') || componentSteps[0] || seedStep;
+    const flowId = primaryStart?.id || seedStep.id || `flow-${index + 1}`;
+    componentIds.forEach((stepId) => lookup.set(stepId, flowId));
+  });
+
+  return lookup;
 };
+
+const toFlowStats = (counter: FlowCounter): FlowStats => ({
+  flowId: counter.flowId,
+  totalItemsCreated: counter.created,
+  totalItemsFinished: counter.finished,
+  totalItemsCancelled: counter.cancelled,
+  totalItemsFailed: counter.failed,
+  avgCycleTime: counter.finished > 0 ? counter.totalCycleTime / counter.finished : 0,
+  medianCycleTime: getPercentile(counter.cycleTimeSamples, 0.5),
+  p90CycleTime: getPercentile(counter.cycleTimeSamples, 0.9),
+  avgWorkingCycleTime: counter.finished > 0 ? counter.totalWorkingCycleTime / counter.finished : 0,
+  medianWorkingCycleTime: getPercentile(counter.workingCycleTimeSamples, 0.5),
+  p90WorkingCycleTime: getPercentile(counter.workingCycleTimeSamples, 0.9),
+  avgWorkTime: counter.finished > 0 ? counter.totalWorkTime / counter.finished : 0,
+  avgWaitTime: counter.finished > 0 ? counter.totalWaitTime / counter.finished : 0,
+  avgTransmissionTime: counter.finished > 0 ? counter.totalTransmissionTime / counter.finished : 0,
+  avgOffHoursDelay: counter.finished > 0 ? counter.totalOffHoursDelay / counter.finished : 0,
+  avgNonWorkingDelay: counter.finished > 0 ? counter.totalNonWorkingDelay / counter.finished : 0,
+  flowEfficiency: counter.totalCycleTime > 0 ? counter.totalWorkTime / counter.totalCycleTime : 0,
+});
 
 const buildVisibleItemsForUi = (allItems: WorkItem[]): WorkItem[] => {
   if (allItems.length <= MAX_RENDER_ITEMS_FOR_UI) {
@@ -252,6 +369,7 @@ const getSimulationSignature = (config: SimulationConfig) => JSON.stringify({
   minProcessingTime: step.minProcessingTime,
   maxProcessingTime: step.maxProcessingTime,
   rangeTimeUnit: step.rangeTimeUnit,
+  arrivalModel: step.arrivalModel,
   arrivalInputMode: step.arrivalInputMode,
   arrivalUnit: step.arrivalUnit,
   arrivalRate: step.arrivalRate,
@@ -260,7 +378,6 @@ const getSimulationSignature = (config: SimulationConfig) => JSON.stringify({
   arrivalBatchSize: step.arrivalBatchSize,
   arrivalBatchIntervalMs: step.arrivalBatchIntervalMs,
   demandModifiers: step.demandModifiers,
-  arrivalModel: step.arrivalModel,
   arrivalSchedule: step.arrivalSchedule,
   arrivalEvents: step.arrivalEvents,
   itemProfiles: step.itemProfiles,
@@ -273,6 +390,7 @@ const getSimulationSignature = (config: SimulationConfig) => JSON.stringify({
 export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (reason: string) => void) => {
   const [items, setItems] = useState<WorkItem[]>([]);
   const [stepStats, setStepStats] = useState<StepStats[]>([]);
+  const [flowStats, setFlowStats] = useState<FlowStats[]>([]);
   const [simulationTimeMs, setSimulationTimeMs] = useState(0);
   const [globalStats, setGlobalStats] = useState<SimulationStats>({
     totalItemsCreated: 0,
@@ -280,7 +398,16 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     totalItemsCancelled: 0,
     totalItemsFailed: 0,
     avgCycleTime: 0,
-    avgBusinessCycleTime: 0,
+    avgWorkingCycleTime: 0,
+    avgWorkTime: 0,
+    avgWaitTime: 0,
+    avgNonWorkingDelay: 0,
+    flowEfficiency: 0,
+    oldestWipAge: 0,
+    oldestQueueAge: 0,
+    resourceIdleUnits: 0,
+    resourceUtilization: 0,
+    blockedTimeShare: 0,
     avgThroughput: 0,
     activeItems: 0,
   });
@@ -296,29 +423,12 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
   
   // Track the absolute simulated timestamp when the next item should spawn for each start node
   const nextSpawnTimeRef = useRef<Record<string, number>>({});
-  const delayedScheduledArrivalRef = useRef<Record<string, ArrivalEvent | undefined>>({});
+  const delayedArrivalSlotsRef = useRef<Record<string, ArrivalSlot[]>>({});
 
   // Persistent Counters for Steps (Map<StepId, Counts>)
   // We need this because 'stepStats' state is regenerated every frame
   const stepCountersRef = useRef<Record<string, StepCounter>>({});
-
-  const getCalendarStartMs = () => {
-    const parsed = config.calendarStartIso ? Date.parse(config.calendarStartIso) : Date.parse(DEFAULT_CALENDAR_START_ISO);
-    return Number.isFinite(parsed) ? parsed : Date.parse(DEFAULT_CALENDAR_START_ISO);
-  };
-
-  const getAutoPauseSimulationTimeTarget = () => {
-    const stopDateIso = config.autoPause?.stopDateIso;
-    if (stopDateIso) {
-      const stopDateMs = Date.parse(stopDateIso);
-      const targetMs = stopDateMs - getCalendarStartMs();
-      if (Number.isFinite(targetMs) && targetMs > 0) {
-        return targetMs;
-      }
-    }
-
-    return config.autoPause?.simulationTimeMs;
-  };
+  const flowCountersRef = useRef<Record<string, FlowCounter>>({});
 
   const resetSimulation = useCallback(() => {
     itemsRef.current = [];
@@ -332,7 +442,16 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
       totalItemsCancelled: 0,
       totalItemsFailed: 0,
       avgCycleTime: 0,
-      avgBusinessCycleTime: 0,
+      avgWorkingCycleTime: 0,
+      avgWorkTime: 0,
+      avgWaitTime: 0,
+      avgNonWorkingDelay: 0,
+      flowEfficiency: 0,
+      oldestWipAge: 0,
+      oldestQueueAge: 0,
+      resourceIdleUnits: 0,
+      resourceUtilization: 0,
+      blockedTimeShare: 0,
       avgThroughput: 0,
       activeItems: 0,
     };
@@ -340,10 +459,12 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     setGlobalStats(initialStats);
     setAutoPauseReason(null);
     setStepStats([]);
+    setFlowStats([]);
     lastUiUpdateRef.current = 0;
     nextSpawnTimeRef.current = {};
-    delayedScheduledArrivalRef.current = {};
+    delayedArrivalSlotsRef.current = {};
     stepCountersRef.current = {}; 
+    flowCountersRef.current = {};
     config.steps.forEach(s => {
       stepCountersRef.current[s.id] = createStepCounter();
     });
@@ -355,10 +476,8 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
       return null;
     }
 
-    const simulationTimeTarget = getAutoPauseSimulationTimeTarget();
-
     const checks: Array<[number | undefined, number, string]> = [
-      [simulationTimeTarget, simulationTimeRef.current, autoPause.stopDateIso ? 'Stop date' : 'Simulation time'],
+      [autoPause.simulationTimeMs, simulationTimeRef.current, 'Simulation time'],
       [autoPause.totalItemsCreated, statsRef.current.totalItemsCreated, 'Created items'],
       [autoPause.totalItemsFinished, statsRef.current.totalItemsFinished, 'Finished items'],
       [autoPause.totalItemsFailed, statsRef.current.totalItemsFailed, 'Failed items'],
@@ -391,6 +510,9 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     config.steps.forEach(s => {
         if (s.type === 'start' && nextSpawnTimeRef.current[s.id] === undefined) {
             nextSpawnTimeRef.current[s.id] = 0; // Ready immediately
+        }
+        if (s.type === 'start' && !delayedArrivalSlotsRef.current[s.id]) {
+          delayedArrivalSlotsRef.current[s.id] = [];
         }
         // Initialize counters
         if (!stepCountersRef.current[s.id]) {
@@ -432,391 +554,71 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     step.calendarMode === 'custom' ? step.businessCalendar : config.businessCalendar
   );
 
-  const getDaysInMonth = (year: number, monthIndex: number) => new Date(year, monthIndex + 1, 0).getDate();
-
-  const buildCalendarRepeatDate = (baseDate: Date, repeat: 'monthly' | 'yearly', occurrencesToSkip: number) => {
-    const baseYear = baseDate.getFullYear();
-    const baseMonth = baseDate.getMonth();
-    const targetYear = repeat === 'yearly'
-      ? baseYear + occurrencesToSkip
-      : baseYear + Math.floor((baseMonth + occurrencesToSkip) / 12);
-    const targetMonth = repeat === 'yearly'
-      ? baseMonth
-      : (baseMonth + occurrencesToSkip) % 12;
-    const targetDay = Math.min(baseDate.getDate(), getDaysInMonth(targetYear, targetMonth));
-
-    return new Date(
-      targetYear,
-      targetMonth,
-      targetDay,
-      baseDate.getHours(),
-      baseDate.getMinutes(),
-      baseDate.getSeconds(),
-      baseDate.getMilliseconds(),
-    );
+  const getCalendarStartMs = () => {
+    const parsed = config.calendarStartIso ? Date.parse(config.calendarStartIso) : Date.parse(DEFAULT_CALENDAR_START_ISO);
+    return Number.isFinite(parsed) ? parsed : Date.parse(DEFAULT_CALENDAR_START_ISO);
   };
 
-  const getCalendarRepeatedEventTime = (baseTime: number, repeat: 'monthly' | 'yearly', cursorMs: number): number => {
-    const calendarStartMs = getCalendarStartMs();
-    const baseDate = getBusinessDate(config.calendarStartIso, baseTime);
-    const cursorDate = getBusinessDate(config.calendarStartIso, cursorMs);
-    let occurrencesToSkip = repeat === 'yearly'
-      ? cursorDate.getFullYear() - baseDate.getFullYear()
-      : (cursorDate.getFullYear() - baseDate.getFullYear()) * 12 + cursorDate.getMonth() - baseDate.getMonth();
-
-    occurrencesToSkip = Math.max(0, occurrencesToSkip);
-    let candidateDate = buildCalendarRepeatDate(baseDate, repeat, occurrencesToSkip);
-    let candidateMs = candidateDate.getTime() - calendarStartMs;
-
-    if (candidateMs < cursorMs) {
-      candidateDate = buildCalendarRepeatDate(baseDate, repeat, occurrencesToSkip + 1);
-      candidateMs = candidateDate.getTime() - calendarStartMs;
+  const getDateOnlyMs = (date: string | undefined, endOfDay = false) => {
+    if (!date) {
+      return undefined;
     }
 
-    return Math.max(0, candidateMs);
+    const parsed = Date.parse(`${date}T${endOfDay ? '23:59:59.999' : '00:00:00'}`);
+    return Number.isFinite(parsed) ? parsed : undefined;
   };
 
-  const getEffectiveDemandMultiplier = (step: ProcessStep, eventSimulationMs: number): number => {
-    const globalMultiplier = getDemandMultiplier(config.demandModifiers, config.calendarStartIso, eventSimulationMs);
-    const stepMultiplier = getDemandMultiplier(step.demandModifiers, config.calendarStartIso, eventSimulationMs);
-    return Math.max(0.01, globalMultiplier * stepMultiplier);
-  };
-
-  const getScheduledArrivalQuantity = (step: ProcessStep, baseQuantity: number, eventSimulationMs: number): number => (
-    Math.max(1, Math.min(MAX_SCHEDULED_ARRIVAL_QUANTITY, Math.round(baseQuantity * getEffectiveDemandMultiplier(step, eventSimulationMs))))
-  );
-
-  const dateMatchesScheduledWindow = (window: ScheduledArrivalWindow, simulationMs: number): boolean => {
-    if (!window.enabled || window.quantity <= 0) {
-      return false;
-    }
-
-    const date = getBusinessDate(config.calendarStartIso, simulationMs);
-    const day = date.getDay();
-    const month = date.getMonth() + 1;
-    const dateOnly = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-
-    if (window.daysOfWeek && window.daysOfWeek.length > 0 && !window.daysOfWeek.includes(day)) {
-      return false;
-    }
-
-    if (window.months && window.months.length > 0 && !window.months.includes(month)) {
-      return false;
-    }
-
-    if (window.startDate && dateOnly < window.startDate) {
-      return false;
-    }
-
-    if (window.endDate && dateOnly > window.endDate) {
-      return false;
-    }
-
-    return true;
-  };
-
-  const getStartOfBusinessDaySimulationMs = (simulationMs: number): number => {
-    const date = getBusinessDate(config.calendarStartIso, simulationMs);
+  const getStartOfDayMs = (date: Date) => {
     const startOfDay = new Date(date);
     startOfDay.setHours(0, 0, 0, 0);
-    return Math.max(0, simulationMs - (date.getTime() - startOfDay.getTime()));
+    return startOfDay.getTime();
   };
 
-  const getScheduledWindowEventsForDay = (step: ProcessStep, dayStartMs: number): ArrivalEvent[] => {
-    const windows = step.arrivalSchedule || [];
-    const events: ArrivalEvent[] = [];
-
-    for (const window of windows) {
-      if (!dateMatchesScheduledWindow(window, dayStartMs + window.startHour * TIME_UNIT_TO_MS.h)) {
-        continue;
-      }
-
-      const startMs = dayStartMs + window.startHour * TIME_UNIT_TO_MS.h;
-      const endMs = dayStartMs + window.endHour * TIME_UNIT_TO_MS.h;
-      const quantity = getScheduledArrivalQuantity(step, window.quantity, startMs);
-      const windowDuration = Math.max(0, endMs - startMs);
-
-      if (window.spreadMode === 'burst' || quantity <= 1 || windowDuration <= 0) {
-        events.push({ time: startMs, quantity });
-        continue;
-      }
-
-      const spreadEventCount = Math.min(quantity, MAX_SCHEDULED_SPREAD_EVENTS);
-      const interval = windowDuration / spreadEventCount;
-      const baseQuantityPerEvent = Math.floor(quantity / spreadEventCount);
-      const remainder = quantity % spreadEventCount;
-      for (let index = 0; index < spreadEventCount; index++) {
-        events.push({
-          time: startMs + index * interval,
-          quantity: baseQuantityPerEvent + (index < remainder ? 1 : 0),
-        });
-      }
-    }
-
-    return events.sort((a, b) => a.time - b.time);
-  };
-
-  const getDateOnlyString = (date: Date): string => (
-    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-  );
-
-  const getSimulationMsForDate = (date: Date): number => date.getTime() - getCalendarStartMs();
-
-  const buildScheduledEventBaseDate = (event: ScheduledArrivalEvent): Date => {
-    const calendarStartMs = getCalendarStartMs();
-    const startDate = event.startDate && /^\d{4}-\d{2}-\d{2}$/.test(event.startDate)
-      ? new Date(`${event.startDate}T00:00:00`)
-      : new Date(calendarStartMs + Math.max(0, event.dayOffset) * TIME_UNIT_TO_MS.day);
-    const hour = Math.max(0, Math.min(23.99, event.hour));
-    const wholeHours = Math.floor(hour);
-    const totalMinutes = Math.round((hour - wholeHours) * 60);
-    startDate.setHours(wholeHours, totalMinutes, 0, 0);
-    return startDate;
-  };
-
-  const addWorkingDays = (baseDate: Date, daysToAdd: number, startCalendar: ReturnType<typeof normalizeBusinessCalendar>): Date => {
-    const candidate = new Date(baseDate);
-    let added = 0;
-
-    if (daysToAdd === 0) {
-      return candidate;
-    }
-
-    while (added < daysToAdd) {
-      candidate.setDate(candidate.getDate() + 1);
-      if (startCalendar.daysOfWeek.includes(candidate.getDay())) {
-        added++;
-      }
-    }
-
-    return candidate;
-  };
-
-  const buildRepeatedScheduledEventDate = (baseDate: Date, event: ScheduledArrivalEvent, occurrenceIndex: number, startCalendar: ReturnType<typeof normalizeBusinessCalendar>): Date => {
-    const repeatEvery = Math.max(1, Math.round(event.repeatEvery || 1));
-    const repeat = event.repeat || 'none';
-    const candidate = new Date(baseDate);
-
-    if (repeat === 'workingDay') {
-      return addWorkingDays(baseDate, occurrenceIndex * repeatEvery, startCalendar);
-    }
-
-    if (repeat === 'daily') {
-      candidate.setDate(baseDate.getDate() + occurrenceIndex * repeatEvery);
-      return candidate;
-    }
-
-    if (repeat === 'weekly') {
-      candidate.setDate(baseDate.getDate() + occurrenceIndex * repeatEvery * 7);
-      return candidate;
-    }
-
-    if (repeat === 'monthly') {
-      const targetMonth = baseDate.getMonth() + occurrenceIndex * repeatEvery;
-      const targetYear = baseDate.getFullYear() + Math.floor(targetMonth / 12);
-      const normalizedMonth = ((targetMonth % 12) + 12) % 12;
-      candidate.setFullYear(targetYear, normalizedMonth, Math.min(baseDate.getDate(), getDaysInMonth(targetYear, normalizedMonth)));
-      return candidate;
-    }
-
-    if (repeat === 'yearly') {
-      const targetYear = baseDate.getFullYear() + occurrenceIndex * repeatEvery;
-      candidate.setFullYear(targetYear, baseDate.getMonth(), Math.min(baseDate.getDate(), getDaysInMonth(targetYear, baseDate.getMonth())));
-      return candidate;
-    }
-
-    return candidate;
-  };
-
-  const scheduledEventDateMatchesFilters = (event: ScheduledArrivalEvent, date: Date): boolean => {
-    const dateOnly = getDateOnlyString(date);
-    if (event.endDate && dateOnly > event.endDate) {
+  const isDateInFilters = (
+    date: Date,
+    filters: { daysOfWeek?: number[]; months?: number[]; daysOfMonth?: number[]; startDate?: string; endDate?: string }
+  ) => {
+    if (filters.daysOfWeek && filters.daysOfWeek.length > 0 && !filters.daysOfWeek.includes(date.getDay())) {
       return false;
     }
 
-    if (event.startDate && dateOnly < event.startDate) {
+    if (filters.months && filters.months.length > 0 && !filters.months.includes(date.getMonth() + 1)) {
       return false;
     }
 
-    if (event.daysOfWeek && event.daysOfWeek.length > 0 && !event.daysOfWeek.includes(date.getDay())) {
+    if (filters.daysOfMonth && filters.daysOfMonth.length > 0 && !filters.daysOfMonth.includes(date.getDate())) {
       return false;
     }
 
-    if (event.months && event.months.length > 0 && !event.months.includes(date.getMonth() + 1)) {
+    const time = date.getTime();
+    const startDateMs = getDateOnlyMs(filters.startDate);
+    const endDateMs = getDateOnlyMs(filters.endDate, true);
+
+    if (typeof startDateMs === 'number' && time < startDateMs) {
       return false;
     }
 
-    if (event.daysOfMonth && event.daysOfMonth.length > 0 && !event.daysOfMonth.includes(date.getDate())) {
+    if (typeof endDateMs === 'number' && time > endDateMs) {
       return false;
     }
 
     return true;
   };
 
-  const getScheduledEventOccurrenceTime = (event: ScheduledArrivalEvent, occurrence: ScheduledEventOccurrence, cursorMs: number): ArrivalEvent | null => {
-    const dispatchMode = event.dispatchMode || 'burst';
-    const quantity = Math.max(1, Math.min(MAX_SCHEDULED_ARRIVAL_QUANTITY, Math.round(event.quantity)));
-
-    if (dispatchMode !== 'sequence' || quantity <= 1 || !event.itemInterval || event.itemInterval <= 0) {
-      return occurrence.time >= cursorMs ? { time: occurrence.time, quantity } : null;
-    }
-
-    const intervalUnit = event.itemIntervalUnit || 's';
-    const intervalMs = Math.max(MIN_PROCESSING_DURATION_MS, event.itemInterval * TIME_UNIT_TO_MS[intervalUnit]);
-    const firstDueIndex = Math.max(0, Math.ceil((cursorMs - occurrence.time) / intervalMs));
-    if (firstDueIndex >= quantity) {
-      return null;
-    }
-
-    return { time: occurrence.time + firstDueIndex * intervalMs, quantity: 1 };
-  };
-
-  const getScheduledEventTime = (event: ScheduledArrivalEvent, cursorMs: number, startCalendar: ReturnType<typeof normalizeBusinessCalendar>): ArrivalEvent | null => {
-    if (!event.enabled || event.quantity <= 0) {
-      return null;
-    }
-
-    const baseDate = buildScheduledEventBaseDate(event);
-    const baseTime = Math.max(0, getSimulationMsForDate(baseDate));
-    const repeat = event.repeat || 'none';
-
-    if (repeat === 'none') {
-      const singleEvent = getScheduledEventOccurrenceTime(event, { time: baseTime, occurrenceIndex: 0 }, cursorMs);
-      return singleEvent && scheduledEventDateMatchesFilters(event, baseDate) ? singleEvent : null;
-    }
-
-    const repeatEvery = Math.max(1, Math.round(event.repeatEvery || 1));
-    const baseDelta = Math.max(0, cursorMs - baseTime);
-    const roughPeriodMs = repeat === 'weekly'
-      ? TIME_UNIT_TO_MS.week * repeatEvery
-      : repeat === 'monthly'
-        ? TIME_UNIT_TO_MS.month * repeatEvery
-        : repeat === 'yearly'
-          ? TIME_UNIT_TO_MS.year * repeatEvery
-          : TIME_UNIT_TO_MS.day * repeatEvery;
-    const workingDaysPerWeek = Math.max(1, startCalendar.daysOfWeek.length);
-    const firstIndex = repeat === 'workingDay'
-      ? Math.max(0, Math.floor((baseDelta / TIME_UNIT_TO_MS.day) * (workingDaysPerWeek / 7) / repeatEvery) - 7)
-      : Math.max(0, Math.floor(baseDelta / Math.max(TIME_UNIT_TO_MS.day, roughPeriodMs)) - 2);
-    const occurrenceLimit = event.occurrenceLimit;
-
-    for (let offset = 0; offset < 740; offset++) {
-      const occurrenceIndex = firstIndex + offset;
-      if (occurrenceLimit && occurrenceIndex >= occurrenceLimit) {
-        return null;
-      }
-
-      const candidateDate = buildRepeatedScheduledEventDate(baseDate, event, occurrenceIndex, startCalendar);
-      const candidateMs = getSimulationMsForDate(candidateDate);
-      if (event.endDate && getDateOnlyString(candidateDate) > event.endDate) {
-        return null;
-      }
-
-      if (repeat === 'workingDay' && !startCalendar.daysOfWeek.includes(candidateDate.getDay())) {
-        continue;
-      }
-
-      if (!scheduledEventDateMatchesFilters(event, candidateDate)) {
-        continue;
-      }
-
-      const dueEvent = getScheduledEventOccurrenceTime(event, { time: candidateMs, occurrenceIndex }, cursorMs);
-      if (dueEvent) {
-        return dueEvent;
-      }
-    }
-
-    return null;
-  };
-
-  const calculateNextScheduledArrival = (step: ProcessStep, cursorMs: number): ArrivalEvent | null => {
-    const mergeFirstDueEvents = (events: ArrivalEvent[]): ArrivalEvent | null => {
-      if (events.length === 0) {
-        return null;
-      }
-
-      const sortedEvents = events.sort((a, b) => a.time - b.time);
-      const firstTime = sortedEvents[0].time;
-      const quantity = sortedEvents
-        .filter((event) => Math.abs(event.time - firstTime) < MIN_PROCESSING_DURATION_MS)
-        .reduce((sum, event) => sum + event.quantity, 0);
-
-      return { time: firstTime, quantity: Math.max(1, Math.min(MAX_SCHEDULED_ARRIVAL_QUANTITY, Math.round(quantity))) };
-    };
-
-    const arrivalModel = step.arrivalModel || 'simple';
-    if (arrivalModel === 'schedule') {
-      const startDayMs = getStartOfBusinessDaySimulationMs(cursorMs);
-      for (let dayOffset = 0; dayOffset < 370; dayOffset++) {
-        const dayStartMs = startDayMs + dayOffset * TIME_UNIT_TO_MS.day;
-        const dayEvents = getScheduledWindowEventsForDay(step, dayStartMs).filter(event => event.time >= cursorMs);
-        if (dayEvents.length > 0) {
-          return mergeFirstDueEvents(dayEvents);
-        }
-      }
-
-      return null;
-    }
-
-    if (arrivalModel === 'events') {
-      const startCalendar = getEffectiveBusinessCalendar(step);
-      const events = (step.arrivalEvents || [])
-        .map((event) => {
-          const arrival = getScheduledEventTime(event, cursorMs, startCalendar);
-          if (arrival === null) {
-            return null;
-          }
-
-          return {
-            time: arrival.time,
-            quantity: getScheduledArrivalQuantity(step, arrival.quantity, arrival.time),
-          };
-        })
-        .filter((event): event is ArrivalEvent => event !== null)
-        .sort((a, b) => a.time - b.time);
-
-      return mergeFirstDueEvents(events);
-    }
-
-    return null;
-  };
-
-  const collectDelayedScheduledArrival = (step: ProcessStep, cursorMs: number, delayedSpawnAt: number, startCalendar: ReturnType<typeof normalizeBusinessCalendar>): ArrivalEvent => {
-    let searchCursorMs = cursorMs;
-    let quantity = 0;
-
-    for (let guard = 0; guard < MAX_BUSINESS_EVENTS_PER_TICK; guard++) {
-      const arrival = calculateNextScheduledArrival(step, searchCursorMs);
-      if (!arrival || arrival.time >= delayedSpawnAt || isWorkingTime(startCalendar, config.calendarStartIso, arrival.time)) {
-        break;
-      }
-
-      quantity += arrival.quantity;
-      if (quantity >= MAX_SCHEDULED_ARRIVAL_QUANTITY) {
-        quantity = MAX_SCHEDULED_ARRIVAL_QUANTITY;
-        break;
-      }
-
-      searchCursorMs = arrival.time + MIN_PROCESSING_DURATION_MS;
-    }
-
-    return {
-      time: delayedSpawnAt,
-      quantity: Math.max(1, Math.min(MAX_SCHEDULED_ARRIVAL_QUANTITY, Math.round(quantity))),
-    };
-  };
+  const getStartDemandMultiplier = (step: ProcessStep, eventSimulationMs: number) => (
+    Math.max(0.01, getDemandMultiplier(config.demandModifiers, config.calendarStartIso, eventSimulationMs))
+    * Math.max(0.01, getDemandMultiplier(step.demandModifiers, config.calendarStartIso, eventSimulationMs))
+  );
 
   const calculateNextSpawnDelay = (step: ProcessStep, eventSimulationMs = simulationTimeRef.current): number => {
     const unitMs = getArrivalUnitMs(step);
     const inputMode = step.arrivalInputMode || 'rate';
     const batchSize = getArrivalBatchSize(step);
-    const demandMultiplier = getEffectiveDemandMultiplier(step, eventSimulationMs);
+    const demandMultiplier = getStartDemandMultiplier(step, eventSimulationMs);
 
     if (step.randomnessMode === 'range') {
-        const rawMinValue = safeNumber(step.minArrivalRate, inputMode === 'interval' ? 1 : 0.1);
-        const rawMaxValue = safeNumber(step.maxArrivalRate, inputMode === 'interval' ? 3 : 1.0);
-        const minValue = Math.min(rawMinValue, rawMaxValue);
-        const maxValue = Math.max(rawMinValue, rawMaxValue);
+        const minValue = safeNumber(step.minArrivalRate, inputMode === 'interval' ? 1 : 0.1);
+        const maxValue = safeNumber(step.maxArrivalRate, inputMode === 'interval' ? 3 : 1.0);
 
         if (inputMode === 'interval') {
           const minInterval = Math.max(MIN_ARRIVAL_RATE, Math.min(minValue, maxValue));
@@ -840,6 +642,132 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     }
   };
 
+  const getWindowArrivalSlots = (step: ProcessStep, frameStartMs: number, frameEndMs: number): ArrivalSlot[] => {
+    const windows = (step.arrivalSchedule || []).filter((window): window is ScheduledArrivalWindow => Boolean(window?.enabled) && (window.quantity || 0) > 0);
+    if (windows.length === 0) {
+      return [];
+    }
+
+    const calendarStartMs = getCalendarStartMs();
+    const slots: ArrivalSlot[] = [];
+    const startDayIndex = Math.floor(Math.max(0, frameStartMs - DAY_MS) / DAY_MS);
+    const endDayIndex = Math.ceil(Math.max(0, frameEndMs + DAY_MS) / DAY_MS);
+
+    for (let dayIndex = startDayIndex; dayIndex <= endDayIndex; dayIndex++) {
+      const dayStartMs = calendarStartMs + dayIndex * DAY_MS;
+      const date = new Date(dayStartMs);
+
+      for (const window of windows) {
+        if (!isDateInFilters(date, window)) {
+          continue;
+        }
+
+        const quantity = Math.max(1, Math.round(window.quantity));
+        const windowStart = dayIndex * DAY_MS + window.startHour * HOUR_MS;
+        const windowEnd = dayIndex * DAY_MS + window.endHour * HOUR_MS;
+        const duration = Math.max(1, windowEnd - windowStart);
+        const demandMultiplier = getStartDemandMultiplier(step, windowStart);
+        const adjustedQuantity = Math.max(1, Math.round(quantity * demandMultiplier));
+
+        if (window.spreadMode === 'burst') {
+          if ((windowStart > frameStartMs || (frameStartMs === 0 && windowStart === 0)) && windowStart <= frameEndMs) {
+            slots.push({ time: windowStart, quantity: adjustedQuantity, itemIntervalMs: 0 });
+          }
+          continue;
+        }
+
+        const interval = duration / adjustedQuantity;
+        const firstIndex = frameStartMs === 0
+          ? Math.max(0, Math.floor((frameStartMs - windowStart) / interval))
+          : Math.max(0, Math.floor((frameStartMs - windowStart) / interval) + 1);
+        const lastIndex = Math.min(adjustedQuantity - 1, Math.floor((frameEndMs - windowStart) / interval));
+
+        for (let index = firstIndex; index <= lastIndex; index++) {
+          const time = windowStart + index * interval;
+          if ((time > frameStartMs || (frameStartMs === 0 && time === 0)) && time <= frameEndMs) {
+            slots.push({ time, quantity: 1, itemIntervalMs: 0 });
+          }
+        }
+      }
+    }
+
+    return slots.sort((a, b) => a.time - b.time);
+  };
+
+  const getEventBaseSimulationTime = (event: ScheduledArrivalEvent) => {
+    if (event.startDate) {
+      const dateMs = getDateOnlyMs(event.startDate);
+      if (typeof dateMs === 'number') {
+        return dateMs - getCalendarStartMs() + event.hour * HOUR_MS;
+      }
+    }
+
+    return Math.max(0, event.dayOffset || 0) * DAY_MS + event.hour * HOUR_MS;
+  };
+
+  const getRepeatIntervalMs = (event: ScheduledArrivalEvent) => {
+    const every = Math.max(1, Math.round(event.repeatEvery ?? 1));
+    switch (event.repeat) {
+      case 'daily':
+      case 'workingDay':
+        return every * DAY_MS;
+      case 'weekly':
+        return every * 7 * DAY_MS;
+      case 'monthly':
+        return every * 30 * DAY_MS;
+      case 'yearly':
+        return every * 365 * DAY_MS;
+      case 'none':
+      default:
+        return undefined;
+    }
+  };
+
+  const getEventArrivalSlots = (step: ProcessStep, frameStartMs: number, frameEndMs: number): ArrivalSlot[] => {
+    const events = (step.arrivalEvents || []).filter((event): event is ScheduledArrivalEvent => Boolean(event?.enabled) && (event.quantity || 0) > 0);
+    if (events.length === 0) {
+      return [];
+    }
+
+    const calendarStartMs = getCalendarStartMs();
+    const slots: ArrivalSlot[] = [];
+
+    for (const event of events) {
+      const baseTime = getEventBaseSimulationTime(event);
+      const repeatInterval = getRepeatIntervalMs(event);
+      const maxRuns = Math.max(1, event.occurrenceLimit ?? 100000);
+      const firstRun = repeatInterval ? Math.max(0, Math.floor((frameStartMs - baseTime) / repeatInterval)) : 0;
+      const lastRun = repeatInterval ? Math.min(maxRuns - 1, Math.ceil((frameEndMs - baseTime) / repeatInterval)) : 0;
+
+      for (let run = firstRun; run <= lastRun; run++) {
+        const eventTime = baseTime + (repeatInterval ? run * repeatInterval : 0);
+        if ((eventTime <= frameStartMs && !(frameStartMs === 0 && eventTime === 0)) || eventTime > frameEndMs || eventTime < 0) {
+          continue;
+        }
+
+        const absoluteDate = new Date(calendarStartMs + eventTime);
+        if (event.repeat === 'workingDay' && !normalizeBusinessCalendar(getEffectiveBusinessCalendar(step)).daysOfWeek.includes(absoluteDate.getDay())) {
+          continue;
+        }
+
+        if (!isDateInFilters(absoluteDate, event)) {
+          continue;
+        }
+
+        const demandMultiplier = getStartDemandMultiplier(step, eventTime);
+        const quantity = Math.max(1, Math.round(event.quantity * demandMultiplier));
+        const unitMs = TIME_UNIT_TO_MS[event.itemIntervalUnit || 's'] || 1000;
+        const itemIntervalMs = (event.dispatchMode || 'burst') === 'sequence'
+          ? Math.max(0, event.itemInterval || 0) * unitMs
+          : 0;
+
+        slots.push({ time: eventTime, quantity, itemIntervalMs });
+      }
+    }
+
+    return slots.sort((a, b) => a.time - b.time);
+  };
+
   const applyExecutionSpeed = (step: ProcessStep, item: WorkItem, duration: number): number => {
     const speedMultiplier = getProcessingSpeedMultiplier(step, item);
     const profileMultiplier = typeof item.processingTimeMultiplier === 'number' && Number.isFinite(item.processingTimeMultiplier)
@@ -855,12 +783,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
       const simulationMode = config.simulationMode || 'realistic';
 
     // 1. Check Source Rule Override (Fixed Mode only usually, but applies generally)
-    const hasSourceProcessingOverride = Boolean(
-      item.previousStepId
-      && step.sourceProcessingTimes
-      && Object.prototype.hasOwnProperty.call(step.sourceProcessingTimes, item.previousStepId)
-    );
-    if (!isDelayMode && step.randomnessMode === 'fixed' && hasSourceProcessingOverride && item.previousStepId && step.sourceProcessingTimes) {
+    if (!isDelayMode && step.randomnessMode === 'fixed' && item.previousStepId && step.sourceProcessingTimes && step.sourceProcessingTimes[item.previousStepId]) {
         const baseValue = safeNumber(step.sourceProcessingTimes[item.previousStepId], 1000);
         const baseMs = baseValue * fixedUnitMultiplier;
         // Boundary check: prevent overflow
@@ -887,10 +810,8 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
 
     // 2. Range Mode
     if (step.randomnessMode === 'range') {
-      const rawMinValue = safeNumber(step.minProcessingTime, 500);
-      const rawMaxValue = safeNumber(step.maxProcessingTime, 2000);
-      const minValue = Math.min(rawMinValue, rawMaxValue);
-      const maxValue = Math.max(rawMinValue, rawMaxValue);
+      const minValue = safeNumber(step.minProcessingTime, 500);
+      const maxValue = safeNumber(step.maxProcessingTime, 2000);
       const min = minValue * rangeUnitMultiplier;
       const max = maxValue * rangeUnitMultiplier;
       // Boundary check
@@ -954,51 +875,37 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     item.totalTransmissionTime += BUSINESS_TRANSMISSION_SIM_MS;
   };
 
-  const dispatchQueuedStartItems = (
-    startNode: ProcessStep,
-    startCalendar: ReturnType<typeof normalizeBusinessCalendar>,
-    windowStartSimulationMs: number,
-    windowEndSimulationMs: number,
-    currentWallMs: number
-  ) => {
-    if (!startCalendar.enabled) {
-      return;
-    }
-
-    for (const item of itemsRef.current) {
-      if (item.currentStepId !== startNode.id || item.status !== 'queued') {
-        continue;
-      }
-
-      const targetStepId = item.targetStepId || 'finished';
-      let dispatchAt = Math.max(item.createdAtSimulationMs, windowStartSimulationMs);
-      if (!isWorkingTime(startCalendar, config.calendarStartIso, dispatchAt)) {
-        dispatchAt = getNextWorkingSimulationTime(startCalendar, config.calendarStartIso, dispatchAt);
-      }
-
-      if (dispatchAt > windowEndSimulationMs) {
-        continue;
-      }
-
-      beginTransmission(item, startNode.id, targetStepId, dispatchAt, currentWallMs);
-    }
-  };
-
   const beginProcessing = (
     item: WorkItem,
     step: ProcessStep,
     currentSimulationMs: number
   ) => {
+    const stepCalendar = getEffectiveBusinessCalendar(step);
+    const processingStartSimulationMs = getNextWorkingSimulationTime(stepCalendar, config.calendarStartIso, currentSimulationMs);
     const queuedAtSimulationMs = item.queuedAtSimulationMs;
-    const waitTime = typeof queuedAtSimulationMs === 'number'
-      ? Math.max(0, currentSimulationMs - queuedAtSimulationMs)
-      : 0;
 
-    item.totalWaitTime += waitTime;
+    // Calculate calendar wait time: total time from queue entry to processing start
+    // This includes both working hours and non-working hours (weekends, nights, etc.)
+    // Use case: Customer SLA, response time metrics
+    const calendarWaitTime = typeof queuedAtSimulationMs === 'number'
+      ? Math.max(0, processingStartSimulationMs - queuedAtSimulationMs)
+      : Math.max(0, processingStartSimulationMs - currentSimulationMs);
+
+    // Calculate working wait time: only working hours between queue entry and processing start
+    // This excludes non-working hours (weekends, nights, etc.)
+    // Use case: Internal queue efficiency, resource utilization, capacity planning
+    const workingWaitTime = typeof queuedAtSimulationMs === 'number'
+      ? getWorkingDurationBetween(stepCalendar, config.calendarStartIso, queuedAtSimulationMs, processingStartSimulationMs)
+      : getWorkingDurationBetween(stepCalendar, config.calendarStartIso, currentSimulationMs, processingStartSimulationMs);
+
+    item.totalWaitTime += calendarWaitTime;
+    item.totalWorkingWaitTime += workingWaitTime;
+
     if (!stepCountersRef.current[step.id]) {
       stepCountersRef.current[step.id] = createStepCounter();
     }
-    stepCountersRef.current[step.id].totalWaitTime += waitTime;
+    stepCountersRef.current[step.id].totalWaitTime += calendarWaitTime;
+    stepCountersRef.current[step.id].totalWorkingWaitTime += workingWaitTime;
     stepCountersRef.current[step.id].totalStarted++;
 
     const duration = calculateProcessingDuration(step, item);
@@ -1009,8 +916,8 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     item.requiredDuration = safeDuration;
     item.queuedAtSimulationMs = undefined;
     item.queueCancellationCheckedAtSimulationMs = undefined;
-    item.processingStartedAtSimulationMs = currentSimulationMs;
-    item.processingEndsAtSimulationMs = currentSimulationMs + safeDuration;
+    item.processingStartedAtSimulationMs = processingStartSimulationMs;
+    item.processingEndsAtSimulationMs = addWorkingDuration(stepCalendar, config.calendarStartIso, processingStartSimulationMs, safeDuration);
   };
 
   const beginArrivalAtStep = (
@@ -1064,170 +971,165 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
 
       const steps: ProcessStep[] = stepsRef.current;
       const stepMap = new Map<string, ProcessStep>(steps.map((s: ProcessStep) => [s.id, s]));
+      const stepFlowLookup = buildStepFlowLookup(steps);
       const defaultBusinessCalendar = normalizeBusinessCalendar(config.businessCalendar);
 
-        // 1. Arrival Logic (Absolute Simulated Event Time)
+      const spawnArrivalSlot = (startNode: ProcessStep, slot: ArrivalSlot): 'spawned' | 'delayed' | 'rejected' => {
+        const quantity = Math.max(1, Math.min(MAX_SPAWNS_PER_START_PER_TICK, Math.round(slot.quantity)));
+        const startCalendar = getEffectiveBusinessCalendar(startNode);
+        const isStartWorking = isWorkingTime(startCalendar, config.calendarStartIso, slot.time);
+
+        if (!isStartWorking && startCalendar.nonWorkingArrivalPolicy === 'delay') {
+          const delayedTime = getNextWorkingSimulationTime(startCalendar, config.calendarStartIso, slot.time);
+          delayedArrivalSlotsRef.current[startNode.id] = [
+            ...(delayedArrivalSlotsRef.current[startNode.id] || []),
+            { ...slot, time: delayedTime },
+          ];
+          return 'delayed';
+        }
+
+        if (!isStartWorking && startCalendar.nonWorkingArrivalPolicy === 'reject') {
+          statsRef.current.totalItemsCancelled += quantity;
+          if (stepCountersRef.current[startNode.id]) {
+            stepCountersRef.current[startNode.id].cancelled += quantity;
+          }
+          const flowId = stepFlowLookup.get(startNode.id) || startNode.id;
+          if (!flowCountersRef.current[flowId]) {
+            flowCountersRef.current[flowId] = createFlowCounter(flowId);
+          }
+          flowCountersRef.current[flowId].cancelled += quantity;
+          return 'rejected';
+        }
+
+        for (let batchIndex = 0; batchIndex < quantity; batchIndex++) {
+          let firstTargetId: string | 'finished' = 'finished';
+          if (startNode.connections.length > 0) {
+            firstTargetId = getNextStepId(startNode);
+          }
+
+          if (firstTargetId === 'finished') {
+            continue;
+          }
+
+          const itemSpawnTime = slot.time + (batchIndex * Math.max(0, slot.itemIntervalMs));
+          const itemProfile = getItemProfileForSpawn(startNode);
+          const flowId = stepFlowLookup.get(startNode.id) || startNode.id;
+
+          const newItem: WorkItem = {
+            id: `item-${statsRef.current.totalItemsCreated + 1}`,
+            sourceFlowId: flowId,
+            currentStepId: startNode.id,
+            targetStepId: firstTargetId,
+            status: 'transmitting',
+            previousStepId: startNode.id,
+            progress: 0,
+            transmissionProgress: 0,
+            createdAt: now,
+            createdAtSimulationMs: itemSpawnTime,
+            completedAtSimulationMs: undefined,
+            totalTransmissionTime: 0,
+            totalWaitTime: 0,
+            totalWorkingWaitTime: 0,
+            totalProcessingTime: 0,
+            totalCalendarProcessingTime: 0,
+            itemProfileId: itemProfile?.id,
+            itemProfileName: itemProfile?.name,
+            itemProfileColor: itemProfile?.color,
+            processingTimeMultiplier: itemProfile?.processingTimeMultiplier ?? 1,
+            failureMultiplier: itemProfile?.failureMultiplier ?? 1,
+            cancellationMultiplier: itemProfile?.cancellationMultiplier ?? 1,
+            priority: itemProfile?.priority ?? 1,
+            assignedResourceCount: 1,
+            resourceLoadFactor: 1,
+            executionMode: 'single',
+            stepEntryTime: itemSpawnTime,
+            queuedAtSimulationMs: undefined,
+            queueCancellationCheckedAtSimulationMs: undefined,
+            visualPreviousStepId: undefined,
+            visualTargetStepId: undefined,
+            visualTransmissionStartedAtWallMs: undefined,
+            visualTransmissionEndsAtWallMs: undefined,
+            visualTransmissionProgress: undefined,
+          };
+
+          beginTransmission(newItem, startNode.id, firstTargetId, itemSpawnTime, now);
+          itemsRef.current.push(newItem);
+          statsRef.current.totalItemsCreated++;
+
+          if (stepCountersRef.current[startNode.id]) {
+            stepCountersRef.current[startNode.id].processed++;
+          }
+          if (!flowCountersRef.current[flowId]) {
+            flowCountersRef.current[flowId] = createFlowCounter(flowId);
+          }
+          flowCountersRef.current[flowId].created++;
+        }
+
+        return 'spawned';
+      };
+
+      // 1. Arrival Logic (Absolute Simulated Event Time)
       for (const startNode of steps.filter((s: ProcessStep) => s.type === 'start')) {
-          const startCalendar = getEffectiveBusinessCalendar(startNode);
-          dispatchQueuedStartItems(startNode, startCalendar, frameStartSimulationMs, simulationTimeRef.current, now);
+        if (nextSpawnTimeRef.current[startNode.id] === undefined) {
+          nextSpawnTimeRef.current[startNode.id] = 0;
+        }
+        if (!delayedArrivalSlotsRef.current[startNode.id]) {
+          delayedArrivalSlotsRef.current[startNode.id] = [];
+        }
 
-          // Initialize if missing
-          if (nextSpawnTimeRef.current[startNode.id] === undefined) {
-             nextSpawnTimeRef.current[startNode.id] = 0; 
+        const delayedSlots = delayedArrivalSlotsRef.current[startNode.id]
+          .filter((slot) => slot.time <= simulationTimeRef.current)
+          .sort((a, b) => a.time - b.time);
+        delayedArrivalSlotsRef.current[startNode.id] = delayedArrivalSlotsRef.current[startNode.id]
+          .filter((slot) => slot.time > simulationTimeRef.current);
+
+        let spawnedThisTick = 0;
+        for (const slot of delayedSlots) {
+          if (spawnedThisTick >= MAX_SPAWNS_PER_START_PER_TICK) {
+            delayedArrivalSlotsRef.current[startNode.id].push(slot);
+            continue;
           }
-          
-          let nextSpawnAt = nextSpawnTimeRef.current[startNode.id];
-          if (isNaN(nextSpawnAt)) nextSpawnAt = frameStartSimulationMs;
-          let spawnedThisTick = 0;
-          
-            while (nextSpawnAt <= simulationTimeRef.current && spawnedThisTick < MAX_SPAWNS_PER_START_PER_TICK) {
-              const arrivalModel = startNode.arrivalModel || 'simple';
-              const delayedScheduledArrival = delayedScheduledArrivalRef.current[startNode.id];
-              const scheduledArrival = arrivalModel === 'simple' ? null : delayedScheduledArrival || calculateNextScheduledArrival(startNode, nextSpawnAt);
-              if (arrivalModel !== 'simple' && !scheduledArrival) {
-                nextSpawnAt = simulationTimeRef.current + TIME_UNIT_TO_MS.day;
-                break;
-              }
+          spawnArrivalSlot(startNode, slot);
+          spawnedThisTick += Math.max(1, Math.round(slot.quantity));
+        }
 
-              if (scheduledArrival) {
-                if (scheduledArrival.time > simulationTimeRef.current) {
-                  nextSpawnAt = scheduledArrival.time;
-                  break;
-                }
-
-                nextSpawnAt = scheduledArrival.time;
-              }
-
-              let batchSize = arrivalModel === 'simple'
-                ? getArrivalBatchSize(startNode)
-                : Math.max(1, Math.min(MAX_SCHEDULED_ARRIVAL_QUANTITY, Math.round(scheduledArrival?.quantity ?? 1)));
-              const simulationMode = config.simulationMode || 'realistic';
-              let isStartWorking = isWorkingTime(startCalendar, config.calendarStartIso, nextSpawnAt);
-              const nonWorkingArrivalPolicy = startCalendar.nonWorkingArrivalPolicy || 'queue';
-
-              if (!isStartWorking && nonWorkingArrivalPolicy === 'delay') {
-                const delayedSpawnAt = getNextWorkingSimulationTime(startCalendar, config.calendarStartIso, nextSpawnAt);
-                if (arrivalModel !== 'simple') {
-                  const delayedArrival = collectDelayedScheduledArrival(startNode, nextSpawnAt, delayedSpawnAt, startCalendar);
-                  delayedScheduledArrivalRef.current[startNode.id] = delayedArrival;
-                  batchSize = delayedArrival.quantity;
-                }
-                nextSpawnAt = delayedSpawnAt;
-                isStartWorking = isWorkingTime(startCalendar, config.calendarStartIso, nextSpawnAt);
-                if (nextSpawnAt > simulationTimeRef.current) {
-                  break;
-                }
-              }
-
-              if (!isStartWorking && nonWorkingArrivalPolicy === 'reject') {
-                statsRef.current.totalItemsCancelled += batchSize;
-                if (stepCountersRef.current[startNode.id]) {
-                  stepCountersRef.current[startNode.id].cancelled += batchSize;
-                }
-                nextSpawnAt = arrivalModel === 'simple'
-                  ? nextSpawnAt + calculateNextSpawnDelay(startNode, nextSpawnAt)
-                  : nextSpawnAt + MIN_PROCESSING_DURATION_MS;
-                spawnedThisTick++;
-                continue;
-              }
-
-              const shouldQueueAtStart = !isStartWorking && nonWorkingArrivalPolicy === 'queue';
-
-              if (arrivalModel !== 'simple') {
-                delayedScheduledArrivalRef.current[startNode.id] = undefined;
-              }
-
-              for (let batchIndex = 0; batchIndex < batchSize; batchIndex++) {
-                // SPAWN
-                // Determine immediate target independently for each item
-                let firstTargetId: string | 'finished' = 'finished';
-                if (startNode.connections.length > 0) {
-                  firstTargetId = getNextStepId(startNode);
-                }
-
-                if (firstTargetId !== 'finished' && !stepMap.has(firstTargetId)) {
-                  firstTargetId = 'finished';
-                }
-
-                  // Calculate spawn time based on simulation mode and batch interval
-                  let itemSpawnTime: number;
-                  const batchInterval = typeof startNode.arrivalBatchIntervalMs === 'number' && Number.isFinite(startNode.arrivalBatchIntervalMs)
-                    ? Math.max(0, startNode.arrivalBatchIntervalMs)
-                    : 0;
-
-                  if (simulationMode === 'worst-case' || arrivalModel !== 'simple') {
-                    // Worst-case: all items arrive at exactly the same time (instant surge)
-                    itemSpawnTime = nextSpawnAt;
-                  } else {
-                    // Realistic: configurable time offset between items in a batch
-                    // Default 0ms = simultaneous arrival (e.g., group interview, API burst)
-                    // Can be configured for scenarios like customers entering store (e.g., 5000ms = 5 seconds apart)
-                    itemSpawnTime = nextSpawnAt + (batchIndex * batchInterval);
-                  }
-
-                  const itemProfile = getItemProfileForSpawn(startNode);
-
-                  const newItem: WorkItem = {
-                    id: `item-${statsRef.current.totalItemsCreated + 1}`,
-                  currentStepId: startNode.id,
-                  targetStepId: firstTargetId,
-                  status: shouldQueueAtStart ? 'queued' : 'transmitting',
-                    previousStepId: shouldQueueAtStart ? undefined : startNode.id,
-                    progress: 0,
-                    transmissionProgress: 0,
-                    createdAt: now, // Wall clock for UI creation
-                    createdAtSimulationMs: itemSpawnTime,
-                    completedAtSimulationMs: undefined,
-                    totalTransmissionTime: 0,
-                    totalWaitTime: 0,
-                    totalProcessingTime: 0,
-                    itemProfileId: itemProfile?.id,
-                    itemProfileName: itemProfile?.name,
-                    itemProfileColor: itemProfile?.color,
-                    processingTimeMultiplier: itemProfile?.processingTimeMultiplier ?? 1,
-                    failureMultiplier: itemProfile?.failureMultiplier ?? 1,
-                    cancellationMultiplier: itemProfile?.cancellationMultiplier ?? 1,
-                    priority: itemProfile?.priority ?? 1,
-                    assignedResourceCount: 1,
-                    resourceLoadFactor: 1,
-                    executionMode: 'single',
-                      stepEntryTime: itemSpawnTime,
-                      queuedAtSimulationMs: undefined,
-                      queueCancellationCheckedAtSimulationMs: undefined,
-                    visualPreviousStepId: undefined,
-                    visualTargetStepId: undefined,
-                    visualTransmissionStartedAtWallMs: undefined,
-                    visualTransmissionEndsAtWallMs: undefined,
-                    visualTransmissionProgress: undefined,
-                  };
-
-                  if (shouldQueueAtStart) {
-                    const dispatchAt = getNextWorkingSimulationTime(startCalendar, config.calendarStartIso, itemSpawnTime);
-                    if (dispatchAt <= simulationTimeRef.current) {
-                      beginTransmission(newItem, startNode.id, firstTargetId, dispatchAt, now);
-                    }
-                  } else {
-                    beginTransmission(newItem, startNode.id, firstTargetId, itemSpawnTime, now);
-                  }
-
-                  itemsRef.current.push(newItem);
-                  statsRef.current.totalItemsCreated++;
-                      
-                  // Increment Start Node "Processed" count
-                  if (stepCountersRef.current[startNode.id]) {
-                    stepCountersRef.current[startNode.id].processed++;
-                  }
-              }
-
-              nextSpawnAt = arrivalModel === 'simple'
-                ? nextSpawnAt + calculateNextSpawnDelay(startNode, nextSpawnAt)
-                : nextSpawnAt + MIN_PROCESSING_DURATION_MS;
-              spawnedThisTick++;
+        const arrivalModel = startNode.arrivalModel || 'simple';
+        if (arrivalModel === 'schedule') {
+          const slots = getWindowArrivalSlots(startNode, frameStartSimulationMs, simulationTimeRef.current);
+          for (const slot of slots) {
+            if (spawnedThisTick >= MAX_SPAWNS_PER_START_PER_TICK) break;
+            spawnArrivalSlot(startNode, slot);
+            spawnedThisTick += Math.max(1, Math.round(slot.quantity));
           }
+          continue;
+        }
 
-          dispatchQueuedStartItems(startNode, startCalendar, frameStartSimulationMs, simulationTimeRef.current, now);
-          
-                nextSpawnTimeRef.current[startNode.id] = nextSpawnAt;
+        if (arrivalModel === 'events') {
+          const slots = getEventArrivalSlots(startNode, frameStartSimulationMs, simulationTimeRef.current);
+          for (const slot of slots) {
+            if (spawnedThisTick >= MAX_SPAWNS_PER_START_PER_TICK) break;
+            spawnArrivalSlot(startNode, slot);
+            spawnedThisTick += Math.max(1, Math.round(slot.quantity));
+          }
+          continue;
+        }
+
+        let nextSpawnAt = nextSpawnTimeRef.current[startNode.id];
+        if (isNaN(nextSpawnAt)) nextSpawnAt = frameStartSimulationMs;
+
+        while (nextSpawnAt <= simulationTimeRef.current && spawnedThisTick < MAX_SPAWNS_PER_START_PER_TICK) {
+          const batchSize = getArrivalBatchSize(startNode);
+          const batchInterval = config.simulationMode === 'worst-case'
+            ? 0
+            : typeof startNode.arrivalBatchIntervalMs === 'number' && Number.isFinite(startNode.arrivalBatchIntervalMs)
+              ? Math.max(0, startNode.arrivalBatchIntervalMs)
+              : 0;
+          spawnArrivalSlot(startNode, { time: nextSpawnAt, quantity: batchSize, itemIntervalMs: batchInterval });
+          nextSpawnAt += calculateNextSpawnDelay(startNode, nextSpawnAt);
+          spawnedThisTick += batchSize;
+        }
+
+        nextSpawnTimeRef.current[startNode.id] = nextSpawnAt;
       }
 
       // 2. Resource Tracking Setup
@@ -1257,6 +1159,11 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         statsRef.current.totalItemsCancelled++;
         if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = createStepCounter();
         stepCountersRef.current[item.currentStepId].cancelled++;
+        const flowId = item.sourceFlowId || stepFlowLookup.get(step.id) || stepFlowLookup.get(item.previousStepId || '') || 'flow-all';
+        if (!flowCountersRef.current[flowId]) {
+          flowCountersRef.current[flowId] = createFlowCounter(flowId);
+        }
+        flowCountersRef.current[flowId].cancelled++;
       };
 
       const applyQueueCancellationThrough = (item: WorkItem, step: ProcessStep, throughSimulationMs: number): boolean => {
@@ -1358,14 +1265,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
           }
 
           const queuedAt = queuedItem.queuedAtSimulationMs ?? queuedItem.stepEntryTime ?? availableAtSimulationMs;
-          let startAt = Math.max(availableAtSimulationMs, queuedAt);
-          if (!isWorkingTime(stepCalendar, config.calendarStartIso, startAt)) {
-            startAt = getNextWorkingSimulationTime(stepCalendar, config.calendarStartIso, startAt);
-            if (startAt > simulationTimeRef.current) {
-              break;
-            }
-          }
-
+          const startAt = Math.max(availableAtSimulationMs, queuedAt);
           if (applyQueueCancellationThrough(queuedItem, step, startAt)) {
             continue;
           }
@@ -1393,22 +1293,6 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         stepUsage.set(stepId, currentUsage);
       };
 
-      const startQueuedItemsWhenCalendarAllows = (stepId: string, eventTime: number) => {
-        const step = stepMap.get(stepId);
-        if (!step || step.type !== 'process' || step.simulationMode === 'delay') {
-          return;
-        }
-
-        const stepCalendar = step.calendarMode === 'custom' ? getEffectiveBusinessCalendar(step) : defaultBusinessCalendar;
-        const availableAt = isWorkingTime(stepCalendar, config.calendarStartIso, eventTime)
-          ? eventTime
-          : getNextWorkingSimulationTime(stepCalendar, config.calendarStartIso, eventTime);
-
-        if (availableAt <= simulationTimeRef.current) {
-          startQueuedItemsForStep(stepId, availableAt);
-        }
-      };
-
       const completeBusinessTransmission = (item: WorkItem, arrivalStepId: string | 'finished' | undefined, eventTime: number) => {
         item.transmissionProgress = 1;
         item.transmissionStartedAtSimulationMs = undefined;
@@ -1428,14 +1312,9 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         if (arrivalStep) {
           beginArrivalAtStep(item, arrivalStep, eventTime);
           if (arrivalStep.type === 'process' && arrivalStep.simulationMode !== 'delay') {
-            startQueuedItemsWhenCalendarAllows(arrivalStep.id, eventTime);
+            startQueuedItemsForStep(arrivalStep.id, eventTime);
           }
-          return;
         }
-
-        item.status = 'error';
-        item.targetStepId = undefined;
-        statsRef.current.totalItemsFailed++;
       };
 
       const settleTerminalItem = (item: WorkItem) => {
@@ -1453,16 +1332,37 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
             0,
             completedAtSimulationMs - item.createdAtSimulationMs
           );
-          const businessCycleTime = getWorkingDurationBetween(
-            config.businessCalendar,
-            config.calendarStartIso,
-            item.createdAtSimulationMs,
-            completedAtSimulationMs
-          );
+          const workingCycleTime = getWorkingDurationBetween(defaultBusinessCalendar, config.calendarStartIso, item.createdAtSimulationMs, completedAtSimulationMs);
+          const offHoursDelay = Math.max(0, cycleTime - workingCycleTime);
           statsRef.current.avgCycleTime =
             ((statsRef.current.avgCycleTime * (statsRef.current.totalItemsFinished - 1)) + cycleTime) / statsRef.current.totalItemsFinished;
-          statsRef.current.avgBusinessCycleTime =
-            ((statsRef.current.avgBusinessCycleTime * (statsRef.current.totalItemsFinished - 1)) + businessCycleTime) / statsRef.current.totalItemsFinished;
+          statsRef.current.avgWorkingCycleTime =
+            ((statsRef.current.avgWorkingCycleTime * (statsRef.current.totalItemsFinished - 1)) + workingCycleTime) / statsRef.current.totalItemsFinished;
+          statsRef.current.avgWorkTime =
+            ((statsRef.current.avgWorkTime * (statsRef.current.totalItemsFinished - 1)) + item.totalProcessingTime) / statsRef.current.totalItemsFinished;
+          statsRef.current.avgWaitTime =
+            ((statsRef.current.avgWaitTime * (statsRef.current.totalItemsFinished - 1)) + item.totalWaitTime) / statsRef.current.totalItemsFinished;
+          const nonWorkingDelay = offHoursDelay;
+          statsRef.current.avgNonWorkingDelay =
+            ((statsRef.current.avgNonWorkingDelay * (statsRef.current.totalItemsFinished - 1)) + nonWorkingDelay) / statsRef.current.totalItemsFinished;
+          statsRef.current.flowEfficiency = statsRef.current.avgCycleTime > 0
+            ? statsRef.current.avgWorkTime / statsRef.current.avgCycleTime
+            : 0;
+
+          const flowId = item.sourceFlowId || stepFlowLookup.get(item.currentStepId) || stepFlowLookup.get(item.previousStepId || '') || 'flow-all';
+          if (!flowCountersRef.current[flowId]) {
+            flowCountersRef.current[flowId] = createFlowCounter(flowId);
+          }
+          flowCountersRef.current[flowId].finished++;
+          flowCountersRef.current[flowId].cycleTimeSamples.push(cycleTime);
+          flowCountersRef.current[flowId].workingCycleTimeSamples.push(workingCycleTime);
+          flowCountersRef.current[flowId].totalCycleTime += cycleTime;
+          flowCountersRef.current[flowId].totalWorkingCycleTime += workingCycleTime;
+          flowCountersRef.current[flowId].totalWorkTime += item.totalProcessingTime;
+          flowCountersRef.current[flowId].totalWaitTime += item.totalWaitTime;
+          flowCountersRef.current[flowId].totalTransmissionTime += item.totalTransmissionTime;
+          flowCountersRef.current[flowId].totalOffHoursDelay += offHoursDelay;
+          flowCountersRef.current[flowId].totalNonWorkingDelay += nonWorkingDelay;
 
           // Track stats for End Nodes
           if (item.currentStepId && stepMap.get(item.currentStepId)?.type === 'end') {
@@ -1471,16 +1371,18 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
             }
             stepCountersRef.current[item.currentStepId].processed++;
             stepCountersRef.current[item.currentStepId].totalCompletionTime += cycleTime;
-            stepCountersRef.current[item.currentStepId].totalBusinessCompletionTime += businessCycleTime;
           }
         }
       };
 
       const completeProcessingItem = (item: WorkItem, currentStep: ProcessStep, eventTime: number, safeDuration: number) => {
+        const startedAt = item.processingStartedAtSimulationMs ?? eventTime;
+        const calendarProcessingTime = Math.max(0, eventTime - startedAt);
         item.progress = 0;
         item.processingStartedAtSimulationMs = undefined;
         item.processingEndsAtSimulationMs = undefined;
         item.totalProcessingTime += safeDuration;
+        item.totalCalendarProcessingTime += calendarProcessingTime;
 
         // EXCEPTION: Failure
         const failureMultiplier = typeof item.failureMultiplier === 'number' && Number.isFinite(item.failureMultiplier)
@@ -1492,6 +1394,11 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
           statsRef.current.totalItemsFailed++;
           if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = createStepCounter();
           stepCountersRef.current[item.currentStepId].failed++;
+          const flowId = item.sourceFlowId || stepFlowLookup.get(item.currentStepId) || stepFlowLookup.get(item.previousStepId || '') || 'flow-all';
+          if (!flowCountersRef.current[flowId]) {
+            flowCountersRef.current[flowId] = createFlowCounter(flowId);
+          }
+          flowCountersRef.current[flowId].failed++;
 
           if (currentStep.simulationMode !== 'delay') {
             const currentUsage = stepUsage.get(item.currentStepId) || 0;
@@ -1499,10 +1406,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
               ? getPositiveInteger(item.assignedResourceCount, 1, 1, 1000)
               : 1;
             stepUsage.set(item.currentStepId, Math.max(0, currentUsage - usageUnits));
-            if (currentStep.resourceExecutionMode === 'collaborative' && item.assignedTeamId) {
-              stepTeamUsage.delete(getTeamUsageKey(item.currentStepId, item.assignedTeamId));
-            }
-            startQueuedItemsWhenCalendarAllows(item.currentStepId, eventTime);
+            startQueuedItemsForStep(item.currentStepId, eventTime);
           }
           return;
         }
@@ -1514,6 +1418,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = createStepCounter();
         stepCountersRef.current[item.currentStepId].processed++;
         stepCountersRef.current[item.currentStepId].totalProcessingTime += safeDuration;
+        stepCountersRef.current[item.currentStepId].totalCalendarProcessingTime += calendarProcessingTime;
 
         const completedStepId = item.currentStepId;
 
@@ -1529,9 +1434,6 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
           } else if (nextStep) {
             beginTransmission(item, currentStep.id, nextStep.id, eventTime, now);
             completeBusinessTransmission(item, nextStep.id, eventTime + BUSINESS_TRANSMISSION_SIM_MS);
-          } else {
-            beginTransmission(item, currentStep.id, 'finished', eventTime, now);
-            completeBusinessTransmission(item, 'finished', eventTime + BUSINESS_TRANSMISSION_SIM_MS);
           }
         }
 
@@ -1541,16 +1443,13 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
             ? getPositiveInteger(item.assignedResourceCount, 1, 1, 1000)
             : 1;
           stepUsage.set(completedStepId, Math.max(0, currentUsage - usageUnits));
-          if (currentStep.resourceExecutionMode === 'collaborative' && item.assignedTeamId) {
-            stepTeamUsage.delete(getTeamUsageKey(completedStepId, item.assignedTeamId));
-          }
-          startQueuedItemsWhenCalendarAllows(completedStepId, eventTime);
+          startQueuedItemsForStep(completedStepId, eventTime);
         }
       };
 
       for (const step of steps) {
         if (step.type === 'process' && step.simulationMode !== 'delay') {
-          startQueuedItemsWhenCalendarAllows(step.id, frameStartSimulationMs);
+          startQueuedItemsForStep(step.id, frameStartSimulationMs);
         }
       }
 
@@ -1611,7 +1510,10 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
             const safeDuration = duration > 0 ? duration : 1000;
           const startedAt = item.processingStartedAtSimulationMs ?? simulationTimeRef.current;
           const endsAt = item.processingEndsAtSimulationMs ?? (startedAt + safeDuration);
-          const elapsed = Math.max(0, Math.min(simulationTimeRef.current - startedAt, safeDuration));
+          const elapsed = Math.max(0, Math.min(
+            getWorkingDurationBetween(getEffectiveBusinessCalendar(currentStep), config.calendarStartIso, startedAt, simulationTimeRef.current),
+            safeDuration
+          ));
             const eventTime = endsAt;
 
           item.progress = Math.max(0, Math.min(1, elapsed / safeDuration));
@@ -1694,9 +1596,12 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         steps.forEach((s: ProcessStep) => stepRuntimeById.set(s.id, { queueLength: 0, activeProcessing: 0 }));
 
         let activeItems = 0;
+        let oldestWipAge = 0;
+        let oldestQueueAge = 0;
         for (const item of itemsRef.current) {
           if (!['finished', 'error', 'cancelled'].includes(item.status)) {
             activeItems++;
+            oldestWipAge = Math.max(0, oldestWipAge, simulationTimeRef.current - item.createdAtSimulationMs);
           }
 
           const runtime = stepRuntimeById.get(item.currentStepId);
@@ -1706,6 +1611,8 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
 
           if (item.status === 'queued') {
             runtime.queueLength++;
+            const queuedAt = item.queuedAtSimulationMs ?? item.stepEntryTime ?? item.createdAtSimulationMs;
+            oldestQueueAge = Math.max(0, oldestQueueAge, simulationTimeRef.current - queuedAt);
           } else if (item.status === 'processing') {
             runtime.activeProcessing++;
           }
@@ -1748,14 +1655,10 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
             avgResourcesPerItem,
             avgResourceLoadFactor,
             avgWaitTime: counters.totalStarted > 0 ? counters.totalWaitTime / counters.totalStarted : 0,
+            avgWorkingWaitTime: counters.totalStarted > 0 ? counters.totalWorkingWaitTime / counters.totalStarted : 0,
             avgCompletionTime: counters.processed > 0
               ? s.type === 'end'
                 ? counters.totalCompletionTime / counters.processed
-                : counters.totalProcessingTime / counters.processed
-              : 0,
-            avgBusinessCompletionTime: counters.processed > 0
-              ? s.type === 'end'
-                ? counters.totalBusinessCompletionTime / counters.processed
                 : counters.totalProcessingTime / counters.processed
               : 0,
             totalProcessed: counters.processed,
@@ -1767,15 +1670,31 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         lastUiUpdateRef.current = now;
         setItems(buildVisibleItemsForUi(itemsRef.current));
         setStepStats(newStepStats);
+        setFlowStats(Object.values(flowCountersRef.current).map(toFlowStats));
         setSimulationTimeMs(simulationTimeRef.current);
         const simulatedMinutesElapsed = simulationTimeRef.current / (60 * 1000);
         const avgThroughput = simulatedMinutesElapsed > 0
           ? statsRef.current.totalItemsFinished / simulatedMinutesElapsed
           : 0;
+        const liveResourceCapacity = steps.reduce((sum, step) => (
+          step.type === 'process' && step.simulationMode !== 'delay'
+            ? sum + getStepProcessingLimit(step)
+            : sum
+        ), 0);
+        const liveResourceUsage = steps.reduce((sum, step) => sum + (stepUsage.get(step.id) || 0), 0);
+        const resourceUtilization = liveResourceCapacity > 0 ? liveResourceUsage / liveResourceCapacity : 0;
+        const blockedTimeShare = statsRef.current.avgCycleTime > 0
+          ? Math.min(1, Math.max(0, statsRef.current.avgNonWorkingDelay / statsRef.current.avgCycleTime))
+          : 0;
         setGlobalStats({
           ...statsRef.current,
           avgThroughput,
           activeItems,
+          oldestWipAge,
+          oldestQueueAge,
+          resourceIdleUnits: Math.max(0, liveResourceCapacity - liveResourceUsage),
+          resourceUtilization,
+          blockedTimeShare,
         });
 
         const pauseReason = getAutoPauseReason(activeItems);
@@ -1798,6 +1717,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
   return {
     items,
     stepStats,
+    flowStats,
     simulationTimeMs,
     globalStats,
     autoPauseReason,

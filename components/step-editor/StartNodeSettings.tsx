@@ -96,8 +96,10 @@ export const StartNodeSettings: React.FC<StartNodeSettingsProps> = ({
   addArrivalEvent,
 }) => (
   <div className="p-4 bg-emerald-900/20 border border-emerald-900/50 rounded-lg">
-    <ArrivalInputControls editingStep={editingStep} setEditingStep={setEditingStep} />
     <ArrivalModelSelector editingStep={editingStep} setEditingStep={setEditingStep} />
+    {(editingStep.arrivalModel || 'simple') === 'simple' && (
+      <ArrivalInputControls editingStep={editingStep} setEditingStep={setEditingStep} />
+    )}
     <DemandPeaksSection
       editingStep={editingStep}
       setEditingStep={setEditingStep}
@@ -121,7 +123,9 @@ export const StartNodeSettings: React.FC<StartNodeSettingsProps> = ({
     )}
 
     <BatchSizeField editingStep={editingStep} setEditingStep={setEditingStep} />
-    <ArrivalRateFields editingStep={editingStep} setEditingStep={setEditingStep} />
+    {(editingStep.arrivalModel || 'simple') === 'simple' && (
+      <ArrivalRateFields editingStep={editingStep} setEditingStep={setEditingStep} />
+    )}
   </div>
 );
 
@@ -277,6 +281,62 @@ const DemandPeaksSection: React.FC<StartSectionProps & { addStartDemandModifier:
                     onChange={(event) => setEditingStep(updateStepDemandModifier(editingStep, modifier.id, { endHour: Number(event.target.value) }))}
                     className="w-full rounded border border-amber-500/30 bg-slate-900 px-2 py-1 text-xs text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
                   />
+                </div>
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">Start date</label>
+                  <input
+                    type="date"
+                    value={modifier.startDate || ''}
+                    onChange={(event) => setEditingStep(updateStepDemandModifier(editingStep, modifier.id, { startDate: event.target.value || undefined }))}
+                    className="w-full rounded border border-amber-500/30 bg-slate-900 px-2 py-1 text-xs text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">End date</label>
+                  <input
+                    type="date"
+                    value={modifier.endDate || ''}
+                    onChange={(event) => setEditingStep(updateStepDemandModifier(editingStep, modifier.id, { endDate: event.target.value || undefined }))}
+                    className="w-full rounded border border-amber-500/30 bg-slate-900 px-2 py-1 text-xs text-amber-100 outline-none focus:ring-1 focus:ring-amber-500"
+                  />
+                </div>
+              </div>
+              <div className="mt-2 space-y-2 rounded-lg border border-amber-500/10 bg-amber-500/5 p-2">
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">Weekdays</label>
+                  <div className="grid grid-cols-7 gap-1">
+                    {WEEKDAY_OPTIONS.map((day) => {
+                      const selected = Boolean(modifier.daysOfWeek?.includes(day.value));
+                      return (
+                        <button
+                          key={day.value}
+                          onClick={() => setEditingStep(updateStepDemandModifier(editingStep, modifier.id, { daysOfWeek: toggleNumber(modifier.daysOfWeek, day.value) }))}
+                          className={`rounded border px-1 py-1 text-[10px] font-semibold ${selected ? 'border-amber-300 bg-amber-500 text-slate-950' : 'border-slate-700 bg-slate-900 text-slate-500'}`}
+                        >
+                          {day.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-amber-200">Months</label>
+                  <div className="grid grid-cols-6 gap-1">
+                    {MONTH_OPTIONS.map((month) => {
+                      const selected = Boolean(modifier.months?.includes(month.value));
+                      return (
+                        <button
+                          key={month.value}
+                          onClick={() => setEditingStep(updateStepDemandModifier(editingStep, modifier.id, { months: toggleNumber(modifier.months, month.value) }))}
+                          className={`rounded border px-1 py-1 text-[10px] font-semibold ${selected ? 'border-amber-300 bg-amber-500 text-slate-950' : 'border-slate-700 bg-slate-900 text-slate-500'}`}
+                        >
+                          {month.label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             </div>
@@ -656,19 +716,33 @@ const ExactArrivalEventsSection: React.FC<StartSectionProps & { addArrivalEvent:
 
 const BatchSizeField: React.FC<StartSectionProps> = ({ editingStep, setEditingStep }) => (
   <div className="mb-4">
-    <label className="block text-xs font-semibold text-emerald-400 uppercase mb-2">Batch Size</label>
-    <div className="grid grid-cols-[160px_1fr] gap-3 items-center">
-      <input
-        type="number"
-        min="1"
-        max="1000"
-        step="1"
-        value={editingStep.arrivalBatchSize ?? 1}
-        onChange={(event) => setEditingStep({ ...editingStep, arrivalBatchSize: getBatchSize(event.target.value) })}
-        className="w-full bg-slate-800 border border-emerald-900/50 rounded-lg p-2 text-emerald-100 font-mono focus:ring-2 focus:ring-emerald-500 outline-none"
-      />
-      <div className="rounded-lg border border-emerald-900/40 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
-        Creates this many items at the same simulated arrival time.
+    <label className="block text-xs font-semibold text-emerald-400 uppercase mb-2">Batch Dispatch</label>
+    <div className="grid grid-cols-2 gap-3">
+      <div>
+        <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-emerald-300">Default batch size</label>
+        <input
+          type="number"
+          min="1"
+          max="1000"
+          step="1"
+          value={editingStep.arrivalBatchSize ?? 1}
+          onChange={(event) => setEditingStep({ ...editingStep, arrivalBatchSize: getBatchSize(event.target.value) })}
+          className="w-full bg-slate-800 border border-emerald-900/50 rounded-lg p-2 text-emerald-100 font-mono focus:ring-2 focus:ring-emerald-500 outline-none"
+        />
+      </div>
+      <div>
+        <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-emerald-300">Interval inside batch (ms)</label>
+        <input
+          type="number"
+          min="0"
+          step="100"
+          value={editingStep.arrivalBatchIntervalMs ?? 0}
+          onChange={(event) => setEditingStep({ ...editingStep, arrivalBatchIntervalMs: Math.max(0, Number(event.target.value) || 0) })}
+          className="w-full bg-slate-800 border border-emerald-900/50 rounded-lg p-2 text-emerald-100 font-mono focus:ring-2 focus:ring-emerald-500 outline-none"
+        />
+      </div>
+      <div className="col-span-2 rounded-lg border border-emerald-900/40 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+        Simple mode uses the default batch size. Schedule and Events use each plan's quantity; sequential events can also define item intervals.
       </div>
     </div>
   </div>

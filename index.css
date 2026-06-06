@@ -69,3 +69,146 @@ textarea:focus-visible {
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(100, 116, 139, 0.9);
 }
+
+/* Markdown Content Styles */
+.markdown-content {
+  color: #e2e8f0;
+  line-height: 1.7;
+}
+
+.markdown-content h1 {
+  font-size: 2rem;
+  font-weight: 700;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+  color: #f1f5f9;
+  border-bottom: 2px solid #334155;
+  padding-bottom: 0.5rem;
+}
+
+.markdown-content h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  color: #60a5fa;
+}
+
+.markdown-content h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+  color: #34d399;
+}
+
+.markdown-content h4 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+  color: #a78bfa;
+}
+
+.markdown-content p {
+  margin-bottom: 1rem;
+  color: #cbd5e1;
+}
+
+.markdown-content strong {
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.markdown-content code {
+  background: rgba(15, 23, 42, 0.8);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.875em;
+  color: #fbbf24;
+  font-family: 'Courier New', monospace;
+}
+
+.markdown-content pre {
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(71, 85, 105, 0.5);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  overflow-x: auto;
+  margin-bottom: 1rem;
+}
+
+.markdown-content pre code {
+  background: transparent;
+  padding: 0;
+  color: #e2e8f0;
+}
+
+.markdown-content ul, .markdown-content ol {
+  margin-bottom: 1rem;
+  padding-left: 1.5rem;
+  color: #cbd5e1;
+}
+
+.markdown-content li {
+  margin-bottom: 0.5rem;
+}
+
+.markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.markdown-content th {
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+  padding: 0.75rem;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 2px solid #334155;
+}
+
+.markdown-content td {
+  padding: 0.75rem;
+  border-bottom: 1px solid rgba(71, 85, 105, 0.3);
+  color: #cbd5e1;
+}
+
+.markdown-content tr:hover {
+  background: rgba(51, 65, 85, 0.3);
+}
+
+.markdown-content blockquote {
+  border-left: 4px solid #3b82f6;
+  padding-left: 1rem;
+  margin: 1rem 0;
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.markdown-content a {
+  color: #60a5fa;
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.markdown-content a:hover {
+  color: #3b82f6;
+  text-decoration: underline;
+}
+
+.markdown-content hr {
+  border: none;
+  border-top: 1px solid #334155;
+  margin: 2rem 0;
+}
+
+.markdown-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+  margin: 1rem 0;
+}
+
