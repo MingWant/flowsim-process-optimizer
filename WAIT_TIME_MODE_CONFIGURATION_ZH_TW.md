@@ -32,6 +32,9 @@
 │                                │
 │ Queue Wait (Working)           │
 │ 2.3 hours                      │
+│                                │
+│ Diagnostic Working Wait        │
+│ 3.1 hours                      │
 └────────────────────────────────┘
 ```
 
@@ -104,6 +107,10 @@
 ```
 
 **定義**：僅計算工作時間內的佇列等待
+
+**統計口徑**：`Queue Wait (Working)` 按完成 item 的真實經歷聚合（item-weighted）。如果某個步驟很少被經過，它不會和高流量步驟擁有同等權重。
+
+**診斷補充**：面板中也會保留 `Diagnostic Working Wait`，這是步驟級平均值，用於找瓶頸；它不代表平均每個 item 的真實等待體驗。
 
 **適用場景**：
 - ✅ 佇列效率分析

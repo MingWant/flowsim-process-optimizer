@@ -310,7 +310,7 @@
       <div class="mode-comparison">
         <div class="mode-card both">
           <div class="mode-title">📊 Both</div>
-          <p><strong>顯示：</strong>兩個等待時間指標</p>
+          <p><strong>顯示：</strong>Calendar、Working、Diagnostic 指標</p>
           <p><strong>適合：</strong>完整分析、學習階段、不確定時</p>
           <p><strong>優點：</strong>資訊最全面</p>
         </div>
@@ -324,9 +324,9 @@
 
         <div class="mode-card working">
           <div class="mode-title">⏱️ Working Time</div>
-          <p><strong>顯示：</strong>工作時間（純佇列效率）</p>
+          <p><strong>顯示：</strong>完成項目的真實工作時間等待</p>
           <p><strong>適合：</strong>資源規劃、內部優化</p>
-          <p><strong>優點：</strong>真實佇列效率</p>
+          <p><strong>優點：</strong>item-weighted 佇列效率</p>
         </div>
       </div>
     </div>
@@ -369,6 +369,9 @@
 ⏱️ Working Wait = 0 小時
    （營運：「佇列沒有積壓」）
 
+🩺 Diagnostic Working Wait
+  步驟級平均，用於找瓶頸；不是每個 item 的真實平均
+
 差異 = 64 小時 = 週末時間
       </div>
 
@@ -405,6 +408,9 @@
 
       <h3>Q: 哪個模式最準確？</h3>
       <p><strong>A:</strong> ✅ 都準確，只是視角不同。Calendar Time = 客戶視角（完整等待），Working Time = 營運視角（佇列效率）。</p>
+
+      <h3>Q: Queue Wait (Working) 和 Diagnostic Working Wait 差在哪？</h3>
+      <p><strong>A:</strong> Queue Wait (Working) 按完成 item 的真實經歷聚合；Diagnostic Working Wait 是步驟級平均，適合找瓶頸。</p>
 
       <h3>Q: 兩個指標差異很大，正常嗎？</h3>
       <p><strong>A:</strong> ✅ 完全正常。差異大表示非工作時間影響大（如週末），差異小表示主要是佇列積壓。</p>

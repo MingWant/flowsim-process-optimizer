@@ -10,7 +10,7 @@ interface AutoPauseProgressStats {
   activeItems: number;
 }
 
-interface AutoPauseProgressRow {
+export interface AutoPauseProgressRow {
   label: string;
   target?: number;
   value: number;
@@ -49,18 +49,6 @@ const getCalendarStartMs = (calendarStartIso: string | undefined) => {
   return Number.isFinite(parsed) ? parsed : Date.parse(DEFAULT_CALENDAR_START_ISO);
 };
 
-const getAutoPauseTimeTarget = (autoPause: AutoPauseConfig, calendarStartIso: string | undefined) => {
-  if (autoPause.stopDateIso) {
-    const stopDateMs = Date.parse(autoPause.stopDateIso);
-    const targetMs = stopDateMs - getCalendarStartMs(calendarStartIso);
-    if (Number.isFinite(targetMs) && targetMs > 0) {
-      return targetMs;
-    }
-  }
-
-  return autoPause.simulationTimeMs;
-};
-
 export const getAutoPauseProgressRows = (
   autoPause: AutoPauseConfig | undefined,
   stats: AutoPauseProgressStats,
@@ -72,16 +60,24 @@ export const getAutoPauseProgressRows = (
   }
 
   const calendarStartMs = getCalendarStartMs(calendarStartIso);
-  const timeTarget = getAutoPauseTimeTarget(autoPause, calendarStartIso);
   const currentBusinessDate = new Date(calendarStartMs + Math.max(0, simMs));
+  const stopDateMs = autoPause.stopDateIso ? Date.parse(autoPause.stopDateIso) : NaN;
+  const stopDateTarget = stopDateMs - calendarStartMs;
 
   const rows: AutoPauseProgressRow[] = [
     {
-      label: autoPause.stopDateIso ? 'Stop date' : 'Sim time',
-      target: timeTarget,
+      label: 'Sim time',
+      target: autoPause.simulationTimeMs,
       value: simMs,
-      targetLabel: autoPause.stopDateIso ? formatBusinessDateTime(new Date(Date.parse(autoPause.stopDateIso))) : typeof timeTarget === 'number' ? formatSimulationTime(timeTarget) : undefined,
-      valueLabel: autoPause.stopDateIso ? formatBusinessDateTime(currentBusinessDate) : formatSimulationTime(simMs),
+      targetLabel: typeof autoPause.simulationTimeMs === 'number' ? formatSimulationTime(autoPause.simulationTimeMs) : undefined,
+      valueLabel: formatSimulationTime(simMs),
+    },
+    {
+      label: 'Stop date',
+      target: Number.isFinite(stopDateTarget) && stopDateTarget > 0 ? stopDateTarget : undefined,
+      value: simMs,
+      targetLabel: Number.isFinite(stopDateMs) ? formatBusinessDateTime(new Date(stopDateMs)) : undefined,
+      valueLabel: formatBusinessDateTime(currentBusinessDate),
     },
     { label: 'Created', target: autoPause.totalItemsCreated, value: stats.totalItemsCreated },
     { label: 'Finished', target: autoPause.totalItemsFinished, value: stats.totalItemsFinished },

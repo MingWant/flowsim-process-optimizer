@@ -4,6 +4,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const DEFAULT_CALENDAR_START_ISO = '2026-01-05T00:00:00';
 
+type NormalizedBusinessCalendar = BusinessCalendar & { workingHours: WorkingHourSegment[] };
+
 export const DEFAULT_BUSINESS_CALENDAR: BusinessCalendar = {
   enabled: false,
   daysOfWeek: [1, 2, 3, 4, 5],
@@ -84,7 +86,7 @@ const getStartOfDayMs = (date: Date) => {
   return startOfDay.getTime();
 };
 
-export const normalizeBusinessCalendar = (calendar?: Partial<BusinessCalendar>): BusinessCalendar => {
+export const normalizeBusinessCalendar = (calendar?: Partial<BusinessCalendar>): NormalizedBusinessCalendar => {
   const daysOfWeek = Array.isArray(calendar?.daysOfWeek) && calendar.daysOfWeek.length > 0
     ? Array.from(new Set(calendar.daysOfWeek.map(day => Math.round(day)).filter(day => day >= 0 && day <= 6)))
     : DEFAULT_BUSINESS_CALENDAR.daysOfWeek;
@@ -97,6 +99,40 @@ export const normalizeBusinessCalendar = (calendar?: Partial<BusinessCalendar>):
     workingHours,
     nonWorkingArrivalPolicy: calendar?.nonWorkingArrivalPolicy || DEFAULT_BUSINESS_CALENDAR.nonWorkingArrivalPolicy,
   };
+};
+
+const getDailyWorkingDurationMs = (calendar: NormalizedBusinessCalendar) => {
+  return calendar.workingHours.reduce((total, segment) => total + Math.max(0, segment.end - segment.start) * HOUR_MS, 0);
+};
+
+const getWeeklyWorkingDurationMs = (calendar: NormalizedBusinessCalendar) => {
+  return calendar.daysOfWeek.length * getDailyWorkingDurationMs(calendar);
+};
+
+const findNextWorkingWindowStartMs = (calendar: NormalizedBusinessCalendar, candidateMs: number) => {
+  const candidateDayStartMs = getStartOfDayMs(new Date(candidateMs));
+
+  // Search the current day plus the next full weekly cycle. Because calendars repeat weekly,
+  // this is enough to find the next valid window without a fixed multi-day guard.
+  for (let dayOffset = 0; dayOffset <= 7; dayOffset++) {
+    const dayStartMs = candidateDayStartMs + dayOffset * DAY_MS;
+    const day = new Date(dayStartMs).getDay();
+
+    if (!calendar.daysOfWeek.includes(day)) {
+      continue;
+    }
+
+    for (const segment of calendar.workingHours) {
+      const windowStartMs = dayStartMs + segment.start * HOUR_MS;
+      const windowEndMs = dayStartMs + segment.end * HOUR_MS;
+
+      if (candidateMs < windowEndMs) {
+        return Math.max(candidateMs, windowStartMs);
+      }
+    }
+  }
+
+  return undefined;
 };
 
 export const getBusinessDate = (calendarStartIso: string | undefined, simulationMs: number) => {
@@ -129,35 +165,14 @@ export const getNextWorkingSimulationTime = (calendar: BusinessCalendar | undefi
   }
 
   const safeStartMs = getCalendarStartMs(calendarStartIso);
-  let candidateDate = new Date(safeStartMs + Math.max(0, simulationMs));
+  const candidateMs = safeStartMs + Math.max(0, simulationMs);
+  const nextWindowStartMs = findNextWorkingWindowStartMs(normalized, candidateMs);
 
-  for (let guard = 0; guard < 14; guard++) {
-    const day = candidateDate.getDay();
-    const startOfDay = new Date(candidateDate);
-    startOfDay.setHours(0, 0, 0, 0);
-    const candidateMs = candidateDate.getTime();
-
-    if (normalized.daysOfWeek.includes(day)) {
-      const currentHour = (candidateMs - startOfDay.getTime()) / HOUR_MS;
-
-      // Find the next working segment on this day
-      for (const segment of normalized.workingHours) {
-        const workStart = startOfDay.getTime() + segment.start * HOUR_MS;
-        const workEnd = startOfDay.getTime() + segment.end * HOUR_MS;
-
-        // Use <= to handle the boundary case: if candidateMs === workEnd, we've passed this segment
-        if (candidateMs < workEnd) {
-          const nextMs = Math.max(candidateMs, workStart);
-          return Math.max(simulationMs, nextMs - safeStartMs);
-        }
-      }
-    }
-
-    // No more working time today, try next day
-    candidateDate = new Date(startOfDay.getTime() + DAY_MS);
+  if (typeof nextWindowStartMs === 'number') {
+    return Math.max(simulationMs, nextWindowStartMs - safeStartMs);
   }
 
-  return simulationMs + DAY_MS;
+  return Math.max(0, simulationMs);
 };
 
 export const addWorkingDuration = (
@@ -181,10 +196,18 @@ export const addWorkingDuration = (
   const safeStartMs = getCalendarStartMs(calendarStartIso);
   let cursorMs = safeStartMs + safeSimulationMs;
   let remainingMs = safeDuration;
+  const weeklyWorkingDurationMs = getWeeklyWorkingDurationMs(normalized);
 
-  for (let guard = 0; guard < 100000 && remainingMs > 0; guard++) {
+  while (remainingMs > 0) {
+    const nextWindowStartMs = findNextWorkingWindowStartMs(normalized, cursorMs);
+    if (typeof nextWindowStartMs !== 'number' || weeklyWorkingDurationMs <= 0) {
+      return safeSimulationMs + safeDuration;
+    }
+
+    cursorMs = nextWindowStartMs;
     const cursorDate = new Date(cursorMs);
     const startOfDayMs = getStartOfDayMs(cursorDate);
+    const nextDayMs = startOfDayMs + DAY_MS;
 
     if (normalized.daysOfWeek.includes(cursorDate.getDay())) {
       for (const segment of normalized.workingHours) {
@@ -216,12 +239,20 @@ export const addWorkingDuration = (
       }
     }
 
-    // Move to the start of the next day
-    cursorMs = startOfDayMs + DAY_MS;
+    // Move to the start of the next day. If the remaining work spans many full
+    // weekly cycles, skip those cycles in one jump while leaving the final week
+    // to be resolved window-by-window so the endpoint remains exact.
+    cursorMs = Math.max(cursorMs, nextDayMs);
+    if (remainingMs > weeklyWorkingDurationMs) {
+      const weeksToSkip = Math.floor((remainingMs - 1) / weeklyWorkingDurationMs);
+      if (weeksToSkip > 0) {
+        remainingMs -= weeksToSkip * weeklyWorkingDurationMs;
+        cursorMs += weeksToSkip * 7 * DAY_MS;
+      }
+    }
   }
 
-  // Fallback: if we've exceeded the guard limit, return a fallback value
-  return safeSimulationMs + safeDuration;
+  return cursorMs - safeStartMs;
 };
 
 export const getWorkingDurationBetween = (
@@ -242,11 +273,21 @@ export const getWorkingDurationBetween = (
   const endMs = safeStartMs + toMs;
   let cursorMs = safeStartMs + fromMs;
   let workingMs = 0;
+  const weeklyWorkingDurationMs = getWeeklyWorkingDurationMs(normalized);
 
-  for (let guard = 0; guard < 100000 && cursorMs < endMs; guard++) {
+  while (cursorMs < endMs) {
     const cursorDate = new Date(cursorMs);
     const startOfDayMs = getStartOfDayMs(cursorDate);
     const nextDayMs = startOfDayMs + DAY_MS;
+
+    if (cursorMs === startOfDayMs && weeklyWorkingDurationMs > 0) {
+      const fullWeeks = Math.floor((endMs - cursorMs) / (7 * DAY_MS));
+      if (fullWeeks > 0) {
+        workingMs += fullWeeks * weeklyWorkingDurationMs;
+        cursorMs += fullWeeks * 7 * DAY_MS;
+        continue;
+      }
+    }
 
     if (normalized.daysOfWeek.includes(cursorDate.getDay())) {
       for (const segment of normalized.workingHours) {

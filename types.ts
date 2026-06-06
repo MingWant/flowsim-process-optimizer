@@ -47,6 +47,8 @@ export interface DemandModifier {
 export interface AutoPauseConfig {
   enabled: boolean;
   simulationTimeMs?: number;
+  simulationTimeUnit?: DurationUnit;
+  stopDateIso?: string;
   totalItemsCreated?: number;
   totalItemsFinished?: number;
   totalItemsFailed?: number;
@@ -238,6 +240,9 @@ export interface SimulationStats {
   avgWorkingCycleTime: number;
   medianWorkingCycleTime: number;
   p90WorkingCycleTime: number;
+  avgOperationalWorkingCycleTime: number;
+  medianOperationalWorkingCycleTime: number;
+  p90OperationalWorkingCycleTime: number;
   avgWorkTime: number;
   avgWaitTime: number;
   avgNonWorkingDelay: number;
@@ -258,9 +263,17 @@ export interface FlowStats {
   totalItemsCancelled: number;
   totalItemsFailed: number;
   avgCycleTime: number;
+  medianCycleTime: number;
+  p90CycleTime: number;
   avgWorkingCycleTime: number;
+  medianWorkingCycleTime: number;
+  p90WorkingCycleTime: number;
+  avgOperationalWorkingCycleTime: number;
+  medianOperationalWorkingCycleTime: number;
+  p90OperationalWorkingCycleTime: number;
   avgWorkTime: number;
   avgWaitTime: number;
+  avgWorkingWaitTime: number;
   avgTransmissionTime: number;
   avgOffHoursDelay: number;
   avgNonWorkingDelay: number;

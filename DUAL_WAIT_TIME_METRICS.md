@@ -2,7 +2,7 @@
 
 ## 概述
 
-系统现在提供**两种等待时间指标**，分别用于不同的分析场景：
+系统现在提供**两种 item 视角等待时间指标**，并额外保留一个**步骤诊断指标**，分别用于不同的分析场景：
 
 ### 1. `avgWaitTime` - 日历等待时间（Calendar Wait Time）
 **定义**：从任务入队到开始处理的完整日历时间（包含非工作时间）
@@ -36,6 +36,22 @@ avgWorkingWaitTime = 0 小时（周末不算等待）
 avgWorkingWaitTime = 10 分钟（只算周五下班前的等待）
 ```
 
+### 3. `Diagnostic Working Wait` - 步骤级诊断等待时间
+**定义**：各步骤 `avgWorkingWaitTime` 的步骤级平均值，用于诊断瓶颈。
+
+**重要区别**：
+- `Queue Wait (Working)` / `FlowStats.avgWorkingWaitTime`：按完成 item 的真实经历聚合，适合看客户/item 的真实工作时间等待体验。
+- `Diagnostic Working Wait`：按步骤平均，适合看哪个流程段可能堵塞；它不是 item-weighted，不应当解读为“平均每个 item 等多久”。
+
+**示例**：
+```
+步骤 A：100 个 item，Working Wait 平均 1 分钟
+步骤 B：1 个 item，Working Wait 平均 100 分钟
+
+Item-weighted Queue Wait (Working) ≈ (100*1 + 1*100) / 101 = 1.98 分钟
+Diagnostic Working Wait = (1 + 100) / 2 = 50.5 分钟
+```
+
 ## 数据结构
 
 ### WorkItem
@@ -54,6 +70,16 @@ interface StepStats {
   // ...
   avgWaitTime: number;           // 平均日历等待时间
   avgWorkingWaitTime: number;    // 平均工作等待时间
+  // ...
+}
+```
+
+### FlowStats
+```typescript
+interface FlowStats {
+  // ...
+  avgWaitTime: number;           // 完成 item 的平均日历等待时间
+  avgWorkingWaitTime: number;    // 完成 item 的平均工作等待时间（item-weighted）
   // ...
 }
 ```
@@ -78,6 +104,18 @@ const workingWaitTime = getWorkingDurationBetween(
 item.totalWaitTime += calendarWaitTime;
 item.totalWorkingWaitTime += workingWaitTime;
 ```
+
+### 在完成 item 时汇总到 Flow
+
+```typescript
+flowCounter.totalWaitTime += item.totalWaitTime;
+flowCounter.totalWorkingWaitTime += item.totalWorkingWaitTime;
+
+flowStats.avgWaitTime = totalWaitTime / finished;
+flowStats.avgWorkingWaitTime = totalWorkingWaitTime / finished;
+```
+
+这样 Flow 级 `Queue Wait (Working)` 代表完成 item 的真实经历，而不是简单平均每个步骤。
 
 ## 使用场景
 

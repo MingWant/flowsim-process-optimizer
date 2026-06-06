@@ -4,7 +4,7 @@
 
 ### 📊 Both (預設)
 ```
-顯示：兩個指標
+顯示：Calendar、Working，以及診斷用 Working 指標
 適合：完整分析、學習階段
 ```
 
@@ -16,7 +16,7 @@
 
 ### ⏱️ Working Time
 ```
-顯示：工作時間（純佇列效率）
+顯示：完成項目的工作時間等待（item-weighted）
 適合：資源規劃、內部優化
 ```
 
@@ -48,6 +48,9 @@
 
 ⏱️ Working Time = 0 小時
    （營運：「佇列沒有積壓」）
+
+🩺 Diagnostic Working Wait
+   步驟級平均，用來找瓶頸；不代表每個 item 的真實平均等待
 
 差異 = 64 小時 = 週末
 ```
@@ -90,6 +93,9 @@ A: ❌ 不會，只改變顯示
 
 **Q: 哪個模式最準？**  
 A: ✅ 都準，只是視角不同
+
+**Q: Queue Wait (Working) 和 Diagnostic Working Wait 差在哪？**  
+A: Queue Wait (Working) 按完成 item 的真實經歷聚合；Diagnostic Working Wait 是步驟級平均，用於找瓶頸。
 
 **Q: 會儲存我的選擇嗎？**  
 A: ⚠️ 目前不會，重新整理會重設

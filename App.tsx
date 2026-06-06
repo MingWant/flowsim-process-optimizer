@@ -10,6 +10,7 @@ import { MarkdownViewer } from './components/MarkdownViewer';
 import { StartNodeSettings } from './components/step-editor/StartNodeSettings';
 import { generateScenario, analyzeBottlenecks } from './services/geminiService';
 import { DEFAULT_BUSINESS_CALENDAR, getActiveDemandModifiers, getBusinessDate, getDemandMultiplier, isWorkingTime, normalizeBusinessCalendar, normalizeDemandModifiers } from './services/simulationCalendar';
+import { formatSimulationTime, getAutoPauseProgressRows } from './utils/formatters';
 import { Play, Pause, RotateCcw, Download, Upload, Zap, MessageSquare, Loader2, Sparkles, Menu, X, Settings, BarChart3, ArrowRight, ArrowDownUp, Clock, PlayCircle, StopCircle, Box, Shuffle, AlertTriangle, Palette, Users, Dna, Copy, ClipboardPaste, Trash2, BookOpen } from 'lucide-react';
 
 interface CanvasSpawnPosition {
@@ -54,6 +55,20 @@ const TIME_COMPRESSION_PRESETS = [
   { value: 365 * 24 * 60 * 60, label: '1 sim year / sec', hint: 'For long-horizon scenario testing' },
 ] as const;
 
+const AUTO_PAUSE_TIME_UNITS: Array<{ value: DurationUnit; label: string; ms: number }> = [
+  { value: 'ms', label: 'ms', ms: 1 },
+  { value: 's', label: 'sec', ms: 1000 },
+  { value: 'min', label: 'min', ms: 60 * 1000 },
+  { value: 'h', label: 'hours', ms: 60 * 60 * 1000 },
+  { value: 'workingDay', label: 'working days', ms: 8 * 60 * 60 * 1000 },
+  { value: 'day', label: 'days', ms: 24 * 60 * 60 * 1000 },
+  { value: 'week', label: 'weeks', ms: 7 * 24 * 60 * 60 * 1000 },
+  { value: 'month', label: 'months', ms: 30 * 24 * 60 * 60 * 1000 },
+  { value: 'year', label: 'years', ms: 365 * 24 * 60 * 60 * 1000 },
+];
+
+const DEFAULT_CALENDAR_START_ISO = '2026-01-05T00:00:00';
+
 const UI_THEMES: { id: UiTheme; label: string; swatch: string }[] = [
   { id: 'dark', label: 'Dark', swatch: 'bg-slate-950' },
   { id: 'light', label: 'Light', swatch: 'bg-slate-100' },
@@ -77,23 +92,6 @@ const NON_WORKING_POLICY_LABELS: Record<NonWorkingArrivalPolicy, string> = {
   reject: 'Reject / cancel arrivals',
 };
 
-const formatSimulationTime = (totalMs: number) => {
-  const safeMs = Math.max(0, Math.floor(totalMs));
-  const totalSeconds = Math.floor(safeMs / 1000);
-  const seconds = totalSeconds % 60;
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  const minutes = totalMinutes % 60;
-  const totalHours = Math.floor(totalMinutes / 60);
-  const hours = totalHours % 24;
-  const days = Math.floor(totalHours / 24);
-
-  if (days > 0) {
-    return `D${days} ${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-  }
-
-  return `${String(totalHours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-};
-
 const formatBusinessDateTime = (date: Date) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -101,21 +99,6 @@ const formatBusinessDateTime = (date: Date) => {
   const hours = String(date.getHours()).padStart(2, '0');
   const minutes = String(date.getMinutes()).padStart(2, '0');
   return `${year}-${month}-${day} ${hours}:${minutes}`;
-};
-
-const getAutoPauseProgressRows = (autoPause: AutoPauseConfig | undefined, stats: { totalItemsCreated: number; totalItemsFinished: number; totalItemsFailed: number; totalItemsCancelled: number; activeItems: number }, simMs: number) => {
-  if (!autoPause?.enabled) {
-    return [];
-  }
-
-  return [
-    { label: 'Sim time', target: autoPause.simulationTimeMs, value: simMs },
-    { label: 'Created', target: autoPause.totalItemsCreated, value: stats.totalItemsCreated },
-    { label: 'Finished', target: autoPause.totalItemsFinished, value: stats.totalItemsFinished },
-    { label: 'Active', target: autoPause.activeItems, value: stats.activeItems },
-    { label: 'Failed', target: autoPause.totalItemsFailed, value: stats.totalItemsFailed },
-    { label: 'Cancelled', target: autoPause.totalItemsCancelled, value: stats.totalItemsCancelled },
-  ].filter((row): row is { label: string; target: number; value: number } => typeof row.target === 'number' && row.target > 0);
 };
 
 const CUSTOM_CLOCK_VALUE = 'custom';
@@ -163,6 +146,13 @@ const sanitizeAutoPause = (value: unknown): AutoPauseConfig => {
     return { enabled: false };
   }
 
+  const simulationTimeUnit = typeof value.simulationTimeUnit === 'string' && DURATION_UNITS.some((unit) => unit.value === value.simulationTimeUnit)
+    ? value.simulationTimeUnit as DurationUnit
+    : undefined;
+  const stopDateIso = typeof value.stopDateIso === 'string' && Number.isFinite(Date.parse(value.stopDateIso))
+    ? value.stopDateIso
+    : undefined;
+
   const getOptionalTarget = (target: unknown) => {
     const parsed = Number(target);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
@@ -171,6 +161,8 @@ const sanitizeAutoPause = (value: unknown): AutoPauseConfig => {
   return {
     enabled: Boolean(value.enabled),
     simulationTimeMs: getOptionalTarget(value.simulationTimeMs),
+    simulationTimeUnit,
+    stopDateIso,
     totalItemsCreated: getOptionalTarget(value.totalItemsCreated),
     totalItemsFinished: getOptionalTarget(value.totalItemsFinished),
     totalItemsFailed: getOptionalTarget(value.totalItemsFailed),
@@ -444,8 +436,8 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
     ? normalizeBusinessCalendar({
         enabled: rawStep.businessCalendar.enabled !== false,
         daysOfWeek: Array.isArray(rawStep.businessCalendar.daysOfWeek) ? rawStep.businessCalendar.daysOfWeek.map(day => Number(day)) : DEFAULT_BUSINESS_CALENDAR.daysOfWeek,
-        startHour: toFiniteNumber(rawStep.businessCalendar.startHour, DEFAULT_BUSINESS_CALENDAR.startHour),
-        endHour: toFiniteNumber(rawStep.businessCalendar.endHour, DEFAULT_BUSINESS_CALENDAR.endHour),
+        startHour: toFiniteNumber(rawStep.businessCalendar.startHour, DEFAULT_BUSINESS_CALENDAR.startHour ?? 9),
+        endHour: toFiniteNumber(rawStep.businessCalendar.endHour, DEFAULT_BUSINESS_CALENDAR.endHour ?? 17),
         nonWorkingArrivalPolicy: typeof rawStep.businessCalendar.nonWorkingArrivalPolicy === 'string' && VALID_NON_WORKING_POLICIES.includes(rawStep.businessCalendar.nonWorkingArrivalPolicy as NonWorkingArrivalPolicy)
           ? rawStep.businessCalendar.nonWorkingArrivalPolicy as NonWorkingArrivalPolicy
           : DEFAULT_BUSINESS_CALENDAR.nonWorkingArrivalPolicy,
@@ -617,13 +609,13 @@ const sanitizeConfig = (rawConfig: unknown, migrateDefaultVariance = false): Sim
     simulationMode: typeof rawConfig.simulationMode === 'string' && ['realistic', 'worst-case'].includes(rawConfig.simulationMode)
       ? rawConfig.simulationMode as 'realistic' | 'worst-case'
       : 'realistic',
-    calendarStartIso: typeof rawConfig.calendarStartIso === 'string' && rawConfig.calendarStartIso.trim() ? rawConfig.calendarStartIso : '2026-01-05T00:00:00',
+    calendarStartIso: typeof rawConfig.calendarStartIso === 'string' && rawConfig.calendarStartIso.trim() ? rawConfig.calendarStartIso : DEFAULT_CALENDAR_START_ISO,
     businessCalendar: isObjectRecord(rawConfig.businessCalendar)
       ? normalizeBusinessCalendar({
           enabled: Boolean(rawConfig.businessCalendar.enabled),
           daysOfWeek: Array.isArray(rawConfig.businessCalendar.daysOfWeek) ? rawConfig.businessCalendar.daysOfWeek.map(day => Number(day)) : DEFAULT_BUSINESS_CALENDAR.daysOfWeek,
-          startHour: toFiniteNumber(rawConfig.businessCalendar.startHour, DEFAULT_BUSINESS_CALENDAR.startHour),
-          endHour: toFiniteNumber(rawConfig.businessCalendar.endHour, DEFAULT_BUSINESS_CALENDAR.endHour),
+          startHour: toFiniteNumber(rawConfig.businessCalendar.startHour, DEFAULT_BUSINESS_CALENDAR.startHour ?? 9),
+          endHour: toFiniteNumber(rawConfig.businessCalendar.endHour, DEFAULT_BUSINESS_CALENDAR.endHour ?? 17),
           nonWorkingArrivalPolicy: typeof rawConfig.businessCalendar.nonWorkingArrivalPolicy === 'string' && VALID_NON_WORKING_POLICIES.includes(rawConfig.businessCalendar.nonWorkingArrivalPolicy as NonWorkingArrivalPolicy)
             ? rawConfig.businessCalendar.nonWorkingArrivalPolicy as NonWorkingArrivalPolicy
             : DEFAULT_BUSINESS_CALENDAR.nonWorkingArrivalPolicy,
@@ -1199,6 +1191,16 @@ const App: React.FC = () => {
   const activeCompressionPreset = TIME_COMPRESSION_PRESETS.find(preset => preset.value === config.timeCompression);
   const simulationClockLabel = formatSimulationTime(simulationTimeMs);
   const compressionSelectValue = activeCompressionPreset ? String(activeCompressionPreset.value) : CUSTOM_CLOCK_VALUE;
+  const autoPauseTimeUnit = config.autoPause?.simulationTimeUnit || 'ms';
+  const autoPauseTimeUnitMs = AUTO_PAUSE_TIME_UNITS.find((unit) => unit.value === autoPauseTimeUnit)?.ms || 1;
+  const autoPauseTimeValue = typeof config.autoPause?.simulationTimeMs === 'number'
+    ? Number((config.autoPause.simulationTimeMs / autoPauseTimeUnitMs).toFixed(3))
+    : '';
+  const calendarStartMs = Date.parse(config.calendarStartIso || DEFAULT_CALENDAR_START_ISO);
+  const safeCalendarStartMs = Number.isFinite(calendarStartMs) ? calendarStartMs : Date.parse(DEFAULT_CALENDAR_START_ISO);
+  const stopDateMs = config.autoPause?.stopDateIso ? Date.parse(config.autoPause.stopDateIso) : NaN;
+  const isStopDateBeforeStart = Boolean(config.autoPause?.stopDateIso && Number.isFinite(stopDateMs) && stopDateMs <= safeCalendarStartMs);
+  const calendarStartInputValue = (config.calendarStartIso || DEFAULT_CALENDAR_START_ISO).slice(0, 16);
   const draftStatusMessage = draftStatus === 'restored'
     ? 'Recovered your last local draft.'
     : draftStatus === 'saved'
@@ -1231,7 +1233,7 @@ const App: React.FC = () => {
   const activeDemandModifiers = getActiveDemandModifiers(demandModifiers, config.calendarStartIso, simulationTimeMs);
   const activeDemandModifierIds = new Set(activeDemandModifiers.map((modifier) => modifier.id));
   const currentDemandMultiplier = getDemandMultiplier(demandModifiers, config.calendarStartIso, simulationTimeMs);
-  const autoPauseProgressRows = getAutoPauseProgressRows(config.autoPause, globalStats, simulationTimeMs);
+  const autoPauseProgressRows = getAutoPauseProgressRows(config.autoPause, globalStats, simulationTimeMs, config.calendarStartIso);
   const updateBusinessCalendar = (updates: Partial<typeof businessCalendar>) => {
     setConfig((previous) => ({
       ...previous,
@@ -1699,7 +1701,7 @@ const App: React.FC = () => {
                           <div key={row.label}>
                             <div className="mb-0.5 flex justify-between gap-2 text-[9px] text-slate-400">
                               <span>{row.label}</span>
-                              <span className="font-mono text-rose-100">{Math.floor(row.value)}/{row.target}</span>
+                              <span className="font-mono text-rose-100">{row.valueLabel || Math.floor(row.value)}/{row.targetLabel || row.target}</span>
                             </div>
                             <div className="h-1 overflow-hidden rounded-full bg-slate-800">
                               <div className="h-full rounded-full bg-rose-400" style={{ width: `${pct}%` }} />
@@ -1731,35 +1733,113 @@ const App: React.FC = () => {
                 </div>
               )}
               {config.autoPause?.enabled && (
-                <div className="grid grid-cols-2 gap-2">
-                  {[
-                    { key: 'simulationTimeMs' as const, label: 'Sim time', step: 1000, placeholder: 'ms' },
-                    { key: 'totalItemsCreated' as const, label: 'Created', step: 1, placeholder: 'items' },
-                    { key: 'totalItemsFinished' as const, label: 'Finished', step: 1, placeholder: 'items' },
-                    { key: 'activeItems' as const, label: 'Active', step: 1, placeholder: 'items' },
-                    { key: 'totalItemsFailed' as const, label: 'Failed', step: 1, placeholder: 'items' },
-                    { key: 'totalItemsCancelled' as const, label: 'Cancelled', step: 1, placeholder: 'items' },
-                  ].map((field) => (
-                    <div key={field.key}>
-                      <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-rose-200">{field.label}</label>
+                <div className="space-y-2">
+                  <div>
+                    <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-rose-200">Sim time</label>
+                    <div className="grid grid-cols-[1fr_96px] gap-2">
                       <input
                         type="number"
                         min="0"
-                        step={field.step}
-                        placeholder={field.placeholder}
-                        value={config.autoPause?.[field.key] ?? ''}
-                        onChange={(e) => setConfig((previous) => ({
-                          ...previous,
-                          autoPause: {
-                            ...(previous.autoPause || { enabled: true }),
-                            enabled: true,
-                            [field.key]: e.target.value ? Number(e.target.value) : undefined,
-                          },
-                        }))}
+                        step="0.001"
+                        placeholder="duration"
+                        value={autoPauseTimeValue}
+                        onChange={(e) => setConfig((previous) => {
+                          const unit = previous.autoPause?.simulationTimeUnit || autoPauseTimeUnit;
+                          const unitMs = AUTO_PAUSE_TIME_UNITS.find((option) => option.value === unit)?.ms || 1;
+                          return {
+                            ...previous,
+                            autoPause: {
+                              ...(previous.autoPause || { enabled: true }),
+                              enabled: true,
+                              simulationTimeUnit: unit,
+                              simulationTimeMs: e.target.value ? Number(e.target.value) * unitMs : undefined,
+                            },
+                          };
+                        })}
                         className="w-full rounded-lg border border-rose-500/30 bg-slate-900 px-2 py-1.5 text-xs text-rose-100 outline-none focus:ring-1 focus:ring-rose-500"
                       />
+                      <select
+                        value={autoPauseTimeUnit}
+                        onChange={(e) => setConfig((previous) => {
+                          const nextUnit = e.target.value as DurationUnit;
+                          const previousUnit = previous.autoPause?.simulationTimeUnit || autoPauseTimeUnit;
+                          const previousUnitMs = AUTO_PAUSE_TIME_UNITS.find((option) => option.value === previousUnit)?.ms || 1;
+                          const nextUnitMs = AUTO_PAUSE_TIME_UNITS.find((option) => option.value === nextUnit)?.ms || 1;
+                          const displayedValue = typeof previous.autoPause?.simulationTimeMs === 'number'
+                            ? previous.autoPause.simulationTimeMs / previousUnitMs
+                            : undefined;
+
+                          return {
+                            ...previous,
+                            autoPause: {
+                              ...(previous.autoPause || { enabled: true }),
+                              enabled: true,
+                              simulationTimeUnit: nextUnit,
+                              simulationTimeMs: typeof displayedValue === 'number' ? displayedValue * nextUnitMs : undefined,
+                            },
+                          };
+                        })}
+                        className="w-full rounded-lg border border-rose-500/30 bg-slate-900 px-2 py-1.5 text-xs text-rose-100 outline-none focus:ring-1 focus:ring-rose-500"
+                      >
+                        {AUTO_PAUSE_TIME_UNITS.map((unit) => (
+                          <option key={unit.value} value={unit.value}>{unit.label}</option>
+                        ))}
+                      </select>
                     </div>
-                  ))}
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-rose-200">Stop date</label>
+                    <input
+                      type="datetime-local"
+                      min={calendarStartInputValue}
+                      value={config.autoPause.stopDateIso ? config.autoPause.stopDateIso.slice(0, 16) : ''}
+                      onChange={(e) => setConfig((previous) => ({
+                        ...previous,
+                        autoPause: {
+                          ...(previous.autoPause || { enabled: true }),
+                          enabled: true,
+                          stopDateIso: e.target.value ? `${e.target.value}:00` : undefined,
+                        },
+                      }))}
+                      className={`w-full rounded-lg border bg-slate-900 px-2 py-1.5 text-xs text-rose-100 outline-none focus:ring-1 focus:ring-rose-500 ${isStopDateBeforeStart ? 'border-amber-400/70' : 'border-rose-500/30'}`}
+                    />
+                    {isStopDateBeforeStart && (
+                      <p className="mt-1 text-[10px] leading-snug text-amber-200">
+                        Stop date must be after the simulation start ({calendarStartInputValue.replace('T', ' ')}).
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { key: 'totalItemsCreated' as const, label: 'Created', step: 1, placeholder: 'items' },
+                      { key: 'totalItemsFinished' as const, label: 'Finished', step: 1, placeholder: 'items' },
+                      { key: 'activeItems' as const, label: 'Active', step: 1, placeholder: 'items' },
+                      { key: 'totalItemsFailed' as const, label: 'Failed', step: 1, placeholder: 'items' },
+                      { key: 'totalItemsCancelled' as const, label: 'Cancelled', step: 1, placeholder: 'items' },
+                    ].map((field) => (
+                      <div key={field.key}>
+                        <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-rose-200">{field.label}</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step={field.step}
+                          placeholder={field.placeholder}
+                          value={config.autoPause?.[field.key] ?? ''}
+                          onChange={(e) => setConfig((previous) => ({
+                            ...previous,
+                            autoPause: {
+                              ...(previous.autoPause || { enabled: true }),
+                              enabled: true,
+                              [field.key]: e.target.value ? Number(e.target.value) : undefined,
+                            },
+                          }))}
+                          className="w-full rounded-lg border border-rose-500/30 bg-slate-900 px-2 py-1.5 text-xs text-rose-100 outline-none focus:ring-1 focus:ring-rose-500"
+                        />
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -1782,7 +1862,7 @@ const App: React.FC = () => {
                     <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-indigo-200">Start date</label>
                     <input
                       type="datetime-local"
-                      value={(config.calendarStartIso || '2026-01-05T00:00:00').slice(0, 16)}
+                      value={(config.calendarStartIso || DEFAULT_CALENDAR_START_ISO).slice(0, 16)}
                       onChange={(e) => setConfig((previous) => ({ ...previous, calendarStartIso: e.target.value ? `${e.target.value}:00` : previous.calendarStartIso }))}
                       className="w-full rounded-lg border border-indigo-500/30 bg-slate-900 px-2 py-1.5 text-[11px] text-indigo-100 outline-none focus:ring-1 focus:ring-indigo-500"
                     />
@@ -3202,7 +3282,8 @@ const App: React.FC = () => {
                      {/* Rules Tab */}
                      {activeTab === 'rules' && editingStep.type !== 'start' && (
                          <div className="space-y-4">
-                             <p className="text-sm text-slate-400 mb-4">Override processing time based on where the item came from. (Applies mainly to Fixed mode)</p>
+                             <p className="text-sm text-slate-400 mb-1">Override processing time based on where the item came from. (Applies mainly to Fixed mode)</p>
+                             <p className="mb-4 text-xs text-slate-500">Values use this step&apos;s Fixed processing unit: <span className="font-mono text-slate-300">{DURATION_UNITS.find((unit) => unit.value === (editingStep.processingTimeUnit || 'ms'))?.label || 'ms'}</span>.</p>
                              
                              {potentialSources.length === 0 ? (
                                  <div className="text-center py-8 text-slate-500 italic">
@@ -3226,7 +3307,9 @@ const App: React.FC = () => {
                                                          onChange={(e) => updateSourceRule(source.id, parseInt(e.target.value))}
                                                          className="w-24 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm text-right focus:border-blue-500 outline-none"
                                                      />
-                                                     <span className="text-xs text-slate-500 w-6">ms</span>
+                                                     <span className="w-20 truncate text-xs text-slate-500" title={DURATION_UNITS.find((unit) => unit.value === (editingStep.processingTimeUnit || 'ms'))?.label || 'ms'}>
+                                                        {DURATION_UNITS.find((unit) => unit.value === (editingStep.processingTimeUnit || 'ms'))?.label || 'ms'}
+                                                     </span>
                                                  </div>
                                              </div>
                                          )

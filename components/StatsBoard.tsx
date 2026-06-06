@@ -103,6 +103,10 @@ const formatDurationValue = (milliseconds: number, unit: DurationUnit) => {
 
 const clampPercent = (value: number) => Math.min(999, Math.max(0, value * 100));
 
+const getStepResourceCapacity = (step: ProcessStep, stats?: StepStats) => (
+  Math.max(0, stats?.totalResources || step.capacity || 0)
+);
+
 const getFlowGroups = (steps: ProcessStep[]): FlowGroup[] => {
   const stepById = new Map(steps.map(step => [step.id, step]));
   const adjacency = new Map<string, Set<string>>();
@@ -206,12 +210,18 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
 
   const throughputUnit = getPreferredThroughputUnit(steps);
   const throughputUnitMs = TIME_UNIT_TO_MS[throughputUnit];
-  const cycleTimeUnitMs = TIME_UNIT_TO_MS[cycleTimeUnit];
   const throughputValue = simulationTimeMs > 0
     ? (globalStats.totalItemsFinished / simulationTimeMs) * throughputUnitMs
     : 0;
-  const cycleTimeValue = globalStats.avgCycleTime / cycleTimeUnitMs;
+  const calendarCycleTimeValue = formatDurationValue(globalStats.avgCycleTime || 0, cycleTimeUnit);
+  const medianCycleTimeValue = formatDurationValue(globalStats.medianCycleTime || 0, cycleTimeUnit);
+  const p90CycleTimeValue = formatDurationValue(globalStats.p90CycleTime || 0, cycleTimeUnit);
   const workingCycleTimeValue = formatDurationValue(globalStats.avgWorkingCycleTime || 0, cycleTimeUnit);
+  const medianWorkingCycleTimeValue = formatDurationValue(globalStats.medianWorkingCycleTime || 0, cycleTimeUnit);
+  const p90WorkingCycleTimeValue = formatDurationValue(globalStats.p90WorkingCycleTime || 0, cycleTimeUnit);
+  const operationalWorkingCycleTimeValue = formatDurationValue(globalStats.avgOperationalWorkingCycleTime || 0, cycleTimeUnit);
+  const medianOperationalWorkingCycleTimeValue = formatDurationValue(globalStats.medianOperationalWorkingCycleTime || 0, cycleTimeUnit);
+  const p90OperationalWorkingCycleTimeValue = formatDurationValue(globalStats.p90OperationalWorkingCycleTime || 0, cycleTimeUnit);
   const workTimeValue = formatDurationValue(globalStats.avgWorkTime || 0, cycleTimeUnit);
   const waitTimeValue = formatDurationValue(globalStats.avgWaitTime || 0, cycleTimeUnit);
   const nonWorkingDelayValue = formatDurationValue(globalStats.avgNonWorkingDelay || 0, cycleTimeUnit);
@@ -220,6 +230,27 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
   const oldestQueueAgeValue = formatDurationValue(globalStats.oldestQueueAge || 0, cycleTimeUnit);
   const resourceUtilizationValue = `${Math.min(999, Math.max(0, (globalStats.resourceUtilization || 0) * 100)).toFixed(1)}%`;
   const blockedTimeShareValue = `${Math.min(999, Math.max(0, (globalStats.blockedTimeShare || 0) * 100)).toFixed(1)}%`;
+  const globalMetricCards = [
+    { label: 'Finished / Created', value: `${globalStats.totalItemsFinished}/${globalStats.totalItemsCreated}`, suffix: '', color: 'text-emerald-300', icon: <CheckCircle2 size={18} className="text-emerald-400" /> },
+    { label: 'Throughput', value: throughputValue.toFixed(1), suffix: `/ ${UNIT_LABELS[throughputUnit]}`, color: 'text-emerald-400', icon: <Gauge size={18} className="text-emerald-400" /> },
+    { label: 'Avg Calendar', value: calendarCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-400', icon: <Timer size={18} className="text-blue-400" /> },
+    { label: 'Median Calendar', value: medianCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-300', icon: <Timer size={18} className="text-blue-300" /> },
+    { label: 'P90 Calendar', value: p90CycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-indigo-300', icon: <Timer size={18} className="text-indigo-300" /> },
+    { label: 'Avg Global Working', value: workingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-sky-300', icon: <Timer size={18} className="text-sky-300" /> },
+    { label: 'Median Global Working', value: medianWorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Timer size={18} className="text-cyan-300" /> },
+    { label: 'P90 Global Working', value: p90WorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-teal-300', icon: <Timer size={18} className="text-teal-300" /> },
+    { label: 'Avg Operational', value: operationalWorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-lime-300', icon: <Clock3 size={18} className="text-lime-300" /> },
+    { label: 'Median Operational', value: medianOperationalWorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-green-300', icon: <Clock3 size={18} className="text-green-300" /> },
+    { label: 'P90 Operational', value: p90OperationalWorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-emerald-300', icon: <Clock3 size={18} className="text-emerald-300" /> },
+    { label: 'Touch / Work', value: workTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Activity size={18} className="text-cyan-300" /> },
+    { label: 'Queue Wait', value: waitTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-amber-300', icon: <PauseCircle size={18} className="text-amber-300" /> },
+    { label: 'Off-hours Delay', value: nonWorkingDelayValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-violet-300', icon: <PauseCircle size={18} className="text-violet-300" /> },
+    { label: 'Flow Efficiency', value: flowEfficiencyValue, suffix: '', color: 'text-emerald-300', icon: <Percent size={18} className="text-emerald-300" /> },
+    { label: 'Live Resource Util.', value: resourceUtilizationValue, suffix: '', color: 'text-purple-300', icon: <Users size={18} className="text-purple-300" /> },
+    { label: 'Oldest WIP', value: oldestWipAgeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-orange-300', icon: <Hourglass size={18} className="text-orange-300" /> },
+    { label: 'Oldest Queue', value: oldestQueueAgeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-yellow-300', icon: <UserX size={18} className="text-yellow-300" /> },
+    { label: 'Blocked Share', value: blockedTimeShareValue, suffix: '', color: 'text-red-300', icon: <BatteryWarning size={18} className="text-red-300" /> },
+  ];
 
   const flowMetrics = flowGroups.map((flow, index) => {
     const statsForFlow = flow.steps.map(step => stepStatsById.get(step.id)).filter((stats): stats is StepStats => Boolean(stats));
@@ -262,17 +293,14 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
       : 0;
     const unit = getPreferredThroughputUnit(flow.steps);
     const flowThroughput = simulationTimeMs > 0 ? (finished / simulationTimeMs) * TIME_UNIT_TO_MS[unit] : 0;
-    const resourceStatsForFlow = statsForFlow.filter((stats) => {
-      const step = flow.steps.find((flowStep) => flowStep.id === stats.stepId);
-      return step?.type === 'process' && step.simulationMode !== 'delay';
-    });
-    const resourceUsage = resourceStatsForFlow.reduce((sum, stats) => sum + (stats.resourceUsage || 0), 0);
-    const resourceCapacity = resourceStatsForFlow.reduce((sum, stats) => sum + (stats.totalResources || 0), 0);
+    const resourceStepsForFlow = flow.steps.filter((step) => step.type === 'process' && step.simulationMode !== 'delay');
+    const resourceUsage = resourceStepsForFlow.reduce((sum, step) => sum + (stepStatsById.get(step.id)?.resourceUsage || 0), 0);
+    const resourceCapacity = resourceStepsForFlow.reduce((sum, step) => sum + getStepResourceCapacity(step, stepStatsById.get(step.id)), 0);
     const resourceUtilization = resourceCapacity > 0 ? resourceUsage / resourceCapacity : 0;
 
-    // Calculate average wait times (calendar and working) for the flow
+    // Calculate diagnostic step-level wait fallbacks for the flow.
     const avgWaitTime = statsForFlow.reduce((sum, stats) => sum + (stats.avgWaitTime || 0), 0) / Math.max(1, statsForFlow.length);
-    const avgWorkingWaitTime = statsForFlow.reduce((sum, stats) => sum + (stats.avgWorkingWaitTime || 0), 0) / Math.max(1, statsForFlow.length);
+    const diagnosticWorkingWaitTime = statsForFlow.reduce((sum, stats) => sum + (stats.avgWorkingWaitTime || 0), 0) / Math.max(1, statsForFlow.length);
 
     return {
       ...flow,
@@ -292,9 +320,13 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
       avgWorkingCycle: completedFlowStats?.avgWorkingCycleTime ?? 0,
       medianWorkingCycle: completedFlowStats?.medianWorkingCycleTime ?? 0,
       p90WorkingCycle: completedFlowStats?.p90WorkingCycleTime ?? 0,
+      avgOperationalWorkingCycle: completedFlowStats?.avgOperationalWorkingCycleTime ?? 0,
+      medianOperationalWorkingCycle: completedFlowStats?.medianOperationalWorkingCycleTime ?? 0,
+      p90OperationalWorkingCycle: completedFlowStats?.p90OperationalWorkingCycleTime ?? 0,
       avgTouchTime: completedFlowStats?.avgWorkTime ?? 0,
       avgWaitTime: completedFlowStats?.avgWaitTime ?? avgWaitTime,
-      avgWorkingWaitTime: avgWorkingWaitTime,
+      avgItemWorkingWaitTime: completedFlowStats?.avgWorkingWaitTime ?? 0,
+      diagnosticWorkingWaitTime,
       avgTransmissionTime: completedFlowStats?.avgTransmissionTime ?? 0,
       avgOffHoursDelay: completedFlowStats?.avgOffHoursDelay ?? completedFlowStats?.avgNonWorkingDelay ?? 0,
       avgNonWorkingDelay: completedFlowStats?.avgNonWorkingDelay ?? 0,
@@ -318,9 +350,13 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
     avgWorkingCycleLabel: formatDurationValue(flow.avgWorkingCycle, cycleTimeUnit),
     medianWorkingCycleLabel: formatDurationValue(flow.medianWorkingCycle, cycleTimeUnit),
     p90WorkingCycleLabel: formatDurationValue(flow.p90WorkingCycle, cycleTimeUnit),
+    avgOperationalWorkingCycleLabel: formatDurationValue(flow.avgOperationalWorkingCycle, cycleTimeUnit),
+    medianOperationalWorkingCycleLabel: formatDurationValue(flow.medianOperationalWorkingCycle, cycleTimeUnit),
+    p90OperationalWorkingCycleLabel: formatDurationValue(flow.p90OperationalWorkingCycle, cycleTimeUnit),
     avgTouchTimeLabel: formatDurationValue(flow.avgTouchTime, cycleTimeUnit),
     avgWaitTimeLabel: formatDurationValue(flow.avgWaitTime, cycleTimeUnit),
-    avgWorkingWaitTimeLabel: formatDurationValue(flow.avgWorkingWaitTime, cycleTimeUnit),
+    avgItemWorkingWaitTimeLabel: formatDurationValue(flow.avgItemWorkingWaitTime, cycleTimeUnit),
+    diagnosticWorkingWaitTimeLabel: formatDurationValue(flow.diagnosticWorkingWaitTime, cycleTimeUnit),
     avgTransmissionTimeLabel: formatDurationValue(flow.avgTransmissionTime, cycleTimeUnit),
     avgOffHoursDelayLabel: formatDurationValue(flow.avgOffHoursDelay, cycleTimeUnit),
     avgNonWorkingDelayLabel: formatDurationValue(flow.avgNonWorkingDelay, cycleTimeUnit),
@@ -334,19 +370,18 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
   const maxThroughput = Math.max(0.000001, ...flowMetrics.map(flow => flow.throughput));
   const resourceSteps = steps
     .filter(step => step.type === 'process' && step.simulationMode !== 'delay')
-    .map(step => ({ step, stats: stepStatsById.get(step.id) }))
-    .filter((entry): entry is { step: ProcessStep; stats: StepStats } => Boolean(entry.stats));
+    .map(step => ({ step, stats: stepStatsById.get(step.id) }));
   const visibleResourceSteps = selectedFlow
     ? resourceSteps.filter((entry) => selectedFlow.stepIds.has(entry.step.id))
     : resourceSteps;
-  const totalResourceUsage = resourceSteps.reduce((sum, entry) => sum + (entry.stats.resourceUsage || 0), 0);
-  const totalResourceCapacity = resourceSteps.reduce((sum, entry) => sum + (entry.stats.totalResources || entry.step.capacity || 0), 0);
-  const visibleResourceUsage = visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats.resourceUsage || 0), 0);
-  const visibleResourceCapacity = visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats.totalResources || entry.step.capacity || 0), 0);
-  const weightedAvgResourcesPerItem = resourceSteps.reduce((sum, entry) => sum + (entry.stats.avgResourcesPerItem || 0) * entry.stats.activeProcessing, 0) / Math.max(1, resourceSteps.reduce((sum, entry) => sum + entry.stats.activeProcessing, 0));
-  const weightedAvgResourceLoad = resourceSteps.reduce((sum, entry) => sum + (entry.stats.avgResourceLoadFactor || 0) * entry.stats.activeProcessing, 0) / Math.max(1, resourceSteps.reduce((sum, entry) => sum + entry.stats.activeProcessing, 0));
-  const visibleWeightedAvgResourcesPerItem = visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats.avgResourcesPerItem || 0) * entry.stats.activeProcessing, 0) / Math.max(1, visibleResourceSteps.reduce((sum, entry) => sum + entry.stats.activeProcessing, 0));
-  const visibleWeightedAvgResourceLoad = visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats.avgResourceLoadFactor || 0) * entry.stats.activeProcessing, 0) / Math.max(1, visibleResourceSteps.reduce((sum, entry) => sum + entry.stats.activeProcessing, 0));
+  const totalResourceUsage = resourceSteps.reduce((sum, entry) => sum + (entry.stats?.resourceUsage || 0), 0);
+  const totalResourceCapacity = resourceSteps.reduce((sum, entry) => sum + getStepResourceCapacity(entry.step, entry.stats), 0);
+  const visibleResourceUsage = visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats?.resourceUsage || 0), 0);
+  const visibleResourceCapacity = visibleResourceSteps.reduce((sum, entry) => sum + getStepResourceCapacity(entry.step, entry.stats), 0);
+  const weightedAvgResourcesPerItem = resourceSteps.reduce((sum, entry) => sum + (entry.stats?.avgResourcesPerItem || 0) * (entry.stats?.activeProcessing || 0), 0) / Math.max(1, resourceSteps.reduce((sum, entry) => sum + (entry.stats?.activeProcessing || 0), 0));
+  const weightedAvgResourceLoad = resourceSteps.reduce((sum, entry) => sum + (entry.stats?.avgResourceLoadFactor || 0) * (entry.stats?.activeProcessing || 0), 0) / Math.max(1, resourceSteps.reduce((sum, entry) => sum + (entry.stats?.activeProcessing || 0), 0));
+  const visibleWeightedAvgResourcesPerItem = visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats?.avgResourcesPerItem || 0) * (entry.stats?.activeProcessing || 0), 0) / Math.max(1, visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats?.activeProcessing || 0), 0));
+  const visibleWeightedAvgResourceLoad = visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats?.avgResourceLoadFactor || 0) * (entry.stats?.activeProcessing || 0), 0) / Math.max(1, visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats?.activeProcessing || 0), 0));
 
   const buildFlowMetricCards = (flow: typeof liveFlowCards[number]) => {
     const cards = [
@@ -355,9 +390,12 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
       { label: 'Avg Calendar', value: flow.avgCalendarCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-400', icon: <Timer size={18} className="text-blue-400" /> },
       { label: 'Median Calendar', value: flow.medianCalendarCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-300', icon: <Timer size={18} className="text-blue-300" /> },
       { label: 'P90 Calendar', value: flow.p90CalendarCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-indigo-300', icon: <Timer size={18} className="text-indigo-300" /> },
-      { label: 'Avg Working', value: flow.avgWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-sky-300', icon: <Timer size={18} className="text-sky-300" /> },
-      { label: 'Median Working', value: flow.medianWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Timer size={18} className="text-cyan-300" /> },
-      { label: 'P90 Working', value: flow.p90WorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-teal-300', icon: <Timer size={18} className="text-teal-300" /> },
+      { label: 'Avg Global Working', value: flow.avgWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-sky-300', icon: <Timer size={18} className="text-sky-300" /> },
+      { label: 'Median Global Working', value: flow.medianWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Timer size={18} className="text-cyan-300" /> },
+      { label: 'P90 Global Working', value: flow.p90WorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-teal-300', icon: <Timer size={18} className="text-teal-300" /> },
+      { label: 'Avg Operational', value: flow.avgOperationalWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-lime-300', icon: <Clock3 size={18} className="text-lime-300" /> },
+      { label: 'Median Operational', value: flow.medianOperationalWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-green-300', icon: <Clock3 size={18} className="text-green-300" /> },
+      { label: 'P90 Operational', value: flow.p90OperationalWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-emerald-300', icon: <Clock3 size={18} className="text-emerald-300" /> },
       { label: 'Touch / Work', value: flow.avgTouchTimeLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Clock3 size={18} className="text-cyan-300" /> },
     ];
 
@@ -375,7 +413,15 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
     if (waitTimeMode === 'working' || waitTimeMode === 'both') {
       cards.push({
         label: waitTimeMode === 'both' ? 'Queue Wait (Working)' : 'Queue Wait',
-        value: flow.avgWorkingWaitTimeLabel,
+        value: flow.avgItemWorkingWaitTimeLabel,
+        suffix: UNIT_LABELS[cycleTimeUnit],
+        color: 'text-yellow-200',
+        icon: <Clock3 size={18} className="text-yellow-200" />
+      });
+
+      cards.push({
+        label: 'Diagnostic Working Wait',
+        value: flow.diagnosticWorkingWaitTimeLabel,
         suffix: UNIT_LABELS[cycleTimeUnit],
         color: 'text-yellow-300',
         icon: <Clock3 size={18} className="text-yellow-300" />
@@ -389,7 +435,7 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
       { label: 'Flow Efficiency', value: flow.flowEfficiencyLabel, suffix: '', color: 'text-emerald-300', icon: <Percent size={18} className="text-emerald-300" /> },
       { label: 'Oldest WIP', value: flow.oldestWipAgeLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-orange-300', icon: <Hourglass size={18} className="text-orange-300" /> },
       { label: 'Oldest Queue', value: flow.oldestQueueAgeLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-yellow-300', icon: <UserX size={18} className="text-yellow-300" /> },
-      { label: 'Resource Util.', value: flow.resourceUtilizationLabel, suffix: '', color: 'text-purple-300', icon: <Gauge size={18} className="text-purple-300" /> },
+      { label: 'Live Resource Util.', value: flow.resourceUtilizationLabel, suffix: '', color: 'text-purple-300', icon: <Gauge size={18} className="text-purple-300" /> },
       { label: 'Active Work', value: flow.activeItems, suffix: '', color: 'text-amber-400', icon: <Activity size={18} className="text-amber-400" /> },
       { label: 'Resources Used', value: `${flow.resourceUsage}/${flow.resourceCapacity}`, suffix: '', color: 'text-purple-300', icon: <Users size={18} className="text-purple-300" /> },
       { label: 'Errors', value: flow.failed, suffix: '', color: 'text-red-400', icon: <XCircle size={18} className="text-red-400" /> },
@@ -403,7 +449,35 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
     <div className="space-y-4 w-full">
       {/* Flow-first Metrics Cards */}
       <div className="rounded-2xl border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-slate-400">
-        <span className="font-semibold text-blue-200">Time model:</span> Calendar is customer elapsed time. Working only counts business-calendar time. Avg shows the mean, Median shows the typical item, and P90 shows the slow-tail service level. Touch / Work is active processing. <span className="font-semibold text-amber-200">Queue Wait (Calendar)</span> includes non-working hours for SLA tracking. <span className="font-semibold text-yellow-200">Queue Wait (Working)</span> excludes non-working hours for internal efficiency analysis. Transfer is movement time, and Off-hours Delay is calendar time outside working hours.
+        <span className="font-semibold text-blue-200">Time model:</span> Calendar is customer elapsed time. Global Working uses the shared business calendar. Operational Working uses each item&apos;s actual step calendars, counted as working queue wait plus active processing. Avg shows the mean, Median shows the typical item, and P90 shows the slow-tail service level. Touch / Work is active processing. <span className="font-semibold text-amber-200">Queue Wait (Calendar)</span> includes non-working hours for SLA tracking. <span className="font-semibold text-yellow-200">Queue Wait (Working)</span> is item-weighted from completed items, showing each item&apos;s real working-hour queue experience. <span className="font-semibold text-yellow-300">Diagnostic Working Wait</span> is the current Avg Step Working Wait / Step-level Working Wait diagnostic metric, useful for bottleneck analysis and not item-weighted. Transfer is movement time, and Off-hours Delay is calendar time outside working hours.
+      </div>
+
+      <div className="rounded-2xl border border-slate-800 bg-slate-950/80 p-4 shadow-sm">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="flex items-center gap-2 text-base font-bold text-slate-100">
+              <Gauge size={18} className="text-emerald-300" /> Global Service-Level Summary
+            </h3>
+            <p className="mt-1 text-xs text-slate-500">All completed items are pooled here, so Median and P90 represent the true global item distribution instead of an average of flow-level percentiles.</p>
+          </div>
+          <div className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-200">
+            {globalStats.activeItems} active · {globalStats.totalItemsFailed} errors · {globalStats.totalItemsCancelled} cancelled
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
+          {globalMetricCards.map((card) => (
+            <div key={`global-${card.label}`} className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-sm">
+              <div className="mb-3 flex items-start justify-between gap-2">
+                <div className="text-sm leading-tight text-slate-400">{card.label}</div>
+                {card.icon}
+              </div>
+              <div className={`font-mono text-2xl font-bold ${card.color}`}>
+                {card.value} {card.suffix && <span className="text-[11px] text-slate-500">{card.suffix}</span>}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="rounded-2xl border border-slate-800 bg-slate-950/80 p-4 shadow-sm">
@@ -502,8 +576,9 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
             </div>
             <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
               {visibleResourceSteps.map(({ step, stats }) => {
-                const capacity = stats.totalResources || step.capacity || 1;
-                const usagePercent = Math.min(100, ((stats.resourceUsage || 0) / Math.max(1, capacity)) * 100);
+                const capacity = getStepResourceCapacity(step, stats);
+                const usage = stats?.resourceUsage || 0;
+                const usagePercent = Math.min(100, (usage / Math.max(1, capacity)) * 100);
                 return (
                   <div key={step.id} className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
                     <div className="mb-2 flex items-center justify-between gap-2">
@@ -511,14 +586,14 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
                         <div className="truncate text-sm font-semibold text-slate-100" title={step.name}>{step.name}</div>
                         <div className="text-[10px] uppercase tracking-wider text-slate-500">{getExecutionModeLabel(step)}</div>
                       </div>
-                      <div className="font-mono text-sm font-bold text-purple-200">{stats.resourceUsage || 0}/{capacity}</div>
+                      <div className="font-mono text-sm font-bold text-purple-200">{usage}/{capacity}</div>
                     </div>
                     <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
                       <div className="h-full rounded-full bg-purple-400" style={{ width: `${usagePercent}%` }} />
                     </div>
                     <div className="mt-2 flex justify-between text-[10px] text-slate-500">
-                      <span>Avg team <span className="font-mono text-blue-200">{(stats.avgResourcesPerItem || 0).toFixed(1)}</span></span>
-                      <span>Avg load <span className="font-mono text-cyan-200">{(stats.avgResourceLoadFactor || 0).toFixed(1)}</span></span>
+                      <span>Avg team <span className="font-mono text-blue-200">{(stats?.avgResourcesPerItem || 0).toFixed(1)}</span></span>
+                      <span>Avg load <span className="font-mono text-cyan-200">{(stats?.avgResourceLoadFactor || 0).toFixed(1)}</span></span>
                     </div>
                   </div>
                 );
@@ -568,9 +643,15 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
                   </div>
                 </div>
                 <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Avg Working Cycle</div>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Avg Global Working</div>
                   <div className="mt-1 font-mono text-xl font-bold text-sky-300">
                     {formatDurationValue(flow.avgWorkingCycle, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Avg Operational</div>
+                  <div className="mt-1 font-mono text-xl font-bold text-lime-300">
+                    {formatDurationValue(flow.avgOperationalWorkingCycle, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
                   </div>
                 </div>
               </div>
@@ -585,10 +666,17 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
                 </div>
                 <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
                   <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Working Wait</div>
-                  <div className="mt-1 font-mono text-sm text-yellow-300">
-                    {formatDurationValue(flow.avgWorkingWaitTime, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
+                  <div className="mt-1 font-mono text-sm text-yellow-200">
+                    {formatDurationValue(flow.avgItemWorkingWaitTime, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
                   </div>
-                  <div className="mt-1 text-[9px] text-slate-500">Queue efficiency metric</div>
+                  <div className="mt-1 text-[9px] text-slate-500">Item-weighted working-hour queue wait</div>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Diagnostic Wait</div>
+                  <div className="mt-1 font-mono text-sm text-yellow-300">
+                    {formatDurationValue(flow.diagnosticWorkingWaitTime, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
+                  </div>
+                  <div className="mt-1 text-[9px] text-slate-500">Avg Step Working Wait; not item-weighted</div>
                 </div>
               </div>
 

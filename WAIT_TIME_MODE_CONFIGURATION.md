@@ -32,6 +32,9 @@
 │                                │
 │ Queue Wait (Working)           │
 │ 2.3 hours                      │
+│                                │
+│ Diagnostic Working Wait        │
+│ 3.1 hours                      │
 └────────────────────────────────┘
 ```
 
@@ -104,6 +107,10 @@
 ```
 
 **定义**：仅计算工作时间内的队列等待
+
+**统计口径**：`Queue Wait (Working)` 按完成 item 的真实经历聚合（item-weighted）。如果一个步骤很少被经过，它不会和高流量步骤拥有同等权重。
+
+**诊断补充**：面板中还会保留 `Diagnostic Working Wait`，这是步骤级平均值，用于找瓶颈；它不代表平均每个 item 的真实等待体验。
 
 **适用场景**：
 - ✅ 队列效率分析

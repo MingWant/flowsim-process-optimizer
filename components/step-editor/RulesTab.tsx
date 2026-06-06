@@ -1,5 +1,6 @@
 import type React from 'react';
 import type { ProcessStep } from '../../types';
+import { DURATION_UNITS } from '../../constants/timeUnits';
 
 interface Props {
   editingStep: ProcessStep;
@@ -11,9 +12,13 @@ export const RulesTab: React.FC<Props> = ({
   editingStep,
   potentialSources,
   updateSourceRule,
-}) => (
-  <div className="space-y-4">
-    <p className="text-sm text-slate-400 mb-4">Override processing time based on where the item came from. (Applies mainly to Fixed mode)</p>
+}) => {
+  const sourceRuleUnit = DURATION_UNITS.find((unit) => unit.value === (editingStep.processingTimeUnit || 'ms'))?.label || 'ms';
+
+  return (
+    <div className="space-y-4">
+    <p className="text-sm text-slate-400 mb-1">Override processing time based on where the item came from. (Applies mainly to Fixed mode)</p>
+    <p className="mb-4 text-xs text-slate-500">Values use this step&apos;s Fixed processing unit: <span className="font-mono text-slate-300">{sourceRuleUnit}</span>.</p>
 
     {potentialSources.length === 0 ? (
       <div className="text-center py-8 text-slate-500 italic">
@@ -37,7 +42,7 @@ export const RulesTab: React.FC<Props> = ({
                   onChange={(event) => updateSourceRule(source.id, parseInt(event.target.value))}
                   className="w-24 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm text-right focus:border-blue-500 outline-none"
                 />
-                <span className="text-xs text-slate-500 w-6">ms</span>
+                <span className="w-20 truncate text-xs text-slate-500" title={sourceRuleUnit}>{sourceRuleUnit}</span>
               </div>
             </div>
           );
@@ -45,4 +50,5 @@ export const RulesTab: React.FC<Props> = ({
       </div>
     )}
   </div>
-);
+  );
+};
