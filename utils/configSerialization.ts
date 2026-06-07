@@ -26,6 +26,7 @@ import type {
   SimulationConfig,
   StepSimulationMode,
   TeamAllocationMode,
+  WaitTimeCalculationMode,
 } from '../types';
 
 const VALID_NODE_TYPES: NodeType[] = ['start', 'process', 'end'];
@@ -39,6 +40,7 @@ export const VALID_NON_WORKING_POLICIES: NonWorkingArrivalPolicy[] = ['queue', '
 const VALID_SCHEDULED_SPREAD_MODES: ScheduledArrivalSpreadMode[] = ['spread', 'burst'];
 const VALID_SCHEDULED_REPEATS: ScheduledArrivalRepeat[] = ['none', 'daily', 'workingDay', 'weekly', 'monthly', 'yearly'];
 const VALID_SCHEDULED_DISPATCH_MODES: ScheduledArrivalDispatchMode[] = ['burst', 'sequence'];
+const VALID_WAIT_TIME_CALCULATION_MODES: WaitTimeCalculationMode[] = ['calendar', 'working', 'both'];
 export const MAX_SCHEDULED_ARRIVAL_QUANTITY = 50000;
 const DEFAULT_ZERO_VARIANCE_STEP_IDS = new Set(['step-1', 'step-2', 'step-3', 'step-4']);
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -612,6 +614,9 @@ const sanitizeConfig = (rawConfig: unknown, migrateDefaultVariance = false): Sim
       ? normalizeDemandModifiers(rawConfig.demandModifiers.filter(isObjectRecord) as Partial<DemandModifier>[])
       : [],
     autoPause: sanitizeAutoPause(rawConfig.autoPause),
+    waitTimeCalculationMode: typeof rawConfig.waitTimeCalculationMode === 'string' && VALID_WAIT_TIME_CALCULATION_MODES.includes(rawConfig.waitTimeCalculationMode as WaitTimeCalculationMode)
+      ? rawConfig.waitTimeCalculationMode as WaitTimeCalculationMode
+      : 'both',
   };
 };
 

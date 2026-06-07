@@ -264,6 +264,9 @@
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
         <h1 style="margin: 0;">📖 FlowSim 文檔中心</h1>
         <div style="display: flex; gap: 10px;">
+          <a href="README.md" style="padding: 8px 16px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); border-radius: 8px; color: white; text-decoration: none; font-size: 0.9rem; transition: all 0.3s; cursor: pointer;">
+            🧭 文檔規範
+          </a>
           <a href="#user-guide" style="padding: 8px 16px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); border-radius: 8px; color: white; text-decoration: none; font-size: 0.9rem; transition: all 0.3s; cursor: pointer;">
             📚 完整使用手冊
           </a>
@@ -271,6 +274,84 @@
       </div>
       <p class="subtitle">等待時間指標完整指南 - 選擇適合你的分析模式</p>
     </header>
+
+    <div class="section" style="background: rgba(37, 99, 235, 0.16); border: 1px solid rgba(96, 165, 250, 0.25);">
+      <h2>🌐 三語文檔入口</h2>
+      <p>所有目前有效文檔已依現有系統邏輯更新，並提供繁體中文、简体中文與 English 版本。</p>
+      <table>
+        <thead>
+          <tr>
+            <th>文檔</th>
+            <th>繁體中文</th>
+            <th>简体中文</th>
+            <th>English</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>文檔索引</td>
+            <td><a href="guide/documentation-index.zh-TW.md">開啟</a></td>
+            <td><a href="guide/documentation-index.zh-CN.md">打开</a></td>
+            <td><a href="guide/documentation-index.en.md">Open</a></td>
+          </tr>
+          <tr>
+            <td>完整使用手冊</td>
+            <td><a href="guide/user-guide.md">開啟</a></td>
+            <td><a href="guide/user-guide.md">打开</a></td>
+            <td><a href="guide/user-guide.md">Open</a></td>
+          </tr>
+          <tr>
+            <td>等待時間快速參考</td>
+            <td><a href="guide/wait-time-quick-reference.zh-TW.md">開啟</a></td>
+            <td><a href="guide/wait-time-quick-reference.zh-CN.md">打开</a></td>
+            <td><a href="guide/wait-time-quick-reference.en.md">Open</a></td>
+          </tr>
+          <tr>
+            <td>等待時間模式配置</td>
+            <td><a href="guide/wait-time-mode-configuration.zh-TW.md">開啟</a></td>
+            <td><a href="guide/wait-time-mode-configuration.zh-CN.md">打开</a></td>
+            <td><a href="guide/wait-time-mode-configuration.en.md">Open</a></td>
+          </tr>
+          <tr>
+            <td>排障指南</td>
+            <td><a href="technical/troubleshooting.zh-TW.md">開啟</a></td>
+            <td><a href="technical/troubleshooting.zh-CN.md">打开</a></td>
+            <td><a href="technical/troubleshooting.en.md">Open</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section" style="background: rgba(15, 23, 42, 0.78); border: 1px solid rgba(148, 163, 184, 0.18);">
+      <h2>🧭 統一文檔結構</h2>
+      <p>根目錄只保留專案入口文件，文檔集中放在 <code>public/docs/</code>，並按用途分為使用指南、技術文檔與歷史歸檔。</p>
+      <table>
+        <thead>
+          <tr>
+            <th>分類</th>
+            <th>路徑</th>
+            <th>用途</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>使用指南</td>
+            <td><code>guide/</code></td>
+            <td>面向使用者、培訓與快速參考</td>
+          </tr>
+          <tr>
+            <td>技術文檔</td>
+            <td><code>technical/</code></td>
+            <td>實作細節、分析與排障</td>
+          </tr>
+          <tr>
+            <td>歷史歸檔</td>
+            <td><code>archive/</code></td>
+            <td>修復記錄、完成總結與舊方案</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
 
     <div class="docs-grid">
       <a href="#quick-start" class="doc-card">
@@ -453,10 +534,14 @@
             <strong>💡 提示：</strong>由於瀏覽器無法直接渲染 Markdown 文件，建議使用以下方式閱讀：
           </p>
           <ul style="margin-top: 10px; color: #cbd5e1; list-style: none; padding-left: 0;">
-            <li style="padding: 5px 0;">• 在 VS Code 中開啟 <code style="background: rgba(0,0,0,0.3); padding: 2px 8px; border-radius: 4px;">USER_GUIDE_ZH_EN.md</code></li>
+            <li style="padding: 5px 0;">• 在 VS Code 中開啟 <code style="background: rgba(0,0,0,0.3); padding: 2px 8px; border-radius: 4px;">public/docs/guide/user-guide.md</code></li>
             <li style="padding: 5px 0;">• 使用 Markdown 預覽功能（<code style="background: rgba(0,0,0,0.3); padding: 2px 8px; border-radius: 4px;">Ctrl+Shift+V</code>）</li>
             <li style="padding: 5px 0;">• 或使用任何 Markdown 閱讀器</li>
           </ul>
+        </div>
+        <div style="margin-top: 20px; display: flex; flex-wrap: wrap; gap: 10px;">
+          <a href="guide/user-guide.md" style="padding: 10px 14px; background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(96, 165, 250, 0.4); border-radius: 10px; color: #bfdbfe; text-decoration: none; font-weight: 700;">開啟 Markdown 使用手冊</a>
+          <a href="guide/documentation-index.zh-TW.md" style="padding: 10px 14px; background: rgba(168, 85, 247, 0.18); border: 1px solid rgba(192, 132, 252, 0.35); border-radius: 10px; color: #ddd6fe; text-decoration: none; font-weight: 700;">查看完整文檔索引</a>
         </div>
         <div style="margin-top: 20px;">
           <h4 style="color: #34d399; margin-bottom: 10px;">🆕 新增章節：等待時間計算模式</h4>

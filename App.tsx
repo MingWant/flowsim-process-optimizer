@@ -11,6 +11,8 @@ import { StartNodeSettings } from './components/step-editor/StartNodeSettings';
 import { generateScenario, analyzeBottlenecks } from './services/geminiService';
 import { DEFAULT_BUSINESS_CALENDAR, getActiveDemandModifiers, getBusinessDate, getDemandMultiplier, isWorkingTime, normalizeBusinessCalendar, normalizeDemandModifiers } from './services/simulationCalendar';
 import { formatSimulationTime, getAutoPauseProgressRows } from './utils/formatters';
+import { loadInitialConfig as loadInitialConfigFromStorage, parseImportedConfig as parseImportedConfigFromFile } from './utils/configSerialization';
+import { DOCS_HOME_PATH, MARKDOWN_DOCS, type MarkdownDocEntry } from './constants/documents';
 import { Play, Pause, RotateCcw, Download, Upload, Zap, MessageSquare, Loader2, Sparkles, Menu, X, Settings, BarChart3, ArrowRight, ArrowDownUp, Clock, PlayCircle, StopCircle, Box, Shuffle, AlertTriangle, Palette, Users, Dna, Copy, ClipboardPaste, Trash2, BookOpen } from 'lucide-react';
 
 interface CanvasSpawnPosition {
@@ -49,6 +51,7 @@ const TIME_COMPRESSION_PRESETS = [
   { value: 1, label: 'Real-time', hint: '1 simulated second = 1 real second' },
   { value: 60, label: '1 sim min / sec', hint: 'Useful for short delay testing' },
   { value: 60 * 60, label: '1 sim hour / sec', hint: 'Good for shift-level simulations' },
+  { value: 8 * 60 * 60, label: '1 sim working day / sec', hint: '8 simulated working hours per real second' },
   { value: 24 * 60 * 60, label: '1 sim day / sec', hint: 'Great for daily process playback' },
   { value: 7 * 24 * 60 * 60, label: '1 sim week / sec', hint: 'For weekly flow trends' },
   { value: 30 * 24 * 60 * 60, label: '1 sim month / sec', hint: 'For monthly cycle simulations' },
@@ -113,6 +116,14 @@ const VALID_RESOURCE_EXECUTION_MODES: ResourceExecutionMode[] = ['single', 'coll
 const VALID_TEAM_ALLOCATION_MODES: TeamAllocationMode[] = ['auto', 'explicit'];
 const VALID_NON_WORKING_POLICIES: NonWorkingArrivalPolicy[] = ['queue', 'delay', 'reject'];
 const DEFAULT_ZERO_VARIANCE_STEP_IDS = new Set(['step-1', 'step-2', 'step-3', 'step-4']);
+
+const HTML_DOC_LINKS = [
+  { href: DOCS_HOME_PATH, icon: '⚡', title: '快速參考（HTML）', description: '瀏覽器友好格式', toneClass: 'bg-emerald-500/10 group-hover:bg-emerald-500/20' },
+  { href: `${DOCS_HOME_PATH}#quick-start`, icon: '🚀', title: '快速開始', description: '5 分鐘上手指南', toneClass: 'bg-blue-500/10 group-hover:bg-blue-500/20' },
+  { href: `${DOCS_HOME_PATH}#modes`, icon: '📖', title: '三種模式對比', description: '詳細說明與選擇指南', toneClass: 'bg-blue-500/10 group-hover:bg-blue-500/20' },
+  { href: `${DOCS_HOME_PATH}#faq`, icon: '🗂️', title: '常見問題', description: 'Q&A 與使用技巧', toneClass: 'bg-purple-500/10 group-hover:bg-purple-500/20' },
+  { href: `${DOCS_HOME_PATH}#concepts`, icon: '🔬', title: '關鍵概念', description: '雙指標深入解析', toneClass: 'bg-amber-500/10 group-hover:bg-amber-500/20' },
+];
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> => (
   typeof value === 'object' && value !== null
@@ -657,7 +668,7 @@ const loadInitialConfig = (): SimulationConfig => {
 
 const App: React.FC = () => {
   // App State
-  const [config, setConfig] = useState<SimulationConfig>(loadInitialConfig);
+  const [config, setConfig] = useState<SimulationConfig>(loadInitialConfigFromStorage);
   const [aiPrompt, setAiPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
@@ -670,6 +681,16 @@ const App: React.FC = () => {
     file: '',
     title: ''
   });
+
+  const openMarkdownDoc = (doc: MarkdownDocEntry) => {
+    setMarkdownViewer({
+      isOpen: true,
+      file: doc.defaultPath,
+      title: doc.title,
+    });
+    setIsDocsMenuOpen(false);
+  };
+
   const [importExportNotice, setImportExportNotice] = useState<string | null>(null);
   const [draftStatus, setDraftStatus] = useState<'restored' | 'saved' | 'save-failed' | null>(() => {
     if (typeof window === 'undefined') {
@@ -711,6 +732,20 @@ const App: React.FC = () => {
   const togglePlay = () => {
     setAutoPauseNotice(null);
     setConfig(p => ({ ...p, isRunning: !p.isRunning }));
+  };
+
+  const startSimulation = () => {
+    setAutoPauseNotice(null);
+    setConfig(p => p.isRunning ? p : { ...p, isRunning: true });
+  };
+
+  const stopSimulation = () => {
+    setConfig(p => p.isRunning ? { ...p, isRunning: false } : p);
+  };
+
+  const resetSimulationRun = () => {
+    setAutoPauseNotice(null);
+    resetSimulation();
   };
   
   const saveStepUpdate = () => {
@@ -1108,7 +1143,7 @@ const App: React.FC = () => {
     try {
       const text = await file.text();
       const parsed = JSON.parse(text) as unknown;
-      const importedConfig = parseImportedConfig(parsed);
+      const importedConfig = parseImportedConfigFromFile(parsed);
 
       setConfig(importedConfig);
       setEditingStep(null);
@@ -1318,6 +1353,34 @@ const App: React.FC = () => {
                </button>
              ))}
            </div>
+           <div className="hidden sm:flex items-center gap-1 rounded-full border border-slate-800 bg-slate-900/80 p-1">
+             <button
+               onClick={startSimulation}
+               disabled={config.isRunning}
+               className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/15 disabled:cursor-not-allowed disabled:opacity-45"
+               title="Start simulation"
+             >
+               <Play size={14} />
+               <span className="hidden xl:inline">Start</span>
+             </button>
+             <button
+               onClick={stopSimulation}
+               disabled={!config.isRunning}
+               className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold text-rose-300 transition-colors hover:bg-rose-500/15 disabled:cursor-not-allowed disabled:opacity-45"
+               title="Stop simulation"
+             >
+               <StopCircle size={14} />
+               <span className="hidden xl:inline">Stop</span>
+             </button>
+             <button
+               onClick={resetSimulationRun}
+               className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold text-slate-300 transition-colors hover:bg-slate-800 hover:text-white"
+               title="Reset simulation"
+             >
+               <RotateCcw size={14} />
+               <span className="hidden xl:inline">Reset</span>
+             </button>
+           </div>
            <div className={`hidden sm:flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold ${config.isRunning ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 bg-slate-900 text-slate-400'}`}>
              <span className={`h-2 w-2 rounded-full ${config.isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
              {runningLabel}
@@ -1346,17 +1409,17 @@ const App: React.FC = () => {
                    className="fixed inset-0 z-40"
                    onClick={() => setIsDocsMenuOpen(false)}
                  />
-                 <div className="absolute right-0 mt-2 w-80 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 overflow-hidden">
+                 <div className="absolute right-0 mt-2 max-h-[calc(100vh-5rem)] w-80 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-2xl z-50">
                    <div className="bg-gradient-to-r from-blue-600 to-emerald-600 p-3">
                      <h3 className="text-sm font-bold text-white flex items-center gap-2">
                        <BookOpen size={16} />
-                       等待時間指標文檔
+                       FlowSim 文檔中心
                      </h3>
-                     <p className="text-xs text-blue-100 mt-1">選擇適合你的指南</p>
+                     <p className="text-xs text-blue-100 mt-1">統一管理指南、技術文檔與多語版本</p>
                    </div>
-                   <div className="p-2 space-y-1">
+                   <div className="custom-scrollbar max-h-[calc(100vh-10rem)] overflow-y-auto p-2 space-y-1">
                      <a
-                       href="docs.html"
+                       href={DOCS_HOME_PATH}
                        target="_blank"
                        rel="noopener noreferrer"
                        className="flex items-start gap-3 p-3 rounded-lg hover:bg-slate-800 transition-colors group"
@@ -1370,178 +1433,41 @@ const App: React.FC = () => {
                        </div>
                      </a>
                      <div className="border-t border-slate-800 my-2"></div>
-                    <button
-                      onClick={() => {
-                        setMarkdownViewer({
-                          isOpen: true,
-                          file: 'USER_GUIDE_ZH_EN.md',
-                          title: '📚 完整使用手冊 / User Guide'
-                        });
-                        setIsDocsMenuOpen(false);
-                      }}
-                      className="w-full flex items-start gap-3 p-3 rounded-lg hover:bg-slate-800 transition-colors group text-left"
-                    >
-                      <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
-                        <span className="text-lg">📚</span>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-semibold text-slate-200 group-hover:text-white">完整使用手冊 <span className="text-xs bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded-full">MD</span></div>
-                        <div className="text-xs text-slate-400 mt-0.5">在應用內瀏覽 Markdown</div>
-                      </div>
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        setMarkdownViewer({
-                          isOpen: true,
-                          file: 'WAIT_TIME_QUICK_REFERENCE_ZH_TW.md',
-                          title: '⚡ 快速參考 - 等待時間指標'
-                        });
-                        setIsDocsMenuOpen(false);
-                      }}
-                      className="w-full flex items-start gap-3 p-3 rounded-lg hover:bg-slate-800 transition-colors group text-left"
-                    >
-                      <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-emerald-500/20 flex items-center justify-center">
-                        <span className="text-lg">⚡</span>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-semibold text-slate-200 group-hover:text-white">快速參考 <span className="text-xs bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full">MD</span></div>
-                        <div className="text-xs text-slate-400 mt-0.5">5 分鐘快速上手</div>
-                      </div>
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        setMarkdownViewer({
-                          isOpen: true,
-                          file: 'WAIT_TIME_MODE_CONFIGURATION_ZH_TW.md',
-                          title: '📖 完整指南 - 等待時間模式配置'
-                        });
-                        setIsDocsMenuOpen(false);
-                      }}
-                      className="w-full flex items-start gap-3 p-3 rounded-lg hover:bg-slate-800 transition-colors group text-left"
-                    >
-                      <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-blue-500/20 flex items-center justify-center">
-                        <span className="text-lg">📖</span>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-semibold text-slate-200 group-hover:text-white">完整指南 <span className="text-xs bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded-full">MD</span></div>
-                        <div className="text-xs text-slate-400 mt-0.5">詳細說明與使用案例</div>
-                      </div>
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        setMarkdownViewer({
-                          isOpen: true,
-                          file: 'DOCUMENTATION_INDEX_ZH_TW.md',
-                          title: '🗂️ 文檔索引'
-                        });
-                        setIsDocsMenuOpen(false);
-                      }}
-                      className="w-full flex items-start gap-3 p-3 rounded-lg hover:bg-slate-800 transition-colors group text-left"
-                    >
-                      <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-purple-500/20 flex items-center justify-center">
-                        <span className="text-lg">🗂️</span>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-semibold text-slate-200 group-hover:text-white">文檔索引 <span className="text-xs bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded-full">MD</span></div>
-                        <div className="text-xs text-slate-400 mt-0.5">所有資源導航</div>
-                      </div>
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        setMarkdownViewer({
-                          isOpen: true,
-                          file: 'DUAL_WAIT_TIME_METRICS.md',
-                          title: '🔬 深入分析 - Dual Wait Time Metrics'
-                        });
-                        setIsDocsMenuOpen(false);
-                      }}
-                      className="w-full flex items-start gap-3 p-3 rounded-lg hover:bg-slate-800 transition-colors group text-left"
-                    >
-                      <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-amber-500/20 flex items-center justify-center">
-                        <span className="text-lg">🔬</span>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-semibold text-slate-200 group-hover:text-white">深入分析 <span className="text-xs bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full">MD</span></div>
-                        <div className="text-xs text-slate-400 mt-0.5">技術詳解（EN/简体）</div>
-                      </div>
-                    </button>
+                    {MARKDOWN_DOCS.map((doc) => (
+                      <button
+                        key={doc.id}
+                        onClick={() => openMarkdownDoc(doc)}
+                        className="w-full flex items-start gap-3 p-3 rounded-lg hover:bg-slate-800 transition-colors group text-left"
+                      >
+                        <div className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center ${doc.toneClass.startsWith('from-') ? `bg-gradient-to-br ${doc.toneClass}` : doc.toneClass}`}>
+                          <span className="text-lg">{doc.icon}</span>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-semibold text-slate-200 group-hover:text-white">
+                            {doc.shortTitle} <span className="text-xs bg-slate-700/60 text-slate-300 px-2 py-0.5 rounded-full">MD</span>
+                          </div>
+                          <div className="text-xs text-slate-400 mt-0.5">{doc.description}</div>
+                        </div>
+                      </button>
+                    ))}
                     <div className="border-t border-slate-800 my-2"></div>
-                     <a
-                       href="docs.html"
-                       target="_blank"
-                       rel="noopener noreferrer"
-                       className="flex items-start gap-3 p-3 rounded-lg hover:bg-slate-800 transition-colors group"
-                     >
-                       <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center group-hover:bg-emerald-500/20 transition-colors">
-                         <span className="text-lg">⚡</span>
-                       </div>
-                       <div className="flex-1 min-w-0">
-                         <div className="text-sm font-semibold text-slate-200 group-hover:text-white">快速參考（HTML）</div>
-                         <div className="text-xs text-slate-400 mt-0.5">瀏覽器友好格式</div>
-                       </div>
-                     </a>
-                     <a
-                       href="docs.html#quick-start"
-                       target="_blank"
-                       rel="noopener noreferrer"
-                       className="flex items-start gap-3 p-3 rounded-lg hover:bg-slate-800 transition-colors group"
-                     >
-                       <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center group-hover:bg-blue-500/20 transition-colors">
-                         <span className="text-lg">🚀</span>
-                       </div>
-                       <div className="flex-1 min-w-0">
-                         <div className="text-sm font-semibold text-slate-200 group-hover:text-white">快速開始</div>
-                         <div className="text-xs text-slate-400 mt-0.5">5 分鐘上手指南</div>
-                       </div>
-                     </a>
-                     <a
-                       href="docs.html#modes"
-                       target="_blank"
-                       rel="noopener noreferrer"
-                       className="flex items-start gap-3 p-3 rounded-lg hover:bg-slate-800 transition-colors group"
-                     >
-                       <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center group-hover:bg-blue-500/20 transition-colors">
-                         <span className="text-lg">📖</span>
-                       </div>
-                       <div className="flex-1 min-w-0">
-                         <div className="text-sm font-semibold text-slate-200 group-hover:text-white">三種模式對比</div>
-                         <div className="text-xs text-slate-400 mt-0.5">詳細說明與選擇指南</div>
-                       </div>
-                     </a>
-                     <a
-                       href="docs.html#faq"
-                       target="_blank"
-                       rel="noopener noreferrer"
-                       className="flex items-start gap-3 p-3 rounded-lg hover:bg-slate-800 transition-colors group"
-                     >
-                       <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-purple-500/10 flex items-center justify-center group-hover:bg-purple-500/20 transition-colors">
-                         <span className="text-lg">🗂️</span>
-                       </div>
-                       <div className="flex-1 min-w-0">
-                         <div className="text-sm font-semibold text-slate-200 group-hover:text-white">常見問題</div>
-                         <div className="text-xs text-slate-400 mt-0.5">Q&A 與使用技巧</div>
-                       </div>
-                     </a>
-                     <div className="border-t border-slate-800 mt-2 pt-2">
+                     {HTML_DOC_LINKS.map((link) => (
                        <a
-                         href="docs.html#concepts"
+                         key={link.href}
+                         href={link.href}
                          target="_blank"
                          rel="noopener noreferrer"
                          className="flex items-start gap-3 p-3 rounded-lg hover:bg-slate-800 transition-colors group"
                        >
-                         <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center group-hover:bg-amber-500/20 transition-colors">
-                           <span className="text-lg">🔬</span>
+                         <div className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${link.toneClass}`}>
+                           <span className="text-lg">{link.icon}</span>
                          </div>
                          <div className="flex-1 min-w-0">
-                           <div className="text-sm font-semibold text-slate-200 group-hover:text-white">關鍵概念</div>
-                           <div className="text-xs text-slate-400 mt-0.5">雙指標深入解析</div>
+                           <div className="text-sm font-semibold text-slate-200 group-hover:text-white">{link.title}</div>
+                           <div className="text-xs text-slate-400 mt-0.5">{link.description}</div>
                          </div>
                        </a>
-                     </div>
+                     ))}
                    </div>
                  </div>
                </>
@@ -2272,7 +2198,7 @@ const App: React.FC = () => {
                    {importExportNotice && <p className="mt-1 text-xs text-cyan-300">{importExportNotice}</p>}
                    {draftStatusMessage && <p className={`mt-1 text-xs ${draftStatus === 'save-failed' ? 'text-rose-300' : 'text-emerald-300'}`}>{draftStatusMessage}</p>}
                  </div>
-                 <div className="flex w-full min-w-0 items-center gap-2 overflow-x-auto pb-1 custom-scrollbar">
+                 <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
                     <div className="flex shrink-0 items-center gap-1 rounded-xl border border-slate-800 bg-slate-900 p-1">
                       <button
                         onClick={() => setCanvasViewMode('map')}

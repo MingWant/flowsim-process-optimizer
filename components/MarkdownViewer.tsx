@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { X, BookOpen } from 'lucide-react';
+import { MARKDOWN_DOCS_BY_PATH, type DocLanguage } from '../constants/documents';
 
 interface MarkdownViewerProps {
   isOpen: boolean;
@@ -10,7 +11,7 @@ interface MarkdownViewerProps {
   title: string;
 }
 
-type MarkdownLanguage = 'zh-TW' | 'zh-CN' | 'en';
+type MarkdownLanguage = DocLanguage;
 
 const LANGUAGE_OPTIONS: Array<{ value: MarkdownLanguage; label: string; shortLabel: string }> = [
   { value: 'zh-TW', label: '繁體中文', shortLabel: '繁' },
@@ -20,31 +21,6 @@ const LANGUAGE_OPTIONS: Array<{ value: MarkdownLanguage; label: string; shortLab
 
 const DEFAULT_MARKDOWN_LANGUAGE: MarkdownLanguage = 'zh-TW';
 const MARKDOWN_LANGUAGE_STORAGE_KEY = 'flowsim-doc-language';
-
-const DOC_LANGUAGE_ALTERNATES: Record<string, Partial<Record<MarkdownLanguage, string>>> = {
-  'USER_GUIDE_ZH_EN.md': {
-    'zh-TW': 'USER_GUIDE_ZH_EN.md',
-    'zh-CN': 'USER_GUIDE_ZH_EN.md',
-    en: 'USER_GUIDE_ZH_EN.md',
-  },
-  'WAIT_TIME_MODE_CONFIGURATION_ZH_TW.md': {
-    'zh-TW': 'WAIT_TIME_MODE_CONFIGURATION_ZH_TW.md',
-    'zh-CN': 'WAIT_TIME_MODE_CONFIGURATION.md',
-  },
-  'WAIT_TIME_MODE_CONFIGURATION.md': {
-    'zh-CN': 'WAIT_TIME_MODE_CONFIGURATION.md',
-    'zh-TW': 'WAIT_TIME_MODE_CONFIGURATION_ZH_TW.md',
-  },
-  'WAIT_TIME_QUICK_REFERENCE_ZH_TW.md': {
-    'zh-TW': 'WAIT_TIME_QUICK_REFERENCE_ZH_TW.md',
-  },
-  'DOCUMENTATION_INDEX_ZH_TW.md': {
-    'zh-TW': 'DOCUMENTATION_INDEX_ZH_TW.md',
-  },
-  'DUAL_WAIT_TIME_METRICS.md': {
-    'zh-CN': 'DUAL_WAIT_TIME_METRICS.md',
-  },
-};
 
 const USER_GUIDE_SECTIONS: Record<MarkdownLanguage, { heading: string; title: string }> = {
   'zh-CN': { heading: '## 中文版', title: '# FlowSim 用户文档' },
@@ -64,23 +40,31 @@ const getInitialLanguage = (): MarkdownLanguage => {
 };
 
 const getAvailableLanguages = (markdownFile: string): MarkdownLanguage[] => {
-  const alternates = DOC_LANGUAGE_ALTERNATES[markdownFile];
-  if (alternates) {
-    return LANGUAGE_OPTIONS
-      .map((option) => option.value)
-      .filter((language) => Boolean(alternates[language]));
-  }
-
-  if (markdownFile.includes('_ZH_TW')) {
-    return ['zh-TW'];
-  }
-
-  return ['zh-CN'];
+  const doc = MARKDOWN_DOCS_BY_PATH[markdownFile];
+  return doc?.alternates.map((alternate) => alternate.language) || ['zh-TW'];
 };
 
 const getResolvedMarkdownFile = (markdownFile: string, language: MarkdownLanguage) => (
-  DOC_LANGUAGE_ALTERNATES[markdownFile]?.[language] || markdownFile
+  MARKDOWN_DOCS_BY_PATH[markdownFile]?.alternates.find((alternate) => alternate.language === language)?.path || markdownFile
 );
+
+const resolveInternalMarkdownPath = (sourceFile: string, href?: string) => {
+  if (!href || href.startsWith('#') || href.startsWith('/') || /^[a-z][a-z\d+.-]*:/i.test(href) || !href.includes('.md')) {
+    return undefined;
+  }
+
+  if (typeof window === 'undefined') {
+    return undefined;
+  }
+
+  try {
+    const sourceUrl = new URL(sourceFile, window.location.origin);
+    const resolvedUrl = new URL(href, sourceUrl);
+    return resolvedUrl.pathname;
+  } catch {
+    return undefined;
+  }
+};
 
 const extractSectionAfterHeading = (content: string, heading: string) => {
   const startIndex = content.indexOf(heading);
@@ -98,7 +82,7 @@ const extractSectionAfterHeading = (content: string, heading: string) => {
 };
 
 const localizeMarkdownContent = (markdownFile: string, content: string, language: MarkdownLanguage) => {
-  if (markdownFile !== 'USER_GUIDE_ZH_EN.md') {
+  if (!markdownFile.endsWith('/user-guide.md')) {
     return content;
   }
 
@@ -114,18 +98,38 @@ const localizeMarkdownContent = (markdownFile: string, content: string, language
     .join('\n\n');
 };
 
+const resolveMarkdownHref = (sourceFile: string, href?: string) => {
+  if (!href || href.startsWith('#') || href.startsWith('/') || /^[a-z][a-z\d+.-]*:/i.test(href)) {
+    return href;
+  }
+
+  if (typeof window === 'undefined') {
+    return href;
+  }
+
+  try {
+    const sourceUrl = new URL(sourceFile, window.location.origin);
+    const resolvedUrl = new URL(href, sourceUrl);
+    return `${resolvedUrl.pathname}${resolvedUrl.search}${resolvedUrl.hash}`;
+  } catch {
+    return href;
+  }
+};
+
 export function MarkdownViewer({ isOpen, onClose, markdownFile, title }: MarkdownViewerProps) {
+  const [currentMarkdownFile, setCurrentMarkdownFile] = useState(markdownFile);
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selectedLanguage, setSelectedLanguage] = useState<MarkdownLanguage>(getInitialLanguage);
 
-  const availableLanguages = useMemo(() => getAvailableLanguages(markdownFile), [markdownFile]);
+  const availableLanguages = useMemo(() => getAvailableLanguages(currentMarkdownFile), [currentMarkdownFile]);
   const activeLanguage = availableLanguages.includes(selectedLanguage)
     ? selectedLanguage
     : availableLanguages[0] || DEFAULT_MARKDOWN_LANGUAGE;
   const shouldShowLanguageSelector = availableLanguages.length > 1;
-  const resolvedMarkdownFile = getResolvedMarkdownFile(markdownFile, activeLanguage);
+  const resolvedMarkdownFile = getResolvedMarkdownFile(currentMarkdownFile, activeLanguage);
+  const activeDocTitle = MARKDOWN_DOCS_BY_PATH[currentMarkdownFile]?.title || title;
   const localizedContent = useMemo(
     () => localizeMarkdownContent(resolvedMarkdownFile, content, activeLanguage),
     [activeLanguage, content, resolvedMarkdownFile]
@@ -137,6 +141,33 @@ export function MarkdownViewer({ isOpen, onClose, markdownFile, title }: Markdow
       window.localStorage.setItem(MARKDOWN_LANGUAGE_STORAGE_KEY, language);
     }
   };
+
+  const navigateToMarkdown = (targetPath: string) => {
+    const targetDoc = MARKDOWN_DOCS_BY_PATH[targetPath];
+    const targetLanguage = targetDoc?.alternates.find((alternate) => alternate.path === targetPath)?.language;
+
+    if (targetLanguage) {
+      selectLanguage(targetLanguage);
+    }
+
+    setCurrentMarkdownFile(targetPath);
+  };
+
+  const handleMarkdownLinkClick = (event: React.MouseEvent<HTMLAnchorElement>, href?: string) => {
+    const targetPath = resolveInternalMarkdownPath(resolvedMarkdownFile, href);
+    if (!targetPath) {
+      return;
+    }
+
+    event.preventDefault();
+    navigateToMarkdown(targetPath);
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      setCurrentMarkdownFile(markdownFile);
+    }
+  }, [isOpen, markdownFile]);
 
   useEffect(() => {
     if (isOpen && resolvedMarkdownFile) {
@@ -170,7 +201,7 @@ export function MarkdownViewer({ isOpen, onClose, markdownFile, title }: Markdow
             <div className="p-2 rounded-lg bg-blue-500/20">
               <BookOpen size={20} className="text-blue-400" />
             </div>
-            <h2 className="truncate text-lg font-bold text-slate-100">{title}</h2>
+            <h2 className="truncate text-lg font-bold text-slate-100">{activeDocTitle}</h2>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {shouldShowLanguageSelector && (
@@ -233,7 +264,22 @@ export function MarkdownViewer({ isOpen, onClose, markdownFile, title }: Markdow
 
           {!loading && !error && (
             <div className="markdown-content prose prose-invert prose-slate max-w-none">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  a: ({ node: _node, href, children, ...props }) => (
+                    <a
+                      {...props}
+                      href={resolveMarkdownHref(resolvedMarkdownFile, href)}
+                      onClick={(event) => handleMarkdownLinkClick(event, href)}
+                      target={href?.startsWith('#') || resolveInternalMarkdownPath(resolvedMarkdownFile, href) ? undefined : '_blank'}
+                      rel={href?.startsWith('#') || resolveInternalMarkdownPath(resolvedMarkdownFile, href) ? undefined : 'noopener noreferrer'}
+                    >
+                      {children}
+                    </a>
+                  ),
+                }}
+              >
                 {localizedContent}
               </ReactMarkdown>
             </div>

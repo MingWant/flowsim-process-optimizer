@@ -245,9 +245,9 @@ avgWorkingWaitTimeLabel: formatDurationValue(flow.avgWorkingWaitTime, cycleTimeU
 
 ## 相关文档
 
-- [DUAL_WAIT_TIME_METRICS.md](DUAL_WAIT_TIME_METRICS.md) - 双指标详细说明
-- [WORKING_HOURS_FIXES.md](WORKING_HOURS_FIXES.md) - 工作日逻辑修复
-- [WAIT_TIME_ANALYSIS.md](WAIT_TIME_ANALYSIS.md) - 等待时间分析
+- [dual-wait-time-metrics.zh-CN.md](../technical/dual-wait-time-metrics.zh-CN.md) - 双指标详细说明
+- [multi-segment-business-hours.zh-CN.md](../technical/multi-segment-business-hours.zh-CN.md) - 工作日历与多段工作时间说明
+- [wait-time-mode-configuration.zh-CN.md](../guide/wait-time-mode-configuration.zh-CN.md) - 等待时间模式配置说明
 
 ## 后续可能的改进
 

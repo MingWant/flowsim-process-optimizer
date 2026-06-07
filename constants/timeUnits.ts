@@ -28,6 +28,7 @@ export const TIME_COMPRESSION_PRESETS = [
   { value: 1, label: 'Real-time', hint: '1 simulated second = 1 real second' },
   { value: 60, label: '1 sim min / sec', hint: 'Useful for short delay testing' },
   { value: 60 * 60, label: '1 sim hour / sec', hint: 'Good for shift-level simulations' },
+  { value: 8 * 60 * 60, label: '1 sim working day / sec', hint: '8 simulated working hours per real second' },
   { value: 24 * 60 * 60, label: '1 sim day / sec', hint: 'Great for daily process playback' },
   { value: 7 * 24 * 60 * 60, label: '1 sim week / sec', hint: 'For weekly flow trends' },
   { value: 30 * 24 * 60 * 60, label: '1 sim month / sec', hint: 'For monthly cycle simulations' },
