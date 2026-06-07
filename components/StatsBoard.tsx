@@ -196,17 +196,27 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
   // Get wait time display mode from config
   const waitTimeMode = config.waitTimeCalculationMode || 'both';
 
-  const chartData = stepStats.filter((s) => !selectedFlow || selectedFlow.stepIds.has(s.stepId)).map(s => {
-    const step = steps.find(st => st.id === s.stepId);
-    const flow = flowGroups.find(group => group.stepIds.has(s.stepId));
+  const visibleLoadFlows = selectedFlow ? flowGroups.filter((flow) => flow.id === selectedFlow.id) : flowGroups;
+  const flowLoadCharts = visibleLoadFlows.map((flow) => {
+    const data = flow.steps.map((step) => {
+      const stats = stepStatsById.get(step.id);
+      return {
+        name: step.name,
+        flowName: flow.name,
+        displayName: `${flow.name}: ${step.name}`,
+        queue: stats?.queueLength || 0,
+        active: stats?.activeProcessing || 0,
+      };
+    });
+
     return {
-      name: step ? step.name : s.stepId.slice(0, 8),
-      flowName: flow?.name || 'Unknown Flow',
-      displayName: step ? `${flow ? `${flow.name}: ` : ''}${step.name}` : s.stepId.slice(0, 8),
-      queue: s.queueLength,
-      active: s.activeProcessing
+      ...flow,
+      data,
+      totalQueue: data.reduce((sum, entry) => sum + entry.queue, 0),
+      totalActive: data.reduce((sum, entry) => sum + entry.active, 0),
     };
   });
+  const visibleLoadStepCount = flowLoadCharts.reduce((sum, flow) => sum + flow.data.length, 0);
 
   const throughputUnit = getPreferredThroughputUnit(steps);
   const throughputUnitMs = TIME_UNIT_TO_MS[throughputUnit];
@@ -710,66 +720,86 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
       </div>
 
       {/* Queue Visualization */}
-      <div className="bg-slate-950/80 p-4 rounded-2xl border border-slate-800 h-80 flex flex-col shadow-sm">
+      <div className="bg-slate-950/80 p-4 rounded-2xl border border-slate-800 shadow-sm">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-3 shrink-0">
           <div>
             <h4 className="text-sm font-semibold text-slate-300">Real-time Step Load by Flow</h4>
             <p className="mt-1 text-xs text-slate-500">
-              {selectedFlow ? `Showing only steps inside ${selectedFlow.name}.` : 'Showing all connected flows together; use the filter above to isolate one flow.'}
+              {selectedFlow ? `Showing the load chart for ${selectedFlow.name}.` : 'Each connected flow is shown as a separate load chart; use the filter above to focus one flow.'}
             </p>
           </div>
           <div className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs font-semibold text-slate-300">
-            {chartData.length} step{chartData.length === 1 ? '' : 's'}
+            {flowLoadCharts.length} flow{flowLoadCharts.length === 1 ? '' : 's'} · {visibleLoadStepCount} step{visibleLoadStepCount === 1 ? '' : 's'}
           </div>
         </div>
-        <div className="flex-1 min-h-0 w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 30 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-            <XAxis 
-              dataKey="name" 
-              stroke="#94a3b8" 
-              fontSize={12} 
-              tickLine={false} 
-              axisLine={false}
-              interval={0} 
-              angle={-35}
-              textAnchor="end"
-              height={60}
-            />
-            <YAxis 
-              stroke="#94a3b8" 
-              fontSize={12} 
-              tickLine={false} 
-              axisLine={false} 
-              allowDecimals={false}
-            />
-            <Tooltip 
-              contentStyle={{ backgroundColor: '#1e293b', borderColor: '#475569', color: '#e2e8f0', fontSize: '12px' }}
-              itemStyle={{ color: '#e2e8f0' }}
-              cursor={{ fill: '#334155', opacity: 0.25 }}
-              formatter={(value, name) => [value, name === 'active' ? 'Processing' : 'Queue']}
-              labelFormatter={(_, payload) => payload?.[0]?.payload?.displayName || ''}
-            />
-            <Legend verticalAlign="top" height={36}/>
-            <Bar 
-              dataKey="active" 
-              stackId="load" 
-              fill="#3b82f6" 
-              name="Processing" 
-              radius={[4, 4, 0, 0]}
-              isAnimationActive={false}
-            />
-            <Bar 
-              dataKey="queue" 
-              stackId="load" 
-              fill="#f59e0b" 
-              name="Queue" 
-              radius={[4, 4, 0, 0]}
-              isAnimationActive={false}
-            />
-            </BarChart>
-          </ResponsiveContainer>
+        <div className="space-y-4">
+          {flowLoadCharts.map((flow) => (
+            <section key={`${flow.id}-step-load-chart`} className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="mb-1 flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                    <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: flow.color }} />
+                    Flow step load
+                  </div>
+                  <h5 className="truncate text-sm font-semibold text-slate-200" title={flow.name}>{flow.name}</h5>
+                </div>
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className="rounded-full border border-slate-700 bg-slate-950/70 px-2.5 py-1 font-semibold text-slate-300">{flow.data.length} step{flow.data.length === 1 ? '' : 's'}</span>
+                  <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-2.5 py-1 font-semibold text-blue-200">Processing {flow.totalActive}</span>
+                  <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 font-semibold text-amber-200">Queue {flow.totalQueue}</span>
+                </div>
+              </div>
+              <div className="h-72 min-h-0 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={flow.data} margin={{ top: 10, right: 30, left: 0, bottom: 30 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                    <XAxis
+                      dataKey="name"
+                      stroke="#94a3b8"
+                      fontSize={12}
+                      tickLine={false}
+                      axisLine={false}
+                      interval={0}
+                      angle={-35}
+                      textAnchor="end"
+                      height={60}
+                    />
+                    <YAxis
+                      stroke="#94a3b8"
+                      fontSize={12}
+                      tickLine={false}
+                      axisLine={false}
+                      allowDecimals={false}
+                    />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: '#1e293b', borderColor: '#475569', color: '#e2e8f0', fontSize: '12px' }}
+                      itemStyle={{ color: '#e2e8f0' }}
+                      cursor={{ fill: '#334155', opacity: 0.25 }}
+                      formatter={(value, name) => [value, name === 'active' ? 'Processing' : 'Queue']}
+                      labelFormatter={(_, payload) => payload?.[0]?.payload?.displayName || ''}
+                    />
+                    <Legend verticalAlign="top" height={36}/>
+                    <Bar
+                      dataKey="active"
+                      stackId="load"
+                      fill="#3b82f6"
+                      name="Processing"
+                      radius={[4, 4, 0, 0]}
+                      isAnimationActive={false}
+                    />
+                    <Bar
+                      dataKey="queue"
+                      stackId="load"
+                      fill="#f59e0b"
+                      name="Queue"
+                      radius={[4, 4, 0, 0]}
+                      isAnimationActive={false}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </section>
+          ))}
         </div>
       </div>
     </div>
