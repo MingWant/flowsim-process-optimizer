@@ -18,6 +18,7 @@ import type {
   ProcessStep,
   RandomnessMode,
   ResourceExecutionMode,
+  RoutingStrategy,
   ScheduledArrivalDispatchMode,
   ScheduledArrivalEvent,
   ScheduledArrivalRepeat,
@@ -36,6 +37,7 @@ const VALID_ARRIVAL_MODELS: ArrivalModel[] = ['simple', 'schedule', 'events'];
 const VALID_ARRIVAL_INPUT_MODES: ArrivalInputMode[] = ['rate', 'interval'];
 const VALID_RESOURCE_EXECUTION_MODES: ResourceExecutionMode[] = ['single', 'collaborative', 'multitask'];
 const VALID_TEAM_ALLOCATION_MODES: TeamAllocationMode[] = ['auto', 'explicit'];
+const VALID_ROUTING_STRATEGIES: RoutingStrategy[] = ['probability', 'load-aware', 'time-aware'];
 export const VALID_NON_WORKING_POLICIES: NonWorkingArrivalPolicy[] = ['queue', 'delay', 'reject'];
 const VALID_SCHEDULED_SPREAD_MODES: ScheduledArrivalSpreadMode[] = ['spread', 'burst'];
 const VALID_SCHEDULED_REPEATS: ScheduledArrivalRepeat[] = ['none', 'daily', 'workingDay', 'weekly', 'monthly', 'yearly'];
@@ -60,6 +62,25 @@ const toPositiveNumber = (value: unknown, fallback: number, min = 0.001) => {
 };
 
 const clampProbability = (value: number) => Math.max(0, Math.min(1, value));
+
+const sanitizeOptionalNumber = (value: unknown, min = 0, max = 1000000) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : undefined;
+};
+
+const sanitizeStringList = (value: unknown) => {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const values = Array.from(new Set(
+    value
+      .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+      .map((entry) => entry.trim())
+  ));
+
+  return values.length > 0 ? values : undefined;
+};
 
 export const getBatchSize = (value: unknown) => Math.max(1, Math.min(1000, Math.round(toFiniteNumber(value, 1))));
 
@@ -434,6 +455,13 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
   const teamAllocationMode = isProcess && typeof rawTeamAllocationMode === 'string' && VALID_TEAM_ALLOCATION_MODES.includes(rawTeamAllocationMode as TeamAllocationMode)
     ? rawTeamAllocationMode as TeamAllocationMode
     : isProcess ? Array.isArray(rawStep.collaborativeTeams) && rawStep.collaborativeTeams.length > 0 ? 'explicit' : 'auto' : undefined;
+  const rawRoutingStrategy = rawStep.routingStrategy;
+  const routingStrategy = !isEnd && typeof rawRoutingStrategy === 'string' && VALID_ROUTING_STRATEGIES.includes(rawRoutingStrategy as RoutingStrategy)
+    ? rawRoutingStrategy as RoutingStrategy
+    : !isEnd ? 'probability' : undefined;
+  const routingLoadSensitivity = !isEnd ? Math.max(0, Math.min(10, toFiniteNumber(rawStep.routingLoadSensitivity, 1))) : undefined;
+  const routingTimeSensitivity = !isEnd ? Math.max(0, Math.min(10, toFiniteNumber(rawStep.routingTimeSensitivity, 2))) : undefined;
+  const routingCalendarAware = !isEnd ? rawStep.routingCalendarAware !== false : undefined;
   const minResourcesPerItem = isProcess ? toPositiveInteger(rawStep.minResourcesPerItem, 1, 1, 50) : undefined;
   const maxResourcesPerItem = isProcess ? Math.max(minResourcesPerItem ?? 1, toPositiveInteger(rawStep.maxResourcesPerItem, 1, 1, 50)) : undefined;
   const targetResourcesPerItem = isProcess ? Math.max(minResourcesPerItem ?? 1, Math.min(maxResourcesPerItem ?? 1, toPositiveInteger(rawStep.targetResourcesPerItem, Math.min(2, maxResourcesPerItem ?? 1), 1, 50))) : undefined;
@@ -463,13 +491,24 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
   const rangeTimeUnit = typeof rawStep.rangeTimeUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.rangeTimeUnit)
     ? rawStep.rangeTimeUnit as DurationUnit
     : processingTimeUnit;
+  const sourceProcessingTimeUnit = isProcess && typeof rawStep.sourceProcessingTimeUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.sourceProcessingTimeUnit)
+    ? rawStep.sourceProcessingTimeUnit as DurationUnit
+    : isProcess ? processingTimeUnit : undefined;
   const connections = Array.isArray(rawStep.connections)
     ? rawStep.connections
         .filter(isObjectRecord)
-        .map((connection) => ({
-          targetId: typeof connection.targetId === 'string' ? connection.targetId : '',
-          probability: clampProbability(toFiniteNumber(connection.probability, 0)),
-        }))
+        .map((connection) => {
+          const minPriority = sanitizeOptionalNumber(connection.minPriority, 0);
+          const maxPriority = sanitizeOptionalNumber(connection.maxPriority, 0);
+
+          return {
+            targetId: typeof connection.targetId === 'string' ? connection.targetId : '',
+            probability: clampProbability(toFiniteNumber(connection.probability, 0)),
+            itemProfileIds: sanitizeStringList(connection.itemProfileIds),
+            minPriority: minPriority !== undefined && maxPriority !== undefined ? Math.min(minPriority, maxPriority) : minPriority,
+            maxPriority: minPriority !== undefined && maxPriority !== undefined ? Math.max(minPriority, maxPriority) : maxPriority,
+          };
+        })
         .filter((connection) => connection.targetId)
     : [];
   const sourceProcessingTimes = isObjectRecord(rawStep.sourceProcessingTimes)
@@ -479,6 +518,7 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
           .map(([key, value]) => [key, Math.max(0, toFiniteNumber(value, 0))])
       )
     : {};
+  const hasSourceProcessingRules = Object.keys(sourceProcessingTimes).length > 0;
   const stepId = typeof rawStep.id === 'string' && rawStep.id.trim() ? rawStep.id : `node-import-${Date.now()}-${index}`;
   const variance = isProcess
     ? migrateDefaultVariance && DEFAULT_ZERO_VARIANCE_STEP_IDS.has(stepId)
@@ -526,8 +566,13 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
     failureProbability: Math.max(0, Math.min(1, toFiniteNumber(rawStep.failureProbability, 0))),
     cancellationProbability: Math.max(0, Math.min(1, toFiniteNumber(rawStep.cancellationProbability, 0))),
     color: typeof rawStep.color === 'string' && rawStep.color.trim() ? rawStep.color : isStart ? '#10b981' : isEnd ? '#ef4444' : '#3b82f6',
+    routingStrategy,
+    routingLoadSensitivity,
+    routingTimeSensitivity,
+    routingCalendarAware,
     connections,
     sourceProcessingTimes,
+    sourceProcessingTimeUnit: hasSourceProcessingRules || typeof rawStep.sourceProcessingTimeUnit === 'string' ? sourceProcessingTimeUnit : undefined,
     x: toFiniteNumber(rawStep.x, 100 + index * 60),
     y: toFiniteNumber(rawStep.y, 100 + index * 40),
   };
@@ -586,6 +631,11 @@ const sanitizeConfig = (rawConfig: unknown, migrateDefaultVariance = false): Sim
       maxConcurrentItemsPerResource: step.type === 'process' ? Math.max(1, step.maxConcurrentItemsPerResource ?? 1) : undefined,
       collaborativeEfficiency: step.type === 'process' ? step.collaborativeEfficiency || buildDefaultCollaborativeEfficiency(step.maxResourcesPerItem ?? 1) : undefined,
       multitaskEfficiency: step.type === 'process' ? step.multitaskEfficiency || buildDefaultMultitaskEfficiency(step.maxConcurrentItemsPerResource ?? 1) : undefined,
+      routingStrategy: step.type !== 'end' ? step.routingStrategy || 'probability' : undefined,
+      routingLoadSensitivity: step.type !== 'end' ? Math.max(0, Math.min(10, step.routingLoadSensitivity ?? 1)) : undefined,
+      routingTimeSensitivity: step.type !== 'end' ? Math.max(0, Math.min(10, step.routingTimeSensitivity ?? 2)) : undefined,
+      routingCalendarAware: step.type !== 'end' ? step.routingCalendarAware !== false : undefined,
+      sourceProcessingTimeUnit: step.type === 'process' && (step.sourceProcessingTimeUnit || Object.keys(filteredSourceRules).length > 0) ? step.sourceProcessingTimeUnit || step.processingTimeUnit || 'ms' : undefined,
     };
   });
 

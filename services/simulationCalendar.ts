@@ -3,6 +3,7 @@ import { BusinessCalendar, DemandModifier, WorkingHourSegment } from '../types';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const DEFAULT_CALENDAR_START_ISO = '2026-01-05T00:00:00';
+const MAX_CALENDAR_LOOP_STEPS = 4096;
 
 type NormalizedBusinessCalendar = BusinessCalendar & { workingHours: WorkingHourSegment[] };
 
@@ -197,8 +198,24 @@ export const addWorkingDuration = (
   let cursorMs = safeStartMs + safeSimulationMs;
   let remainingMs = safeDuration;
   const weeklyWorkingDurationMs = getWeeklyWorkingDurationMs(normalized);
+  let loopSteps = 0;
 
   while (remainingMs > 0) {
+    loopSteps++;
+    if (loopSteps > MAX_CALENDAR_LOOP_STEPS) {
+      if (weeklyWorkingDurationMs > 0) {
+        const weeksToSkip = Math.max(1, Math.floor(Math.max(remainingMs - 1, 0) / weeklyWorkingDurationMs));
+        remainingMs = Math.max(0, remainingMs - weeksToSkip * weeklyWorkingDurationMs);
+        cursorMs += weeksToSkip * 7 * DAY_MS;
+        loopSteps = 0;
+        continue;
+      }
+
+      return cursorMs - safeStartMs + remainingMs;
+    }
+
+    const previousCursorMs = cursorMs;
+    const previousRemainingMs = remainingMs;
     const nextWindowStartMs = findNextWorkingWindowStartMs(normalized, cursorMs);
     if (typeof nextWindowStartMs !== 'number' || weeklyWorkingDurationMs <= 0) {
       return safeSimulationMs + safeDuration;
@@ -250,6 +267,10 @@ export const addWorkingDuration = (
         cursorMs += weeksToSkip * 7 * DAY_MS;
       }
     }
+
+    if (cursorMs <= previousCursorMs && remainingMs >= previousRemainingMs) {
+      cursorMs = previousCursorMs + DAY_MS;
+    }
   }
 
   return cursorMs - safeStartMs;
@@ -274,8 +295,25 @@ export const getWorkingDurationBetween = (
   let cursorMs = safeStartMs + fromMs;
   let workingMs = 0;
   const weeklyWorkingDurationMs = getWeeklyWorkingDurationMs(normalized);
+  let loopSteps = 0;
 
   while (cursorMs < endMs) {
+    loopSteps++;
+    if (loopSteps > MAX_CALENDAR_LOOP_STEPS) {
+      if (weeklyWorkingDurationMs > 0) {
+        const fullWeeks = Math.floor((endMs - cursorMs) / (7 * DAY_MS));
+        if (fullWeeks > 0) {
+          workingMs += fullWeeks * weeklyWorkingDurationMs;
+          cursorMs += fullWeeks * 7 * DAY_MS;
+          loopSteps = 0;
+          continue;
+        }
+      }
+
+      break;
+    }
+
+    const previousCursorMs = cursorMs;
     const cursorDate = new Date(cursorMs);
     const startOfDayMs = getStartOfDayMs(cursorDate);
     const nextDayMs = startOfDayMs + DAY_MS;
@@ -306,6 +344,9 @@ export const getWorkingDurationBetween = (
     }
 
     cursorMs = Math.min(nextDayMs, endMs);
+    if (cursorMs <= previousCursorMs) {
+      cursorMs = Math.min(previousCursorMs + DAY_MS, endMs);
+    }
   }
 
   return workingMs;

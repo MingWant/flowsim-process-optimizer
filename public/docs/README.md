@@ -40,6 +40,7 @@ public/docs/
 | --- | --- |
 | 用户指南 | `guide/user-guide.md` |
 | 文档索引 | `guide/documentation-index.{lang}.md` |
+| Routing 配置与诊断 | `guide/routing-configuration.{lang}.md` |
 | 等待时间快速参考 | `guide/wait-time-quick-reference.{lang}.md` |
 | 等待时间模式配置 | `guide/wait-time-mode-configuration.{lang}.md` |
 | 双等待时间指标 | `technical/dual-wait-time-metrics.{lang}.md` |

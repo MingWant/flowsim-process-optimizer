@@ -1,6 +1,6 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { FlowStats, ProcessStep, ScheduledArrivalEvent, ScheduledArrivalWindow, WorkItem, SimulationConfig, StepStats, SimulationStats } from '../types';
+import { FlowStats, ProcessStep, RouteStats, ScheduledArrivalEvent, ScheduledArrivalWindow, WorkItem, SimulationConfig, StepStats, SimulationStats } from '../types';
 import { addWorkingDuration, getDemandMultiplier, getNextWorkingSimulationTime, getWorkingDurationBetween, isWorkingTime, normalizeBusinessCalendar } from '../services/simulationCalendar';
 
 const TRANSMISSION_DURATION = 900; // visual ms to travel between nodes
@@ -58,6 +58,17 @@ type CycleTimeSamples = {
   operationalWorkingCycleTimeSamples: number[];
 };
 
+type RoutingContext = {
+  itemProfileId?: string;
+  priority?: number;
+  processingTimeMultiplier?: number;
+  itemId?: string;
+  items?: WorkItem[];
+  stepMap?: Map<string, ProcessStep>;
+  trackStats?: boolean;
+  currentSimulationMs?: number;
+};
+
 type FlowCounter = {
   flowId: string;
   created: number;
@@ -76,6 +87,24 @@ type FlowCounter = {
   totalTransmissionTime: number;
   totalOffHoursDelay: number;
   totalNonWorkingDelay: number;
+};
+
+type RouteCounter = Omit<RouteStats, 'routeId'>;
+
+type RouteEstimate = {
+  queueWait: number;
+  processingTime: number;
+  calendarDelay: number;
+  totalTime: number;
+  targetWasWorking: boolean;
+};
+
+const EMPTY_ROUTE_ESTIMATE: RouteEstimate = {
+  queueWait: 0,
+  processingTime: 0,
+  calendarDelay: 0,
+  totalTime: 0,
+  targetWasWorking: true,
 };
 
 const createStepCounter = (): StepCounter => ({
@@ -112,6 +141,35 @@ const createFlowCounter = (flowId: string): FlowCounter => ({
   totalTransmissionTime: 0,
   totalOffHoursDelay: 0,
   totalNonWorkingDelay: 0,
+});
+
+const getRouteId = (fromStepId: string, targetStepId: string) => `${fromStepId}->${targetStepId}`;
+
+const createRouteCounter = (fromStepId: string, targetStepId: string): RouteCounter => ({
+  fromStepId,
+  targetStepId,
+  selectedCount: 0,
+  sourceDecisionCount: 0,
+  sourceFallbackDecisionCount: 0,
+  fallbackSelectedCount: 0,
+  profileMatchedSelectionCount: 0,
+  priorityMatchedSelectionCount: 0,
+  lastBaseWeight: 0,
+  lastEffectiveWeight: 0,
+  lastEffectiveShare: 0,
+  lastCongestion: 0,
+  lastEstimatedQueueWait: 0,
+  lastEstimatedProcessingTime: 0,
+  lastEstimatedCalendarDelay: 0,
+  lastEstimatedTotalTime: 0,
+  lastTargetWasWorking: true,
+  lastWasFallback: false,
+  lastSelectionMode: 'probability',
+});
+
+const toRouteStats = (counter: RouteCounter): RouteStats => ({
+  routeId: getRouteId(counter.fromStepId, counter.targetStepId),
+  ...counter,
 });
 
 const getPercentileFromSorted = (sortedSamples: number[], percentile: number) => {
@@ -395,6 +453,16 @@ const getItemDispatchPriority = (item: WorkItem): number => {
   return typeof priority === 'number' && Number.isFinite(priority) ? priority : 1;
 };
 
+type ResolvedBusinessCalendar = ReturnType<typeof normalizeBusinessCalendar>;
+
+const resolveGlobalBusinessCalendar = (config: SimulationConfig): ResolvedBusinessCalendar => (
+  normalizeBusinessCalendar(config.businessCalendar)
+);
+
+const resolveStepBusinessCalendar = (step: ProcessStep, globalCalendar: ResolvedBusinessCalendar): ResolvedBusinessCalendar => (
+  step.calendarMode === 'custom' ? normalizeBusinessCalendar(step.businessCalendar) : globalCalendar
+);
+
 const isArrivalDueBy = (arrivalTimeMs: number, currentSimulationMs: number) => (
   Number.isFinite(arrivalTimeMs) && arrivalTimeMs <= currentSimulationMs + ARRIVAL_TIME_EPSILON_MS
 );
@@ -439,6 +507,7 @@ const getItemProfileForSpawn = (step: ProcessStep) => {
 };
 
 const getSimulationSignature = (config: SimulationConfig) => JSON.stringify({
+  simulationMode: config.simulationMode,
   calendarStartIso: config.calendarStartIso,
   businessCalendar: config.businessCalendar,
   demandModifiers: config.demandModifiers,
@@ -480,14 +549,20 @@ const getSimulationSignature = (config: SimulationConfig) => JSON.stringify({
   itemProfiles: step.itemProfiles,
   failureProbability: step.failureProbability,
   cancellationProbability: step.cancellationProbability,
+  routingStrategy: step.routingStrategy,
+  routingLoadSensitivity: step.routingLoadSensitivity,
+  routingTimeSensitivity: step.routingTimeSensitivity,
+  routingCalendarAware: step.routingCalendarAware,
   connections: step.connections,
   sourceProcessingTimes: step.sourceProcessingTimes,
+  sourceProcessingTimeUnit: step.sourceProcessingTimeUnit,
 }))});
 
 export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (reason: string) => void) => {
   const [items, setItems] = useState<WorkItem[]>([]);
   const [stepStats, setStepStats] = useState<StepStats[]>([]);
   const [flowStats, setFlowStats] = useState<FlowStats[]>([]);
+  const [routeStats, setRouteStats] = useState<RouteStats[]>([]);
   const [simulationTimeMs, setSimulationTimeMs] = useState(0);
   const [globalStats, setGlobalStats] = useState<SimulationStats>(createInitialSimulationStats);
   const [autoPauseReason, setAutoPauseReason] = useState<string | null>(null);
@@ -508,6 +583,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
   // We need this because 'stepStats' state is regenerated every frame
   const stepCountersRef = useRef<Record<string, StepCounter>>({});
   const flowCountersRef = useRef<Record<string, FlowCounter>>({});
+  const routeCountersRef = useRef<Record<string, RouteCounter>>({});
   const globalCycleTimeSamplesRef = useRef<CycleTimeSamples>(createCycleTimeSamples());
 
   const resetSimulation = useCallback(() => {
@@ -522,11 +598,13 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     setAutoPauseReason(null);
     setStepStats([]);
     setFlowStats([]);
+    setRouteStats([]);
     lastUiUpdateRef.current = 0;
     nextSpawnTimeRef.current = {};
     delayedArrivalSlotsRef.current = {};
     stepCountersRef.current = {}; 
     flowCountersRef.current = {};
+    routeCountersRef.current = {};
     globalCycleTimeSamplesRef.current = createCycleTimeSamples();
     config.steps.forEach(s => {
       stepCountersRef.current[s.id] = createStepCounter();
@@ -603,24 +681,402 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     });
   }, [config, config.steps, resetSimulation]);
 
-  const getNextStepId = (currentStep: ProcessStep): string | 'finished' => {
+  const hasRoutingFilter = (connection: ProcessStep['connections'][number]) => (
+    (connection.itemProfileIds && connection.itemProfileIds.length > 0)
+    || typeof connection.minPriority === 'number'
+    || typeof connection.maxPriority === 'number'
+  );
+
+  const isConnectionEligible = (connection: ProcessStep['connections'][number], context?: RoutingContext) => {
+    if (connection.itemProfileIds && connection.itemProfileIds.length > 0) {
+      if (!context?.itemProfileId || !connection.itemProfileIds.includes(context.itemProfileId)) {
+        return false;
+      }
+    }
+
+    const priority = typeof context?.priority === 'number' && Number.isFinite(context.priority) ? context.priority : 1;
+    const hasMinPriority = typeof connection.minPriority === 'number' && Number.isFinite(connection.minPriority);
+    const hasMaxPriority = typeof connection.maxPriority === 'number' && Number.isFinite(connection.maxPriority);
+    const minPriority = hasMinPriority && hasMaxPriority ? Math.min(connection.minPriority ?? 0, connection.maxPriority ?? 0) : connection.minPriority;
+    const maxPriority = hasMinPriority && hasMaxPriority ? Math.max(connection.minPriority ?? 0, connection.maxPriority ?? 0) : connection.maxPriority;
+
+    if (typeof minPriority === 'number' && Number.isFinite(minPriority) && priority < minPriority) {
+      return false;
+    }
+    if (typeof maxPriority === 'number' && Number.isFinite(maxPriority) && priority > maxPriority) {
+      return false;
+    }
+
+    return true;
+  };
+
+  const doesConnectionPriorityMatch = (connection: ProcessStep['connections'][number], context?: RoutingContext) => {
+    const priority = typeof context?.priority === 'number' && Number.isFinite(context.priority) ? context.priority : undefined;
+    if (priority === undefined) {
+      return false;
+    }
+
+    const hasMinPriority = typeof connection.minPriority === 'number' && Number.isFinite(connection.minPriority);
+    const hasMaxPriority = typeof connection.maxPriority === 'number' && Number.isFinite(connection.maxPriority);
+    if (!hasMinPriority && !hasMaxPriority) {
+      return false;
+    }
+
+    const minPriority = hasMinPriority && hasMaxPriority ? Math.min(connection.minPriority ?? 0, connection.maxPriority ?? 0) : connection.minPriority;
+    const maxPriority = hasMinPriority && hasMaxPriority ? Math.max(connection.minPriority ?? 0, connection.maxPriority ?? 0) : connection.maxPriority;
+
+    if (typeof minPriority === 'number' && Number.isFinite(minPriority) && priority < minPriority) {
+      return false;
+    }
+    if (typeof maxPriority === 'number' && Number.isFinite(maxPriority) && priority > maxPriority) {
+      return false;
+    }
+
+    return true;
+  };
+
+  const chooseWeightedConnection = (connections: ProcessStep['connections'], weights: number[]) => {
+    if (connections.length === 0) {
+      return undefined;
+    }
+
+    const safeWeights = weights.map((weight) => Number.isFinite(weight) && weight > 0 ? weight : 0);
+    const totalWeight = safeWeights.reduce((sum, weight) => sum + weight, 0);
+    const effectiveWeights = totalWeight > 0 ? safeWeights : connections.map(() => 1);
+    const effectiveTotal = totalWeight > 0 ? totalWeight : connections.length;
+    const roll = Math.random() * effectiveTotal;
+    let cumulative = 0;
+
+    for (let index = 0; index < connections.length; index++) {
+      cumulative += effectiveWeights[index];
+      if (roll <= cumulative) {
+        return connections[index];
+      }
+    }
+
+    return connections[connections.length - 1];
+  };
+
+  const getTargetCongestion = (targetStep: ProcessStep | undefined, context?: RoutingContext) => {
+    if (!targetStep || targetStep.type !== 'process' || targetStep.simulationMode === 'delay') {
+      return 0;
+    }
+
+    const items = context?.items || itemsRef.current;
+    const capacity = Math.max(1, getStepProcessingLimit(targetStep));
+    let queuedCount = 0;
+    let processingCount = 0;
+    let inboundCount = 0;
+
+    for (const item of items) {
+      if (item.id === context?.itemId) {
+        continue;
+      }
+
+      if (item.currentStepId === targetStep.id && item.status === 'queued') {
+        queuedCount++;
+      } else if (item.currentStepId === targetStep.id && item.status === 'processing') {
+        processingCount++;
+      } else if (item.status === 'transmitting' && item.targetStepId === targetStep.id) {
+        inboundCount++;
+      }
+    }
+
+    const queuePressure = queuedCount / capacity;
+    const activePressure = processingCount / capacity;
+    const inboundPressure = inboundCount / capacity;
+    return activePressure + queuePressure + inboundPressure * 0.5;
+  };
+
+  const getEstimatedProcessingSpeedMultiplier = (targetStep: ProcessStep, context?: RoutingContext): number => {
+    const executionMode = targetStep.resourceExecutionMode || 'single';
+
+    if (targetStep.simulationMode === 'delay') {
+      return 1;
+    }
+
+    if (executionMode === 'collaborative') {
+      const minResources = getPositiveInteger(targetStep.minResourcesPerItem, 1, 1, 1000);
+      const maxResources = getPositiveInteger(targetStep.maxResourcesPerItem, minResources, minResources, 1000);
+      const targetResources = getPositiveInteger(targetStep.targetResourcesPerItem, Math.min(2, maxResources), minResources, maxResources);
+      return getRecordMultiplier(
+        targetStep.collaborativeEfficiency,
+        targetResources,
+        targetResources === 1 ? 1 : 1 + (targetResources - 1) * 0.65
+      );
+    }
+
+    if (executionMode === 'multitask') {
+      const items = context?.items || itemsRef.current;
+      const activeCount = items.reduce((count, item) => (
+        item.id !== context?.itemId && item.currentStepId === targetStep.id && item.status === 'processing'
+          ? count + 1
+          : count
+      ), 0);
+      const nextLoad = getResourceLoadForNextItem(targetStep, activeCount + 1);
+      return getRecordMultiplier(targetStep.multitaskEfficiency, nextLoad, Math.max(0.25, 1 - (nextLoad - 1) * 0.2));
+    }
+
+    return 1;
+  };
+
+  const getExpectedProcessingDuration = (targetStep: ProcessStep | undefined, sourceStepId: string, context?: RoutingContext): number => {
+    if (!targetStep || targetStep.type !== 'process') {
+      return 0;
+    }
+
+    const safeDurationNumber = (value: number | undefined, fallback: number) => {
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+        return value;
+      }
+      return fallback;
+    };
+
+    const fixedUnitMultiplier = TIME_UNIT_TO_MS[targetStep.processingTimeUnit || 'ms'];
+    const sourceRuleUnitMultiplier = TIME_UNIT_TO_MS[targetStep.sourceProcessingTimeUnit || targetStep.processingTimeUnit || 'ms'];
+    const rangeUnitMultiplier = TIME_UNIT_TO_MS[targetStep.rangeTimeUnit || targetStep.processingTimeUnit || 'ms'];
+    const isDelayMode = targetStep.simulationMode === 'delay';
+    const simulationMode = config.simulationMode || 'realistic';
+    let baseDurationMs = 0;
+
+    if (!isDelayMode && targetStep.randomnessMode === 'fixed' && sourceStepId && targetStep.sourceProcessingTimes && Object.prototype.hasOwnProperty.call(targetStep.sourceProcessingTimes, sourceStepId)) {
+      baseDurationMs = safeDurationNumber(targetStep.sourceProcessingTimes[sourceStepId], 1000) * sourceRuleUnitMultiplier;
+    } else if (targetStep.randomnessMode === 'range') {
+      const minDuration = safeDurationNumber(targetStep.minProcessingTime, 500) * rangeUnitMultiplier;
+      const maxDuration = safeDurationNumber(targetStep.maxProcessingTime, 2000) * rangeUnitMultiplier;
+      baseDurationMs = simulationMode === 'worst-case'
+        ? Math.max(minDuration, maxDuration)
+        : (Math.min(minDuration, maxDuration) + Math.max(minDuration, maxDuration)) / 2;
+    } else {
+      baseDurationMs = safeDurationNumber(targetStep.processingTime, 1000) * fixedUnitMultiplier;
+      const variance = safeDurationNumber(targetStep.variance, 0);
+      if (!isDelayMode && variance > 0 && simulationMode === 'worst-case') {
+        baseDurationMs *= (1 + variance);
+      }
+    }
+
+    const profileMultiplier = typeof context?.processingTimeMultiplier === 'number' && Number.isFinite(context.processingTimeMultiplier)
+      ? Math.max(0.01, context.processingTimeMultiplier)
+      : 1;
+    const speedMultiplier = getEstimatedProcessingSpeedMultiplier(targetStep, context);
+    const adjustedDuration = (baseDurationMs * profileMultiplier) / Math.max(0.05, speedMultiplier);
+    return Math.max(MIN_PROCESSING_DURATION_MS, Math.min(MAX_SAFE_DURATION_MS, Number.isFinite(adjustedDuration) ? adjustedDuration : 1000));
+  };
+
+  const getEstimatedRouteTime = (currentStep: ProcessStep, targetStep: ProcessStep | undefined, context?: RoutingContext): RouteEstimate => {
+    if (!targetStep || targetStep.type !== 'process') {
+      return EMPTY_ROUTE_ESTIMATE;
+    }
+
+    const currentSimulationMs = Math.max(0, context?.currentSimulationMs ?? simulationTimeRef.current);
+    const globalCalendar = resolveGlobalBusinessCalendar(config);
+    const targetCalendar = resolveStepBusinessCalendar(targetStep, globalCalendar);
+    const processingTime = getExpectedProcessingDuration(targetStep, currentStep.id, context);
+    let queueWait = 0;
+
+    if (targetStep.simulationMode !== 'delay') {
+      const items = context?.items || itemsRef.current;
+      const capacity = Math.max(1, getStepProcessingLimit(targetStep));
+      const estimatedUnitsPerItem = targetStep.resourceExecutionMode === 'collaborative'
+        ? Math.max(1, getResourceUnitsForItem(targetStep, capacity) || getPositiveInteger(targetStep.minResourcesPerItem, 1, 1, 1000))
+        : 1;
+      const candidatePriority = typeof context?.priority === 'number' && Number.isFinite(context.priority) ? context.priority : 1;
+      let activeUnits = 0;
+      let activeRemainingWorkUnits = 0;
+      let queuedUnits = 0;
+      let inboundUnits = 0;
+
+      for (const item of items) {
+        if (item.id === context?.itemId) {
+          continue;
+        }
+
+        if (item.currentStepId === targetStep.id && item.status === 'processing') {
+          const usageUnits = targetStep.resourceExecutionMode === 'collaborative'
+            ? getPositiveInteger(item.assignedResourceCount, estimatedUnitsPerItem, 1, 1000)
+            : 1;
+          const requiredDuration = item.requiredDuration && item.requiredDuration > 0 ? item.requiredDuration : processingTime;
+          const startedAt = item.processingStartedAtSimulationMs ?? currentSimulationMs;
+          const elapsedWorking = Math.max(0, Math.min(
+            getWorkingDurationBetween(targetCalendar, config.calendarStartIso, startedAt, currentSimulationMs),
+            requiredDuration
+          ));
+          const remainingWorking = Math.max(0, requiredDuration - elapsedWorking);
+          activeUnits += usageUnits;
+          activeRemainingWorkUnits += remainingWorking * usageUnits;
+          continue;
+        }
+
+        if (item.currentStepId === targetStep.id && item.status === 'queued') {
+          if (getItemDispatchPriority(item) >= candidatePriority) {
+            queuedUnits += estimatedUnitsPerItem;
+          }
+          continue;
+        }
+
+        if (item.status === 'transmitting' && item.targetStepId === targetStep.id) {
+          inboundUnits += estimatedUnitsPerItem * 0.5;
+        }
+      }
+
+      const freeUnits = Math.max(0, capacity - activeUnits);
+      const waitingUnits = queuedUnits + inboundUnits;
+      const overflowWaitingUnits = Math.max(0, waitingUnits - freeUnits);
+      const activeWait = activeUnits >= capacity || waitingUnits >= freeUnits
+        ? activeRemainingWorkUnits / capacity
+        : 0;
+      const overflowWait = (overflowWaitingUnits * processingTime) / capacity;
+      queueWait = Math.max(0, activeWait + overflowWait);
+    }
+
+    const predictedReadyTime = currentSimulationMs + queueWait;
+    const calendarAware = currentStep.routingCalendarAware !== false;
+    let calendarDelay = 0;
+    let targetWasWorking = true;
+
+    if (calendarAware) {
+      targetWasWorking = isWorkingTime(targetCalendar, config.calendarStartIso, predictedReadyTime);
+      const processingStartTime = getNextWorkingSimulationTime(targetCalendar, config.calendarStartIso, predictedReadyTime);
+      const processingFinishTime = addWorkingDuration(targetCalendar, config.calendarStartIso, processingStartTime, processingTime);
+      calendarDelay = Math.max(0, processingStartTime - predictedReadyTime)
+        + Math.max(0, processingFinishTime - processingStartTime - processingTime);
+    }
+
+    const totalTime = Math.max(0, queueWait + processingTime + calendarDelay);
+    return {
+      queueWait: Number.isFinite(queueWait) ? queueWait : 0,
+      processingTime: Number.isFinite(processingTime) ? processingTime : 0,
+      calendarDelay: Number.isFinite(calendarDelay) ? calendarDelay : 0,
+      totalTime: Number.isFinite(totalTime) ? totalTime : 0,
+      targetWasWorking,
+    };
+  };
+
+  const getRouteCounter = (fromStepId: string, targetStepId: string) => {
+    const routeId = getRouteId(fromStepId, targetStepId);
+    if (!routeCountersRef.current[routeId]) {
+      routeCountersRef.current[routeId] = createRouteCounter(fromStepId, targetStepId);
+    }
+    return routeCountersRef.current[routeId];
+  };
+
+  const recordRoutingDecision = (
+    currentStep: ProcessStep,
+    candidateConnections: ProcessStep['connections'],
+    baseWeights: number[],
+    effectiveWeights: number[],
+    routeEstimates: RouteEstimate[] | undefined,
+    selectedTargetId: string | undefined,
+    wasFallback: boolean,
+    context?: RoutingContext
+  ) => {
+    if (!context?.trackStats) {
+      return;
+    }
+
+    const positiveEffectiveWeights = effectiveWeights.map((weight) => Number.isFinite(weight) && weight > 0 ? weight : 0);
+    const effectiveTotal = positiveEffectiveWeights.reduce((sum, weight) => sum + weight, 0);
+
+    candidateConnections.forEach((connection, index) => {
+      const counter = getRouteCounter(currentStep.id, connection.targetId);
+      const baseWeight = Number.isFinite(baseWeights[index]) ? Math.max(0, baseWeights[index]) : 0;
+      const effectiveWeight = positiveEffectiveWeights[index] || 0;
+      const targetStep = context.stepMap?.get(connection.targetId) || stepsRef.current.find((step) => step.id === connection.targetId);
+      const routeEstimate = routeEstimates?.[index] || EMPTY_ROUTE_ESTIMATE;
+
+      counter.sourceDecisionCount++;
+      if (wasFallback) {
+        counter.sourceFallbackDecisionCount++;
+      }
+      counter.lastBaseWeight = baseWeight;
+      counter.lastEffectiveWeight = effectiveWeight;
+      counter.lastEffectiveShare = effectiveTotal > 0 ? effectiveWeight / effectiveTotal : 1 / Math.max(1, candidateConnections.length);
+      counter.lastCongestion = getTargetCongestion(targetStep, context);
+      counter.lastEstimatedQueueWait = routeEstimate.queueWait;
+      counter.lastEstimatedProcessingTime = routeEstimate.processingTime;
+      counter.lastEstimatedCalendarDelay = routeEstimate.calendarDelay;
+      counter.lastEstimatedTotalTime = routeEstimate.totalTime;
+      counter.lastTargetWasWorking = routeEstimate.targetWasWorking;
+      counter.lastWasFallback = wasFallback;
+      counter.lastSelectionMode = currentStep.routingStrategy || 'probability';
+
+      if (connection.targetId === selectedTargetId) {
+        counter.selectedCount++;
+        if (wasFallback) {
+          counter.fallbackSelectedCount++;
+        }
+        if (connection.itemProfileIds && connection.itemProfileIds.length > 0 && context.itemProfileId && connection.itemProfileIds.includes(context.itemProfileId)) {
+          counter.profileMatchedSelectionCount++;
+        }
+        if (doesConnectionPriorityMatch(connection, context)) {
+          counter.priorityMatchedSelectionCount++;
+        }
+      }
+    });
+  };
+
+  const getNextStepId = (currentStep: ProcessStep, context?: RoutingContext): string | 'finished' => {
     if (!currentStep.connections || currentStep.connections.length === 0) {
       return 'finished';
     }
 
-    const roll = Math.random();
-    let cumulative = 0;
-    
-    const totalProb = currentStep.connections.reduce((sum, c) => sum + c.probability, 0);
-    
-    for (const conn of currentStep.connections) {
-      cumulative += (conn.probability / (totalProb || 1));
-      if (roll <= cumulative) {
-        return conn.targetId;
-      }
+    const stepMap = context?.stepMap || new Map<string, ProcessStep>(stepsRef.current.map((step) => [step.id, step]));
+    const validConnections = currentStep.connections.filter((connection) => connection.targetId && stepMap.has(connection.targetId));
+    if (validConnections.length === 0) {
+      return 'finished';
     }
-    
-    return currentStep.connections[currentStep.connections.length - 1].targetId;
+
+    const filteredConnections = validConnections.filter(hasRoutingFilter);
+    const matchingFilteredConnections = filteredConnections.filter((connection) => isConnectionEligible(connection, context));
+    const unfilteredConnections = validConnections.filter((connection) => !hasRoutingFilter(connection));
+    const wasFallback = filteredConnections.length > 0 && matchingFilteredConnections.length === 0;
+    const candidateConnections = matchingFilteredConnections.length > 0
+      ? matchingFilteredConnections
+      : unfilteredConnections.length > 0
+        ? unfilteredConnections
+        : validConnections;
+    const baseWeights = candidateConnections.map((connection) => Math.max(0, connection.probability || 0));
+
+    const routingStrategy = currentStep.routingStrategy || 'probability';
+
+    if (routingStrategy === 'probability') {
+      const selectedConnection = chooseWeightedConnection(candidateConnections, baseWeights);
+      recordRoutingDecision(currentStep, candidateConnections, baseWeights, baseWeights, undefined, selectedConnection?.targetId, wasFallback, context);
+      return selectedConnection?.targetId || 'finished';
+    }
+
+    if (routingStrategy === 'time-aware') {
+      const sensitivity = Math.max(0, Math.min(10, Number.isFinite(currentStep.routingTimeSensitivity) ? currentStep.routingTimeSensitivity ?? 2 : 2));
+      const routeEstimates = candidateConnections.map((connection) => getEstimatedRouteTime(currentStep, stepMap.get(connection.targetId), context));
+      const positiveEstimatedTimes = routeEstimates
+        .map((estimate) => estimate.totalTime)
+        .filter((time) => Number.isFinite(time) && time > 0);
+      const fastestTime = positiveEstimatedTimes.length > 0 ? Math.min(...positiveEstimatedTimes) : 1;
+      const dynamicWeights = candidateConnections.map((connection, index) => {
+        const baseWeight = baseWeights[index];
+        const estimatedTime = routeEstimates[index]?.totalTime ?? 0;
+        const relativeDelay = estimatedTime > 0 && fastestTime > 0
+          ? Math.max(0, (estimatedTime - fastestTime) / fastestTime)
+          : 0;
+        return baseWeight / (1 + sensitivity * relativeDelay);
+      });
+
+      const selectedConnection = chooseWeightedConnection(candidateConnections, dynamicWeights);
+      recordRoutingDecision(currentStep, candidateConnections, baseWeights, dynamicWeights, routeEstimates, selectedConnection?.targetId, wasFallback, context);
+      return selectedConnection?.targetId || 'finished';
+    }
+
+    const sensitivity = Math.max(0, Math.min(10, Number.isFinite(currentStep.routingLoadSensitivity) ? currentStep.routingLoadSensitivity ?? 1 : 1));
+    const dynamicWeights = candidateConnections.map((connection, index) => {
+      const targetStep = stepMap.get(connection.targetId);
+      const congestion = getTargetCongestion(targetStep, context);
+      const baseWeight = baseWeights[index];
+      return baseWeight / (1 + sensitivity * congestion);
+    });
+
+    const selectedConnection = chooseWeightedConnection(candidateConnections, dynamicWeights);
+    recordRoutingDecision(currentStep, candidateConnections, baseWeights, dynamicWeights, undefined, selectedConnection?.targetId, wasFallback, context);
+    return selectedConnection?.targetId || 'finished';
   };
 
   const safeNumber = (val: number | undefined, defaultVal: number): number => {
@@ -632,8 +1088,10 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
 
   const getArrivalUnitMs = (step: ProcessStep) => TIME_UNIT_TO_MS[step.arrivalUnit || 's'];
   const getArrivalBatchSize = (step: ProcessStep) => Math.max(1, Math.min(1000, Math.round(safeNumber(step.arrivalBatchSize, 1))));
-  const getEffectiveBusinessCalendar = (step: ProcessStep) => normalizeBusinessCalendar(
-    step.calendarMode === 'custom' ? step.businessCalendar : config.businessCalendar
+  const getGlobalBusinessCalendar = () => resolveGlobalBusinessCalendar(config);
+  const getEffectiveBusinessCalendar = (step: ProcessStep) => resolveStepBusinessCalendar(
+    step,
+    getGlobalBusinessCalendar()
   );
 
   const getCalendarStartMs = () => {
@@ -692,6 +1150,41 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     * Math.max(0.01, getDemandMultiplier(step.demandModifiers, config.calendarStartIso, eventSimulationMs))
   );
 
+  const getFrameSequenceSlot = (
+    sequenceStartMs: number,
+    quantity: number,
+    itemIntervalMs: number,
+    frameStartMs: number,
+    frameEndMs: number
+  ): ArrivalSlot | null => {
+    const safeQuantity = Math.max(1, Math.round(quantity));
+    const safeIntervalMs = Math.max(0, itemIntervalMs);
+
+    if (safeIntervalMs <= 0 || safeQuantity <= 1) {
+      return isArrivalInFrame(sequenceStartMs, frameStartMs, frameEndMs)
+        ? { time: sequenceStartMs, quantity: safeQuantity, itemIntervalMs: 0 }
+        : null;
+    }
+
+    let firstIndex = Math.max(0, Math.ceil((frameStartMs - sequenceStartMs) / safeIntervalMs));
+    const firstTime = sequenceStartMs + firstIndex * safeIntervalMs;
+    const isInitialZeroFrame = frameStartMs <= ARRIVAL_TIME_EPSILON_MS && Math.abs(firstTime) <= ARRIVAL_TIME_EPSILON_MS;
+    if (!isInitialZeroFrame && firstTime <= frameStartMs + ARRIVAL_TIME_EPSILON_MS) {
+      firstIndex++;
+    }
+
+    const lastIndex = Math.min(safeQuantity - 1, Math.floor((frameEndMs - sequenceStartMs + ARRIVAL_TIME_EPSILON_MS) / safeIntervalMs));
+    if (firstIndex > lastIndex || firstIndex >= safeQuantity) {
+      return null;
+    }
+
+    return {
+      time: sequenceStartMs + firstIndex * safeIntervalMs,
+      quantity: lastIndex - firstIndex + 1,
+      itemIntervalMs: safeIntervalMs,
+    };
+  };
+
   const calculateNextSpawnDelay = (step: ProcessStep, eventSimulationMs = simulationTimeRef.current): number => {
     const unitMs = getArrivalUnitMs(step);
     const inputMode = step.arrivalInputMode || 'rate';
@@ -732,11 +1225,12 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
 
     const calendarStartMs = getCalendarStartMs();
     const slots: ArrivalSlot[] = [];
-    const startDayIndex = Math.floor(Math.max(0, frameStartMs - DAY_MS) / DAY_MS);
-    const endDayIndex = Math.ceil(Math.max(0, frameEndMs + DAY_MS) / DAY_MS);
+    const safeFrameStartMs = Math.max(0, Math.min(frameStartMs, frameEndMs));
+    const safeFrameEndMs = Math.max(safeFrameStartMs, frameEndMs);
+    const firstDayStartMs = getStartOfDayMs(new Date(calendarStartMs + safeFrameStartMs));
+    const lastDayStartMs = getStartOfDayMs(new Date(calendarStartMs + safeFrameEndMs));
 
-    for (let dayIndex = startDayIndex; dayIndex <= endDayIndex; dayIndex++) {
-      const dayStartMs = calendarStartMs + dayIndex * DAY_MS;
+    for (let dayStartMs = firstDayStartMs; dayStartMs <= lastDayStartMs; dayStartMs += DAY_MS) {
       const date = new Date(dayStartMs);
 
       for (const window of windows) {
@@ -745,30 +1239,24 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         }
 
         const quantity = Math.max(1, Math.round(window.quantity));
-        const windowStart = dayIndex * DAY_MS + window.startHour * HOUR_MS;
-        const windowEnd = dayIndex * DAY_MS + window.endHour * HOUR_MS;
+        const windowStart = dayStartMs + window.startHour * HOUR_MS - calendarStartMs;
+        const windowEnd = dayStartMs + window.endHour * HOUR_MS - calendarStartMs;
         const duration = Math.max(1, windowEnd - windowStart);
         const demandMultiplier = getStartDemandMultiplier(step, windowStart);
         const adjustedQuantity = Math.max(1, Math.round(quantity * demandMultiplier));
 
         if (window.spreadMode === 'burst') {
-          if (isArrivalInFrame(windowStart, frameStartMs, frameEndMs)) {
-            slots.push({ time: windowStart, quantity: adjustedQuantity, itemIntervalMs: 0 });
+          const burstSlot = getFrameSequenceSlot(windowStart, adjustedQuantity, 0, frameStartMs, frameEndMs);
+          if (burstSlot) {
+            slots.push(burstSlot);
           }
           continue;
         }
 
         const interval = duration / adjustedQuantity;
-        const firstIndex = frameStartMs === 0
-          ? Math.max(0, Math.floor((frameStartMs - windowStart) / interval))
-          : Math.max(0, Math.floor((frameStartMs - windowStart) / interval) + 1);
-        const lastIndex = Math.min(adjustedQuantity - 1, Math.floor((frameEndMs - windowStart) / interval));
-
-        for (let index = firstIndex; index <= lastIndex; index++) {
-          const time = windowStart + index * interval;
-          if (isArrivalInFrame(time, frameStartMs, frameEndMs)) {
-            slots.push({ time, quantity: 1, itemIntervalMs: 0 });
-          }
+        const spreadSlot = getFrameSequenceSlot(windowStart, adjustedQuantity, interval, frameStartMs, frameEndMs);
+        if (spreadSlot) {
+          slots.push(spreadSlot);
         }
       }
     }
@@ -777,14 +1265,16 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
   };
 
   const getEventBaseSimulationTime = (event: ScheduledArrivalEvent) => {
+    const calendarStartMs = getCalendarStartMs();
     if (event.startDate) {
       const dateMs = getDateOnlyMs(event.startDate);
       if (typeof dateMs === 'number') {
-        return dateMs - getCalendarStartMs() + event.hour * HOUR_MS;
+        return dateMs - calendarStartMs + event.hour * HOUR_MS;
       }
     }
 
-    return Math.max(0, event.dayOffset || 0) * DAY_MS + event.hour * HOUR_MS;
+    const calendarStartDayMs = getStartOfDayMs(new Date(calendarStartMs));
+    return calendarStartDayMs + Math.max(0, event.dayOffset || 0) * DAY_MS + event.hour * HOUR_MS - calendarStartMs;
   };
 
   const getRepeatIntervalMs = (event: ScheduledArrivalEvent) => {
@@ -818,17 +1308,21 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
       const baseTime = getEventBaseSimulationTime(event);
       const repeatInterval = getRepeatIntervalMs(event);
       const maxRuns = Math.max(1, event.occurrenceLimit ?? 100000);
-      const firstRun = repeatInterval ? Math.max(0, Math.floor((frameStartMs - baseTime) / repeatInterval)) : 0;
+      const configuredUnitMs = TIME_UNIT_TO_MS[event.itemIntervalUnit || 's'] || 1000;
+      const configuredItemIntervalMs = (event.dispatchMode || 'burst') === 'sequence'
+        ? Math.max(0, event.itemInterval || 0) * configuredUnitMs
+        : 0;
+      const configuredSpanMs = configuredItemIntervalMs > 0
+        ? Math.max(0, Math.round(event.quantity || 1) - 1) * configuredItemIntervalMs
+        : 0;
+      const firstRun = repeatInterval ? Math.max(0, Math.floor((frameStartMs - baseTime - configuredSpanMs) / repeatInterval)) : 0;
       const lastRun = repeatInterval ? Math.min(maxRuns - 1, Math.ceil((frameEndMs - baseTime) / repeatInterval)) : 0;
 
       for (let run = firstRun; run <= lastRun; run++) {
         const eventTime = baseTime + (repeatInterval ? run * repeatInterval : 0);
-        if (!isArrivalInFrame(eventTime, frameStartMs, frameEndMs)) {
-          continue;
-        }
 
         const absoluteDate = new Date(calendarStartMs + eventTime);
-        if (event.repeat === 'workingDay' && !normalizeBusinessCalendar(getEffectiveBusinessCalendar(step)).daysOfWeek.includes(absoluteDate.getDay())) {
+        if (event.repeat === 'workingDay' && !getEffectiveBusinessCalendar(step).daysOfWeek.includes(absoluteDate.getDay())) {
           continue;
         }
 
@@ -838,12 +1332,14 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
 
         const demandMultiplier = getStartDemandMultiplier(step, eventTime);
         const quantity = Math.max(1, Math.round(event.quantity * demandMultiplier));
-        const unitMs = TIME_UNIT_TO_MS[event.itemIntervalUnit || 's'] || 1000;
         const itemIntervalMs = (event.dispatchMode || 'burst') === 'sequence'
-          ? Math.max(0, event.itemInterval || 0) * unitMs
+          ? Math.max(0, event.itemInterval || 0) * configuredUnitMs
           : 0;
 
-        slots.push({ time: eventTime, quantity, itemIntervalMs });
+        const eventSlot = getFrameSequenceSlot(eventTime, quantity, itemIntervalMs, frameStartMs, frameEndMs);
+        if (eventSlot) {
+          slots.push(eventSlot);
+        }
       }
     }
 
@@ -860,17 +1356,18 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
 
   const calculateProcessingDuration = (step: ProcessStep, item: WorkItem): number => {
       const fixedUnitMultiplier = TIME_UNIT_TO_MS[step.processingTimeUnit || 'ms'];
+      const sourceRuleUnitMultiplier = TIME_UNIT_TO_MS[step.sourceProcessingTimeUnit || step.processingTimeUnit || 'ms'];
       const rangeUnitMultiplier = TIME_UNIT_TO_MS[step.rangeTimeUnit || step.processingTimeUnit || 'ms'];
       const isDelayMode = step.simulationMode === 'delay';
       const simulationMode = config.simulationMode || 'realistic';
 
     // 1. Check Source Rule Override (Fixed Mode only usually, but applies generally)
-    if (!isDelayMode && step.randomnessMode === 'fixed' && item.previousStepId && step.sourceProcessingTimes && step.sourceProcessingTimes[item.previousStepId]) {
+    if (!isDelayMode && step.randomnessMode === 'fixed' && item.previousStepId && step.sourceProcessingTimes && Object.prototype.hasOwnProperty.call(step.sourceProcessingTimes, item.previousStepId)) {
         const baseValue = safeNumber(step.sourceProcessingTimes[item.previousStepId], 1000);
-        const baseMs = baseValue * fixedUnitMultiplier;
+        const baseMs = baseValue * sourceRuleUnitMultiplier;
         // Boundary check: prevent overflow
         if (baseMs > MAX_SAFE_DURATION_MS) {
-          console.warn(`Processing time exceeds safe limit: ${baseValue} ${step.processingTimeUnit}`);
+          console.warn(`Processing time exceeds safe limit: ${baseValue} ${step.sourceProcessingTimeUnit || step.processingTimeUnit}`);
           return MAX_SAFE_DURATION_MS;
         }
         const variance = safeNumber(step.variance, 0);
@@ -1054,7 +1551,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
       const steps: ProcessStep[] = stepsRef.current;
       const stepMap = new Map<string, ProcessStep>(steps.map((s: ProcessStep) => [s.id, s]));
       const stepFlowLookup = buildStepFlowLookup(steps);
-      const defaultBusinessCalendar = normalizeBusinessCalendar(config.businessCalendar);
+      const globalBusinessCalendar = resolveGlobalBusinessCalendar(config);
 
       const spawnArrivalSlot = (startNode: ProcessStep, slot: ArrivalSlot): number => {
         const quantity = Math.max(1, Math.min(MAX_SPAWNS_PER_START_PER_TICK, Math.round(slot.quantity)));
@@ -1085,7 +1582,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
           return handledCount;
         }
 
-        const startCalendar = getEffectiveBusinessCalendar(startNode);
+        const startCalendar = resolveStepBusinessCalendar(startNode, globalBusinessCalendar);
         const isStartWorking = isWorkingTime(startCalendar, config.calendarStartIso, slot.time);
 
         if (!isStartWorking && startCalendar.nonWorkingArrivalPolicy === 'delay') {
@@ -1111,9 +1608,18 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         }
 
         for (let batchIndex = 0; batchIndex < quantity; batchIndex++) {
+          const itemProfile = getItemProfileForSpawn(startNode);
           let firstTargetId: string | 'finished' = 'finished';
           if (startNode.connections.length > 0) {
-            firstTargetId = getNextStepId(startNode);
+            firstTargetId = getNextStepId(startNode, {
+              itemProfileId: itemProfile?.id,
+              priority: itemProfile?.priority ?? 1,
+              processingTimeMultiplier: itemProfile?.processingTimeMultiplier ?? 1,
+              items: itemsRef.current,
+              stepMap,
+              trackStats: true,
+              currentSimulationMs: slot.time,
+            });
           }
 
           if (firstTargetId === 'finished') {
@@ -1121,7 +1627,6 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
           }
 
           const itemSpawnTime = slot.time + (batchIndex * Math.max(0, slot.itemIntervalMs));
-          const itemProfile = getItemProfileForSpawn(startNode);
           const flowId = stepFlowLookup.get(startNode.id) || startNode.id;
 
           const newItem: WorkItem = {
@@ -1290,13 +1795,11 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         const simulationMode = config.simulationMode || 'realistic';
         let cancelChance: number;
 
-        if (simulationMode === 'worst-case') {
-          // Worst-case: linear model, reaches 100% quickly for stress testing
-          cancelChance = Math.min(1, effectiveCancellationProbability * (exposureMs / 1000));
-        } else {
-          // Realistic: exponential distribution (Poisson process)
-          cancelChance = 1 - Math.exp(-effectiveCancellationProbability * (exposureMs / 1000));
-        }
+        const exposureSeconds = exposureMs / 1000;
+        const stressMultiplier = simulationMode === 'worst-case' ? 2 : 1;
+        // Exponential hazard model keeps probability bounded and time-consistent across frame sizes.
+        // Worst-case uses a higher hazard rate instead of a linear shortcut that can hit 100% too quickly.
+        cancelChance = 1 - Math.exp(-effectiveCancellationProbability * stressMultiplier * exposureSeconds);
 
         item.queueCancellationCheckedAtSimulationMs = throughSimulationMs;
         if (Math.random() < cancelChance) {
@@ -1305,6 +1808,37 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         }
 
         return false;
+      };
+
+      const getProcessingUsageUnits = (item: WorkItem, step: ProcessStep) => (
+        step.resourceExecutionMode === 'collaborative'
+          ? getPositiveInteger(item.assignedResourceCount, 1, 1, 1000)
+          : 1
+      );
+
+      const clearProcessingAssignment = (item: WorkItem) => {
+        item.assignedResourceCount = 1;
+        item.assignedTeamId = undefined;
+        item.assignedTeamName = undefined;
+        item.resourceLoadFactor = 1;
+        item.executionMode = 'single';
+      };
+
+      const releaseProcessingResources = (item: WorkItem, step: ProcessStep, stepId: string) => {
+        if (step.simulationMode === 'delay') {
+          clearProcessingAssignment(item);
+          return;
+        }
+
+        const currentUsage = stepUsage.get(stepId) || 0;
+        const usageUnits = getProcessingUsageUnits(item, step);
+        stepUsage.set(stepId, Math.max(0, currentUsage - usageUnits));
+
+        if (step.resourceExecutionMode === 'collaborative' && item.assignedTeamId) {
+          stepTeamUsage.delete(getTeamUsageKey(stepId, item.assignedTeamId));
+        }
+
+        clearProcessingAssignment(item);
       };
 
       const getCollaborativeAssignment = (step: ProcessStep, stepId: string, freeUnits: number) => {
@@ -1337,7 +1871,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
           return;
         }
 
-        const stepCalendar = step.calendarMode === 'custom' ? getEffectiveBusinessCalendar(step) : defaultBusinessCalendar;
+        const stepCalendar = resolveStepBusinessCalendar(step, globalBusinessCalendar);
         if (!isWorkingTime(stepCalendar, config.calendarStartIso, availableAtSimulationMs)) {
           return;
         }
@@ -1437,7 +1971,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
             0,
             completedAtSimulationMs - item.createdAtSimulationMs
           );
-          const workingCycleTime = getWorkingDurationBetween(defaultBusinessCalendar, config.calendarStartIso, item.createdAtSimulationMs, completedAtSimulationMs);
+          const workingCycleTime = getWorkingDurationBetween(globalBusinessCalendar, config.calendarStartIso, item.createdAtSimulationMs, completedAtSimulationMs);
           const operationalWorkingCycleTime = Math.max(0, item.totalWorkingWaitTime + item.totalProcessingTime);
           const offHoursDelay = Math.max(0, cycleTime - workingCycleTime);
           globalCycleTimeSamplesRef.current.cycleTimeSamples.push(cycleTime);
@@ -1504,6 +2038,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
           : 1;
         const failChance = Math.min(1, safeNumber(currentStep.failureProbability, 0) * failureMultiplier);
         if (Math.random() < failChance) {
+          const failedStepId = item.currentStepId;
           item.status = 'error';
           statsRef.current.totalItemsFailed++;
           if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = createStepCounter();
@@ -1514,19 +2049,24 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
           }
           flowCountersRef.current[flowId].failed++;
 
+          releaseProcessingResources(item, currentStep, failedStepId);
           if (currentStep.simulationMode !== 'delay') {
-            const currentUsage = stepUsage.get(item.currentStepId) || 0;
-            const usageUnits = currentStep.resourceExecutionMode === 'collaborative'
-              ? getPositiveInteger(item.assignedResourceCount, 1, 1, 1000)
-              : 1;
-            stepUsage.set(item.currentStepId, Math.max(0, currentUsage - usageUnits));
-            startQueuedItemsForStep(item.currentStepId, eventTime);
+            startQueuedItemsForStep(failedStepId, eventTime);
           }
           return;
         }
 
         // Normal Success
-        const nextId = getNextStepId(currentStep);
+        const nextId = getNextStepId(currentStep, {
+          itemProfileId: item.itemProfileId,
+          priority: item.priority,
+          processingTimeMultiplier: item.processingTimeMultiplier,
+          itemId: item.id,
+          items: itemsRef.current,
+          stepMap,
+          trackStats: true,
+          currentSimulationMs: eventTime,
+        });
 
         // Increment Processed Count for this step
         if (!stepCountersRef.current[item.currentStepId]) stepCountersRef.current[item.currentStepId] = createStepCounter();
@@ -1535,6 +2075,11 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         stepCountersRef.current[item.currentStepId].totalCalendarProcessingTime += calendarProcessingTime;
 
         const completedStepId = item.currentStepId;
+
+        releaseProcessingResources(item, currentStep, completedStepId);
+        if (currentStep.simulationMode !== 'delay') {
+          startQueuedItemsForStep(completedStepId, eventTime);
+        }
 
         if (nextId === 'finished') {
           beginTransmission(item, currentStep.id, 'finished', eventTime, now);
@@ -1549,15 +2094,6 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
             beginTransmission(item, currentStep.id, nextStep.id, eventTime, now);
             completeBusinessTransmission(item, nextStep.id, eventTime + BUSINESS_TRANSMISSION_SIM_MS);
           }
-        }
-
-        if (currentStep.simulationMode !== 'delay') {
-          const currentUsage = stepUsage.get(completedStepId) || 0;
-          const usageUnits = currentStep.resourceExecutionMode === 'collaborative'
-            ? getPositiveInteger(item.assignedResourceCount, 1, 1, 1000)
-            : 1;
-          stepUsage.set(completedStepId, Math.max(0, currentUsage - usageUnits));
-          startQueuedItemsForStep(completedStepId, eventTime);
         }
       };
 
@@ -1625,7 +2161,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
           const startedAt = item.processingStartedAtSimulationMs ?? simulationTimeRef.current;
           const endsAt = item.processingEndsAtSimulationMs ?? (startedAt + safeDuration);
           const elapsed = Math.max(0, Math.min(
-            getWorkingDurationBetween(getEffectiveBusinessCalendar(currentStep), config.calendarStartIso, startedAt, simulationTimeRef.current),
+            getWorkingDurationBetween(resolveStepBusinessCalendar(currentStep, globalBusinessCalendar), config.calendarStartIso, startedAt, simulationTimeRef.current),
             safeDuration
           ));
             const eventTime = endsAt;
@@ -1785,6 +2321,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
         setItems(buildVisibleItemsForUi(itemsRef.current));
         setStepStats(newStepStats);
         setFlowStats(Object.values(flowCountersRef.current).map(toFlowStats));
+        setRouteStats(Object.values(routeCountersRef.current).map(toRouteStats));
         setSimulationTimeMs(simulationTimeRef.current);
         const simulatedMinutesElapsed = simulationTimeRef.current / (60 * 1000);
         const avgThroughput = simulatedMinutesElapsed > 0
@@ -1832,6 +2369,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     items,
     stepStats,
     flowStats,
+    routeStats,
     simulationTimeMs,
     globalStats,
     autoPauseReason,

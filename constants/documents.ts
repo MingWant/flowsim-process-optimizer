@@ -60,6 +60,17 @@ export const MARKDOWN_DOCS: MarkdownDocEntry[] = [
     alternates: languageAlternates('guide', 'documentation-index'),
   },
   {
+    id: 'routing-configuration',
+    title: '🧭 Routing 配置與診斷 / Routing Guide',
+    shortTitle: 'Routing 配置與診斷',
+    description: 'Load-aware、profile/priority 分流、fallback 與診斷表解讀',
+    icon: '🧭',
+    toneClass: 'bg-cyan-500/20',
+    category: 'guide',
+    defaultPath: guide('routing-configuration.zh-TW.md'),
+    alternates: languageAlternates('guide', 'routing-configuration'),
+  },
+  {
     id: 'wait-time-quick-reference',
     title: '⚡ 快速參考 - 等待時間指標',
     shortTitle: '等待時間快速參考',

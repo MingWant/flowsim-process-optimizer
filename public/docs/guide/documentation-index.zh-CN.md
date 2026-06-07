@@ -8,6 +8,7 @@
 | 文档 | 说明 | 繁體中文 | 简体中文 | English |
 | --- | --- | --- | --- | --- |
 | 完整使用手册 | 全系统操作、节点配置、指标、模板 | [開啟](user-guide.md) | [打开](user-guide.md) | [Open](user-guide.md) |
+| Routing 配置与诊断 | Load-aware、profile/priority 分流、fallback 与诊断表 | [開啟](routing-configuration.zh-TW.md) | [打开](routing-configuration.zh-CN.md) | [Open](routing-configuration.en.md) |
 | 等待时间快速参考 | 5 分钟决策表和读数口诀 | [開啟](wait-time-quick-reference.zh-TW.md) | [打开](wait-time-quick-reference.zh-CN.md) | [Open](wait-time-quick-reference.en.md) |
 | 等待时间模式配置 | 三种模式、场景、FAQ | [開啟](wait-time-mode-configuration.zh-TW.md) | [打开](wait-time-mode-configuration.zh-CN.md) | [Open](wait-time-mode-configuration.en.md) |
 | 双等待时间指标 | 指标口径、聚合方式、技术解读 | [開啟](../technical/dual-wait-time-metrics.zh-TW.md) | [打开](../technical/dual-wait-time-metrics.zh-CN.md) | [Open](../technical/dual-wait-time-metrics.en.md) |
@@ -26,6 +27,7 @@
 | 第一次使用 | 完整使用手册 → 等待时间快速参考 → 排障指南 |
 | 做 SLA 报告 | 等待时间模式配置 → 双等待时间指标 → 快速参考 |
 | 做容量规划 | 完整使用手册 → 模拟模式指南 → 双等待时间指标 |
+| 设置动态分流 | Routing 配置与诊断 → Routing Demo → 排障指南 |
 | 理解算法口径 | 模拟算法详解 → 双等待时间指标 → 配置与数据模型 |
 | 调整营业时间 | 多段工作时间 → 等待时间模式配置 → 双等待时间指标 |
 | 找瓶颈 | 快速参考 → 双等待时间指标 → 排障指南 |

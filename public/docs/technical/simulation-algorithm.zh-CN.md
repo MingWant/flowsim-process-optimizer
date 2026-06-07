@@ -183,6 +183,8 @@ $$
 2. Range：在 Min / Max Duration 间均匀随机。
 3. Fixed：Base Time + Variance。
 
+Source Rule 数值使用步骤自己的 `sourceProcessingTimeUnit`。旧配置如果没有该字段，导入清理会用该步骤的 Fixed processing unit 初始化，因此后续修改 Fixed unit 不会默默重新解释已有 source rule。
+
 Realistic 与 Worst-Case 的差异：
 
 | 模式 | Fixed + Variance 算法 |
@@ -233,7 +235,7 @@ $$
 | 模式 | 算法 |
 | --- | --- |
 | Realistic | `1 - exp(-p × seconds)`，类似泊松过程 |
-| Worst-Case | `min(1, p × seconds)`，线性压力测试 |
+| Worst-Case | `1 - exp(-(2p) × seconds)`，使用更高 hazard rate 的保守压力测试 |
 
 Item profile 的 `cancellationMultiplier` 会乘到步骤取消概率上。
 

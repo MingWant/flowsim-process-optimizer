@@ -62,6 +62,7 @@ The import entry point is `parseImportedConfig`. It accepts a direct `Simulation
 | Capacity | Minimum 1 for Process nodes |
 | Batch size | 1 to 1000 |
 | Scheduled quantity | Maximum 50000 |
+| Source processing rule unit | Defaults to the step fixed processing unit for legacy configs; then preserved as `sourceProcessingTimeUnit` |
 | Teams | Resources are positive integers |
 | Explicit teams | Total team resources must equal Capacity before saving |
 | Working hours | Invalid segments are ignored; default is 9-17 |

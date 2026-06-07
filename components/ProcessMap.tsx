@@ -1,7 +1,7 @@
 
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import { flushSync } from 'react-dom';
-import type { ProcessStep, StepStats, WorkItem } from '../types';
+import type { ProcessStep, RouteStats, StepConnection, StepStats, WorkItem } from '../types';
 import { ProcessNode } from './ProcessNode';
 import {
   END_HEIGHT,
@@ -23,6 +23,7 @@ import { Move, ZoomIn, ZoomOut, Maximize, PlayCircle, Box, StopCircle, MousePoin
 interface Props {
   steps: ProcessStep[];
   stepStats: StepStats[];
+  routeStats: RouteStats[];
   items: WorkItem[];
   simulationTimeMs: number;
   isRunning: boolean;
@@ -40,6 +41,7 @@ interface Props {
 export const ProcessMap: React.FC<Props> = ({ 
   steps, 
   stepStats, 
+  routeStats,
   items, 
   simulationTimeMs,
   isRunning,
@@ -946,6 +948,8 @@ export const ProcessMap: React.FC<Props> = ({
       id: string;
       fromId: string;
       toId: string;
+      connection: StepConnection;
+      routingStrategy: ProcessStep['routingStrategy'];
       p0: Position;
       p1: Position;
       p2: Position;
@@ -1039,6 +1043,8 @@ export const ProcessMap: React.FC<Props> = ({
                     id: `${step.id}-${conn.targetId}`, 
                     fromId: step.id,
                     toId: conn.targetId,
+                  connection: conn,
+                  routingStrategy: step.routingStrategy || 'probability',
                     p0: start, p1: cp1, p2: cp2, p3: end,
                     color: step.color
                 });
@@ -1055,6 +1061,22 @@ export const ProcessMap: React.FC<Props> = ({
     });
     return map;
   }, [connections]);
+
+  const routeStatsByRoute = useMemo(() => {
+    const map = new Map<string, RouteStats>();
+    routeStats.forEach((route) => {
+      map.set(`${route.fromStepId}->${route.targetStepId}`, route);
+    });
+    return map;
+  }, [routeStats]);
+
+  const selectedTotalsBySource = useMemo(() => {
+    const totals = new Map<string, number>();
+    routeStats.forEach((route) => {
+      totals.set(route.fromStepId, (totals.get(route.fromStepId) || 0) + route.selectedCount);
+    });
+    return totals;
+  }, [routeStats]);
 
   const editHandlersByStepId = useMemo(() => {
     const map = new Map<string, () => void>();
@@ -1166,7 +1188,28 @@ export const ProcessMap: React.FC<Props> = ({
                 </defs>
 
                 {/* Draw Paths */}
-                {connections.map(conn => (
+                {connections.map(conn => {
+                  const routeStat = routeStatsByRoute.get(`${conn.fromId}->${conn.toId}`);
+                  const sourceSelectedTotal = selectedTotalsBySource.get(conn.fromId) || 0;
+                  const actualShare = sourceSelectedTotal > 0 && routeStat ? routeStat.selectedCount / sourceSelectedTotal : 0;
+                  const midpoint = getPointOnBezier(0.5, conn.p0, conn.p1, conn.p2, conn.p3);
+                  const hasFilters = Boolean(
+                    (conn.connection.itemProfileIds && conn.connection.itemProfileIds.length > 0)
+                    || typeof conn.connection.minPriority === 'number'
+                    || typeof conn.connection.maxPriority === 'number'
+                  );
+                  const showDiagnostics = Boolean(routeStat || conn.routingStrategy === 'load-aware' || conn.routingStrategy === 'time-aware' || hasFilters);
+                  const lineOpacity = routeStat && routeStat.selectedCount > 0 ? 0.72 : 0.38;
+                  const effectiveShare = routeStat && routeStat.sourceDecisionCount > 0 ? routeStat.lastEffectiveShare : conn.connection.probability;
+                  const formatRouteEta = (value: number | undefined) => {
+                    const safeValue = typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
+                    if (safeValue < 1000) return `${safeValue.toFixed(0)}ms`;
+                    if (safeValue < 60000) return `${(safeValue / 1000).toFixed(1)}s`;
+                    if (safeValue < 3600000) return `${(safeValue / 60000).toFixed(1)}m`;
+                    return `${(safeValue / 3600000).toFixed(1)}h`;
+                  };
+
+                  return (
                     <g key={conn.id}>
                     <circle
                       cx={conn.p0.x}
@@ -1195,6 +1238,7 @@ export const ProcessMap: React.FC<Props> = ({
                             stroke={conn.color || "#475569"} 
                             strokeWidth="2" 
                             fill="none" 
+                            opacity={lineOpacity}
                           markerEnd={`url(#arrow-${conn.toId})`}
                             strokeDasharray="10,10"
                             className={isRunning ? "animate-flow" : ""}
@@ -1208,8 +1252,41 @@ export const ProcessMap: React.FC<Props> = ({
                           strokeWidth={1.5}
                           opacity="0.65"
                         />
+                        {showDiagnostics && (
+                          <foreignObject
+                            x={midpoint.x - 82}
+                            y={midpoint.y - 25}
+                            width={164}
+                            height={58}
+                            className="overflow-visible"
+                          >
+                            <div className="pointer-events-none rounded-xl border border-slate-700/80 bg-slate-950/90 px-2 py-1 text-center text-[10px] leading-tight text-slate-300 shadow-2xl backdrop-blur-sm">
+                              <div className="flex items-center justify-center gap-1 font-mono font-bold text-cyan-200">
+                                <span>{routeStat?.selectedCount ?? 0}</span>
+                                <span className="text-slate-500">items</span>
+                                {sourceSelectedTotal > 0 && <span className="text-blue-200">{(actualShare * 100).toFixed(0)}%</span>}
+                              </div>
+                              <div className="mt-0.5 flex items-center justify-center gap-1 text-[9px] text-slate-500">
+                                <span>base {(conn.connection.probability * 100).toFixed(0)}%</span>
+                                <span>·</span>
+                                <span>{conn.routingStrategy === 'load-aware' || conn.routingStrategy === 'time-aware' ? `eff ${(effectiveShare * 100).toFixed(0)}%` : 'prob'}</span>
+                              </div>
+                              {conn.routingStrategy === 'time-aware' && routeStat && (
+                                <div className="mt-0.5 truncate text-[9px] font-semibold text-purple-300">
+                                  ETA {formatRouteEta(routeStat.lastEstimatedTotalTime)}{!routeStat.lastTargetWasWorking ? ' · off-hours' : ''}
+                                </div>
+                              )}
+                              {(hasFilters || routeStat?.lastWasFallback) && (
+                                <div className="mt-0.5 truncate text-[9px] font-semibold text-amber-300">
+                                  {hasFilters ? 'filtered' : ''}{hasFilters && routeStat?.lastWasFallback ? ' · ' : ''}{routeStat?.lastWasFallback ? 'fallback' : ''}
+                                </div>
+                              )}
+                            </div>
+                          </foreignObject>
+                        )}
                     </g>
-                ))}
+                  );
+                })}
 
                 {/* Render Transmitting Items as Dots */}
                 {transmittingItems.map(item => {

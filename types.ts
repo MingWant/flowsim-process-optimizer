@@ -14,6 +14,7 @@ export type ResourceExecutionMode = 'single' | 'collaborative' | 'multitask';
 export type TeamAllocationMode = 'auto' | 'explicit';
 export type NonWorkingArrivalPolicy = 'queue' | 'delay' | 'reject';
 export type WaitTimeCalculationMode = 'calendar' | 'working' | 'both';
+export type RoutingStrategy = 'probability' | 'load-aware' | 'time-aware';
 
 export interface WorkingHourSegment {
   start: number; // 0-24, local hour (e.g., 9 = 9:00, 9.5 = 9:30)
@@ -59,6 +60,9 @@ export interface AutoPauseConfig {
 export interface StepConnection {
   targetId: string;
   probability: number; // 0 to 1
+  itemProfileIds?: string[]; // Empty/undefined means all item profiles can use this route
+  minPriority?: number;
+  maxPriority?: number;
 }
 
 export interface ResourceTeam {
@@ -163,8 +167,13 @@ export interface ProcessStep {
   cancellationProbability: number; // 0-1, chance of leaving queue per second
 
   color: string;
+  routingStrategy?: RoutingStrategy;
+  routingLoadSensitivity?: number;
+  routingTimeSensitivity?: number;
+  routingCalendarAware?: boolean;
   connections: StepConnection[];
   sourceProcessingTimes?: Record<string, number>;
+  sourceProcessingTimeUnit?: DurationUnit;
   x?: number;
   y?: number;
 }
@@ -278,6 +287,29 @@ export interface FlowStats {
   avgOffHoursDelay: number;
   avgNonWorkingDelay: number;
   flowEfficiency: number;
+}
+
+export interface RouteStats {
+  routeId: string;
+  fromStepId: string;
+  targetStepId: string;
+  selectedCount: number;
+  sourceDecisionCount: number;
+  sourceFallbackDecisionCount: number;
+  fallbackSelectedCount: number;
+  profileMatchedSelectionCount: number;
+  priorityMatchedSelectionCount: number;
+  lastBaseWeight: number;
+  lastEffectiveWeight: number;
+  lastEffectiveShare: number;
+  lastCongestion: number;
+  lastEstimatedQueueWait: number;
+  lastEstimatedProcessingTime: number;
+  lastEstimatedCalendarDelay: number;
+  lastEstimatedTotalTime: number;
+  lastTargetWasWorking: boolean;
+  lastWasFallback: boolean;
+  lastSelectionMode: RoutingStrategy;
 }
 
 export interface StepStats {

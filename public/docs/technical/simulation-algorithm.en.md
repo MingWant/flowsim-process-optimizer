@@ -98,6 +98,8 @@ Default collaborative speed is approximately `1 + (resources - 1) × 0.65`. Defa
 
 Duration source priority: Source Rule → Range → Fixed.
 
+Source Rule values use the step's explicit `sourceProcessingTimeUnit`. For legacy configs without this field, import sanitization initializes it from the step's Fixed processing unit, so later Fixed-unit edits do not silently reinterpret existing source rules.
+
 | Mode | Fixed + Variance behavior |
 | --- | --- |
 | Realistic | Normal random noise, clamped between base × 0.2 and base × 3 |
@@ -127,7 +129,7 @@ $$
 failChance=clamp(step.failureProbability\times item.failureMultiplier,0,1)
 $$
 
-Queue cancellation: Realistic uses `1 - exp(-p × seconds)`. Worst-Case uses `min(1, p × seconds)`.
+Queue cancellation uses a bounded exponential hazard model. Realistic uses `1 - exp(-p × seconds)`. Worst-Case keeps the same time-consistent model but applies a stress multiplier: `1 - exp(-(2p) × seconds)`.
 
 Only finished items enter cycle-time samples. Calendar Cycle is created-to-completed elapsed time. Global Working Cycle uses the global calendar. Operational Working Cycle is `totalWorkingWaitTime + totalProcessingTime`. Off-hours Delay is Calendar Cycle minus Global Working Cycle.
 

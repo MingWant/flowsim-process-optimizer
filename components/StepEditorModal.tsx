@@ -3,6 +3,7 @@ import type {
   BusinessCalendar,
   ProcessStep,
   SimulationConfig,
+  StepConnection,
 } from '../types';
 import { ConnectionsTab } from './step-editor/ConnectionsTab';
 import { ExceptionsTab } from './step-editor/ExceptionsTab';
@@ -30,6 +31,7 @@ interface Props {
   saveStepUpdate: () => void;
   toggleConnection: (targetId: string, checked: boolean) => void;
   updateProbability: (targetId: string, newVal: number) => void;
+  updateConnection?: (targetId: string, updates: Partial<StepConnection>) => void;
   updateSourceRule: (sourceId: string, time: number) => void;
   addStartDemandModifier: () => void;
   addArrivalWindow: () => void;
@@ -48,6 +50,7 @@ export const StepEditorModal: React.FC<Props> = ({
   saveStepUpdate,
   toggleConnection,
   updateProbability,
+  updateConnection,
   updateSourceRule,
   addStartDemandModifier,
   addArrivalWindow,
@@ -174,8 +177,10 @@ export const StepEditorModal: React.FC<Props> = ({
                          <ConnectionsTab
                            config={config}
                            editingStep={editingStep}
+                           setEditingStep={setEditingStep}
                            toggleConnection={toggleConnection}
                            updateProbability={updateProbability}
+                           updateConnection={updateConnection}
                          />
                      )}
 
@@ -183,6 +188,7 @@ export const StepEditorModal: React.FC<Props> = ({
                      {activeTab === 'rules' && editingStep.type !== 'start' && (
                          <RulesTab
                            editingStep={editingStep}
+                           setEditingStep={setEditingStep}
                            potentialSources={potentialSources}
                            updateSourceRule={updateSourceRule}
                          />

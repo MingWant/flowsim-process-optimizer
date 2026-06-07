@@ -8,6 +8,7 @@ Updated: 2026-06-07
 | Document | Purpose | 繁體中文 | 简体中文 | English |
 | --- | --- | --- | --- | --- |
 | User Guide | Full system operations, nodes, metrics, templates | [開啟](user-guide.md) | [打开](user-guide.md) | [Open](user-guide.md) |
+| Routing Configuration and Diagnostics | Load-aware routing, profile/priority filters, fallback, diagnostics | [開啟](routing-configuration.zh-TW.md) | [打开](routing-configuration.zh-CN.md) | [Open](routing-configuration.en.md) |
 | Wait Time Quick Reference | Five-minute decision table and reading shortcuts | [開啟](wait-time-quick-reference.zh-TW.md) | [打开](wait-time-quick-reference.zh-CN.md) | [Open](wait-time-quick-reference.en.md) |
 | Wait Time Mode Guide | Three modes, scenarios, FAQ | [開啟](wait-time-mode-configuration.zh-TW.md) | [打开](wait-time-mode-configuration.zh-CN.md) | [Open](wait-time-mode-configuration.en.md) |
 | Dual Wait Time Metrics | Metric definitions, aggregation, interpretation | [開啟](../technical/dual-wait-time-metrics.zh-TW.md) | [打开](../technical/dual-wait-time-metrics.zh-CN.md) | [Open](../technical/dual-wait-time-metrics.en.md) |
@@ -26,6 +27,7 @@ Updated: 2026-06-07
 | First-time use | User Guide → Wait Time Quick Reference → Troubleshooting |
 | SLA report | Wait Time Mode Guide → Dual Wait Time Metrics → Quick Reference |
 | Capacity planning | User Guide → Simulation Mode Guide → Dual Wait Time Metrics |
+| Dynamic routing setup | Routing Configuration and Diagnostics → Routing Demo → Troubleshooting |
 | Algorithm semantics | Simulation Algorithm → Dual Wait Time Metrics → Configuration Reference |
 | Business-hours tuning | Multi-Segment Business Hours → Wait Time Mode Guide → Dual Wait Time Metrics |
 | Bottleneck diagnosis | Quick Reference → Dual Wait Time Metrics → Troubleshooting |

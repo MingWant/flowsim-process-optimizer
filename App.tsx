@@ -1,13 +1,15 @@
 
 import React, { useEffect, useRef, useState } from 'react';
-import { DEFAULT_CONFIG } from './constants';
+import { DEFAULT_CONFIG, ROUTING_DEMO_CONFIG } from './constants';
 import { useProcessSimulation } from './hooks/useProcessSimulation';
-import { ProcessStep, SimulationConfig, NodeType, DurationUnit, RandomnessMode, StepSimulationMode, ArrivalInputMode, ResourceExecutionMode, TeamAllocationMode, NonWorkingArrivalPolicy, DemandModifier, AutoPauseConfig, ItemProfile } from './types';
+import { ProcessStep, SimulationConfig, NodeType, DurationUnit, RandomnessMode, StepSimulationMode, ArrivalInputMode, ResourceExecutionMode, TeamAllocationMode, NonWorkingArrivalPolicy, DemandModifier, AutoPauseConfig, ItemProfile, RoutingStrategy } from './types';
 import { ProcessMap } from './components/ProcessMap';
 import { StatsBoard } from './components/StatsBoard';
 import { MetroDemoBoard } from './components/MetroDemoBoard';
+import { RoutingDiagnosticsPanel } from './components/RoutingDiagnosticsPanel';
 import { MarkdownViewer } from './components/MarkdownViewer';
 import { StartNodeSettings } from './components/step-editor/StartNodeSettings';
+import { ConnectionsTab } from './components/step-editor/ConnectionsTab';
 import { generateScenario, analyzeBottlenecks } from './services/geminiService';
 import { DEFAULT_BUSINESS_CALENDAR, getActiveDemandModifiers, getBusinessDate, getDemandMultiplier, isWorkingTime, normalizeBusinessCalendar, normalizeDemandModifiers } from './services/simulationCalendar';
 import { formatSimulationTime, getAutoPauseProgressRows } from './utils/formatters';
@@ -114,6 +116,7 @@ const VALID_SIMULATION_MODES: StepSimulationMode[] = ['resource', 'delay'];
 const VALID_ARRIVAL_INPUT_MODES: ArrivalInputMode[] = ['rate', 'interval'];
 const VALID_RESOURCE_EXECUTION_MODES: ResourceExecutionMode[] = ['single', 'collaborative', 'multitask'];
 const VALID_TEAM_ALLOCATION_MODES: TeamAllocationMode[] = ['auto', 'explicit'];
+const VALID_ROUTING_STRATEGIES: RoutingStrategy[] = ['probability', 'load-aware', 'time-aware'];
 const VALID_NON_WORKING_POLICIES: NonWorkingArrivalPolicy[] = ['queue', 'delay', 'reject'];
 const DEFAULT_ZERO_VARIANCE_STEP_IDS = new Set(['step-1', 'step-2', 'step-3', 'step-4']);
 
@@ -140,6 +143,25 @@ const toPositiveNumber = (value: unknown, fallback: number, min = 0.001) => {
 };
 
 const clampProbability = (value: number) => Math.max(0, Math.min(1, value));
+
+const sanitizeOptionalNumber = (value: unknown, min = 0, max = 1000000) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : undefined;
+};
+
+const sanitizeStringList = (value: unknown) => {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const values = Array.from(new Set(
+    value
+      .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+      .map((entry) => entry.trim())
+  ));
+
+  return values.length > 0 ? values : undefined;
+};
 
 const getArrivalUnitLabel = (unit?: DurationUnit) => (
   ARRIVAL_UNITS.find((option) => option.value === unit)?.label || 'sim second'
@@ -470,6 +492,13 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
   const teamAllocationMode = isProcess && typeof rawTeamAllocationMode === 'string' && VALID_TEAM_ALLOCATION_MODES.includes(rawTeamAllocationMode as TeamAllocationMode)
     ? rawTeamAllocationMode as TeamAllocationMode
     : isProcess ? Array.isArray(rawStep.collaborativeTeams) && rawStep.collaborativeTeams.length > 0 ? 'explicit' : 'auto' : undefined;
+  const rawRoutingStrategy = rawStep.routingStrategy;
+  const routingStrategy = !isEnd && typeof rawRoutingStrategy === 'string' && VALID_ROUTING_STRATEGIES.includes(rawRoutingStrategy as RoutingStrategy)
+    ? rawRoutingStrategy as RoutingStrategy
+    : !isEnd ? 'probability' : undefined;
+  const routingLoadSensitivity = !isEnd ? Math.max(0, Math.min(10, toFiniteNumber(rawStep.routingLoadSensitivity, 1))) : undefined;
+  const routingTimeSensitivity = !isEnd ? Math.max(0, Math.min(10, toFiniteNumber(rawStep.routingTimeSensitivity, 2))) : undefined;
+  const routingCalendarAware = !isEnd ? rawStep.routingCalendarAware !== false : undefined;
   const minResourcesPerItem = isProcess ? toPositiveInteger(rawStep.minResourcesPerItem, 1, 1, 50) : undefined;
   const maxResourcesPerItem = isProcess ? Math.max(minResourcesPerItem ?? 1, toPositiveInteger(rawStep.maxResourcesPerItem, 1, 1, 50)) : undefined;
   const targetResourcesPerItem = isProcess ? Math.max(minResourcesPerItem ?? 1, Math.min(maxResourcesPerItem ?? 1, toPositiveInteger(rawStep.targetResourcesPerItem, Math.min(2, maxResourcesPerItem ?? 1), 1, 50))) : undefined;
@@ -494,13 +523,24 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
   const rangeTimeUnit = typeof rawStep.rangeTimeUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.rangeTimeUnit)
     ? rawStep.rangeTimeUnit as DurationUnit
     : processingTimeUnit;
+  const sourceProcessingTimeUnit = isProcess && typeof rawStep.sourceProcessingTimeUnit === 'string' && DURATION_UNITS.some(unit => unit.value === rawStep.sourceProcessingTimeUnit)
+    ? rawStep.sourceProcessingTimeUnit as DurationUnit
+    : isProcess ? processingTimeUnit : undefined;
   const connections = Array.isArray(rawStep.connections)
     ? rawStep.connections
         .filter(isObjectRecord)
-        .map((connection) => ({
-          targetId: typeof connection.targetId === 'string' ? connection.targetId : '',
-          probability: clampProbability(toFiniteNumber(connection.probability, 0)),
-        }))
+        .map((connection) => {
+          const minPriority = sanitizeOptionalNumber(connection.minPriority, 0);
+          const maxPriority = sanitizeOptionalNumber(connection.maxPriority, 0);
+
+          return {
+            targetId: typeof connection.targetId === 'string' ? connection.targetId : '',
+            probability: clampProbability(toFiniteNumber(connection.probability, 0)),
+            itemProfileIds: sanitizeStringList(connection.itemProfileIds),
+            minPriority: minPriority !== undefined && maxPriority !== undefined ? Math.min(minPriority, maxPriority) : minPriority,
+            maxPriority: minPriority !== undefined && maxPriority !== undefined ? Math.max(minPriority, maxPriority) : maxPriority,
+          };
+        })
         .filter((connection) => connection.targetId)
     : [];
   const sourceProcessingTimes = isObjectRecord(rawStep.sourceProcessingTimes)
@@ -510,6 +550,7 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
           .map(([key, value]) => [key, Math.max(0, toFiniteNumber(value, 0))])
       )
     : {};
+  const hasSourceProcessingRules = Object.keys(sourceProcessingTimes).length > 0;
   const stepId = typeof rawStep.id === 'string' && rawStep.id.trim() ? rawStep.id : `node-import-${Date.now()}-${index}`;
   const variance = isProcess
     ? migrateDefaultVariance && DEFAULT_ZERO_VARIANCE_STEP_IDS.has(stepId)
@@ -553,8 +594,13 @@ const sanitizeStep = (rawStep: unknown, index: number, migrateDefaultVariance = 
     failureProbability: Math.max(0, Math.min(1, toFiniteNumber(rawStep.failureProbability, 0))),
     cancellationProbability: Math.max(0, Math.min(1, toFiniteNumber(rawStep.cancellationProbability, 0))),
     color: typeof rawStep.color === 'string' && rawStep.color.trim() ? rawStep.color : isStart ? '#10b981' : isEnd ? '#ef4444' : '#3b82f6',
+    routingStrategy,
+    routingLoadSensitivity,
+    routingTimeSensitivity,
+    routingCalendarAware,
     connections,
     sourceProcessingTimes,
+    sourceProcessingTimeUnit: hasSourceProcessingRules || typeof rawStep.sourceProcessingTimeUnit === 'string' ? sourceProcessingTimeUnit : undefined,
     x: toFiniteNumber(rawStep.x, 100 + index * 60),
     y: toFiniteNumber(rawStep.y, 100 + index * 40),
   };
@@ -609,6 +655,11 @@ const sanitizeConfig = (rawConfig: unknown, migrateDefaultVariance = false): Sim
       maxConcurrentItemsPerResource: step.type === 'process' ? Math.max(1, step.maxConcurrentItemsPerResource ?? 1) : undefined,
       collaborativeEfficiency: step.type === 'process' ? step.collaborativeEfficiency || buildDefaultCollaborativeEfficiency(step.maxResourcesPerItem ?? 1) : undefined,
       multitaskEfficiency: step.type === 'process' ? step.multitaskEfficiency || buildDefaultMultitaskEfficiency(step.maxConcurrentItemsPerResource ?? 1) : undefined,
+      routingStrategy: step.type !== 'end' ? step.routingStrategy || 'probability' : undefined,
+      routingLoadSensitivity: step.type !== 'end' ? Math.max(0, Math.min(10, step.routingLoadSensitivity ?? 1)) : undefined,
+      routingTimeSensitivity: step.type !== 'end' ? Math.max(0, Math.min(10, step.routingTimeSensitivity ?? 2)) : undefined,
+      routingCalendarAware: step.type !== 'end' ? step.routingCalendarAware !== false : undefined,
+      sourceProcessingTimeUnit: step.type === 'process' && (step.sourceProcessingTimeUnit || Object.keys(filteredSourceRules).length > 0) ? step.sourceProcessingTimeUnit || step.processingTimeUnit || 'ms' : undefined,
     };
   });
 
@@ -723,7 +774,7 @@ const App: React.FC = () => {
   const editingStepValidationError = getStepValidationError(editingStep);
 
   // Simulation Hook
-  const { items, stepStats, flowStats, simulationTimeMs, globalStats, autoPauseReason, resetSimulation } = useProcessSimulation(config, (reason) => {
+  const { items, stepStats, flowStats, routeStats, simulationTimeMs, globalStats, autoPauseReason, resetSimulation } = useProcessSimulation(config, (reason) => {
     setConfig((previous) => previous.isRunning ? { ...previous, isRunning: false } : previous);
     setAutoPauseNotice(reason);
   });
@@ -954,18 +1005,59 @@ const App: React.FC = () => {
     setEditingStep({ ...editingStep, connections: newConns });
   };
 
-  const updateProbability = (targetId: string, newVal: number) => {
+  const updateConnection = (targetId: string, updates: Partial<ProcessStep['connections'][number]>) => {
       if (!editingStep) return;
-      const newConns = editingStep.connections.map(c => 
-         c.targetId === targetId ? { ...c, probability: newVal } : c
-      );
+      const sanitizedUpdates: Partial<ProcessStep['connections'][number]> = { ...updates };
+      if ('probability' in updates) {
+        sanitizedUpdates.probability = typeof updates.probability === 'number' && Number.isFinite(updates.probability)
+          ? clampProbability(updates.probability)
+          : 0;
+      }
+      if ('itemProfileIds' in updates) {
+        sanitizedUpdates.itemProfileIds = updates.itemProfileIds && updates.itemProfileIds.length > 0 ? updates.itemProfileIds : undefined;
+      }
+      if ('minPriority' in updates) {
+        sanitizedUpdates.minPriority = typeof updates.minPriority === 'number' && Number.isFinite(updates.minPriority) ? Math.max(0, updates.minPriority) : undefined;
+      }
+      if ('maxPriority' in updates) {
+        sanitizedUpdates.maxPriority = typeof updates.maxPriority === 'number' && Number.isFinite(updates.maxPriority) ? Math.max(0, updates.maxPriority) : undefined;
+      }
+      const newConns = editingStep.connections.map(c => {
+         if (c.targetId !== targetId) {
+           return c;
+         }
+
+         const nextConnection = { ...c, ...sanitizedUpdates };
+         if (typeof nextConnection.minPriority === 'number' && typeof nextConnection.maxPriority === 'number' && nextConnection.minPriority > nextConnection.maxPriority) {
+           return {
+             ...nextConnection,
+             minPriority: nextConnection.maxPriority,
+             maxPriority: nextConnection.minPriority,
+           };
+         }
+
+         return nextConnection;
+      });
       setEditingStep({ ...editingStep, connections: newConns });
+  };
+
+  const updateProbability = (targetId: string, newVal: number) => {
+      updateConnection(targetId, { probability: newVal });
   };
 
   const updateSourceRule = (sourceId: string, time: number) => {
       if (!editingStep) return;
-      const newRules = { ...editingStep.sourceProcessingTimes, [sourceId]: time };
-      setEditingStep({ ...editingStep, sourceProcessingTimes: newRules });
+      const newRules = { ...(editingStep.sourceProcessingTimes || {}) };
+      if (Number.isFinite(time) && time >= 0) {
+        newRules[sourceId] = time;
+      } else {
+        delete newRules[sourceId];
+      }
+      setEditingStep({
+        ...editingStep,
+        sourceProcessingTimes: newRules,
+        sourceProcessingTimeUnit: editingStep.sourceProcessingTimeUnit || editingStep.processingTimeUnit || 'ms',
+      });
   };
 
   const addStartDemandModifier = () => {
@@ -1045,6 +1137,32 @@ const App: React.FC = () => {
     } finally {
       setIsGenerating(false);
     }
+  };
+
+  const loadRoutingDemo = () => {
+    setConfig({
+      ...ROUTING_DEMO_CONFIG,
+      steps: ROUTING_DEMO_CONFIG.steps.map((step) => ({
+        ...step,
+        connections: step.connections.map((connection) => ({ ...connection })),
+        sourceProcessingTimes: { ...(step.sourceProcessingTimes || {}) },
+        itemProfiles: step.itemProfiles?.map((profile) => ({ ...profile })),
+        demandModifiers: step.demandModifiers?.map((modifier) => ({ ...modifier })),
+        arrivalSchedule: step.arrivalSchedule?.map((window) => ({ ...window })),
+        arrivalEvents: step.arrivalEvents?.map((event) => ({ ...event })),
+        collaborativeTeams: step.collaborativeTeams?.map((team) => ({ ...team })),
+        collaborativeEfficiency: step.collaborativeEfficiency ? { ...step.collaborativeEfficiency } : undefined,
+        multitaskEfficiency: step.multitaskEfficiency ? { ...step.multitaskEfficiency } : undefined,
+        businessCalendar: step.businessCalendar ? { ...step.businessCalendar, workingHours: step.businessCalendar.workingHours?.map((segment) => ({ ...segment })) } : undefined,
+      })),
+      isRunning: false,
+    });
+    setSelectedStepIds([]);
+    setEditingStep(null);
+    setAiAnalysis(null);
+    setCanvasViewMode('map');
+    resetSimulation();
+    setImportExportNotice('Loaded VIP + load-aware + time-aware routing demo. Press Start to see profile filters, ETA, and adaptive route shares.');
   };
 
   const handleAnalyze = async () => {
@@ -2247,6 +2365,13 @@ const App: React.FC = () => {
                       <ClipboardPaste size={16}/> Paste Flow
                     </button>
                     <button
+                      onClick={loadRoutingDemo}
+                      className="flex shrink-0 items-center gap-2 px-3 py-2 rounded-xl bg-cyan-500/10 border border-cyan-500/30 hover:bg-cyan-500/20 text-sm font-semibold text-cyan-200 transition-colors"
+                      title="Load a sample with VIP profile routing and load-aware balancing"
+                    >
+                      <Sparkles size={16}/> Routing Demo
+                    </button>
+                    <button
                       onClick={triggerImport}
                       className="flex shrink-0 items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 hover:bg-slate-800 text-sm text-slate-300 transition-colors"
                     >
@@ -2298,6 +2423,7 @@ const App: React.FC = () => {
                    <ProcessMap 
                       steps={config.steps} 
                       stepStats={stepStats} 
+                     routeStats={routeStats}
                       items={items}
                     simulationTimeMs={simulationTimeMs}
                       isRunning={config.isRunning}
@@ -2336,6 +2462,10 @@ const App: React.FC = () => {
                  </div>
                )}
              </section>
+
+               <section className="mt-6">
+                 <RoutingDiagnosticsPanel steps={config.steps} routeStats={routeStats} />
+               </section>
 
              <section>
                 <div className="mb-3 flex items-center justify-between">
@@ -3154,62 +3284,37 @@ const App: React.FC = () => {
 
                      {/* Connections Tab */}
                      {activeTab === 'connections' && editingStep.type !== 'end' && (
-                         <div className="space-y-4">
-                            <p className="text-sm text-slate-400 mb-2">Select which steps items can move to next, and set the probability.</p>
-                            <div className="space-y-3">
-                                {config.steps.filter(s => s.id !== editingStep.id).map(otherStep => {
-                                    // Don't allow connections back to Start nodes
-                                    if (otherStep.type === 'start') return null;
-
-                                    const conn = editingStep.connections?.find(c => c.targetId === otherStep.id);
-                                    const isConnected = !!conn;
-                                    
-                                    return (
-                                        <div key={otherStep.id} className={`flex items-center justify-between p-3 rounded border transition-colors ${isConnected ? 'bg-slate-800 border-blue-500/50' : 'bg-slate-800/30 border-slate-700'}`}>
-                                            <div className="flex items-center gap-3">
-                                                <input 
-                                                    type="checkbox"
-                                                    checked={isConnected}
-                                                    onChange={(e) => toggleConnection(otherStep.id, e.target.checked)}
-                                                    className="w-4 h-4 rounded bg-slate-700 border-slate-600 text-blue-500 focus:ring-blue-500"
-                                                />
-                                                <span className="text-sm text-slate-300 font-medium">
-                                                    {otherStep.type === 'end' && <span className="text-red-400 mr-1">[END]</span>}
-                                                    {otherStep.name}
-                                                </span>
-                                            </div>
-                                            
-                                            {isConnected && (
-                                               <div className="flex items-center gap-2">
-                                                   <span className="text-xs text-slate-500">Prob:</span>
-                                                   <input 
-                                                      type="number" min="0" max="1" step="0.1"
-                                                      value={conn.probability}
-                                                      onChange={(e) => updateProbability(otherStep.id, parseFloat(e.target.value))}
-                                                      className="w-16 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-right focus:border-blue-500 outline-none"
-                                                   />
-                                               </div>
-                                            )}
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                            {editingStep.connections.length > 0 && (
-                                <div className="mt-4 p-3 bg-blue-500/10 border border-blue-500/30 rounded text-xs text-blue-300">
-                                    Total Probability: {(editingStep.connections.reduce((sum, c) => sum + c.probability, 0) * 100).toFixed(0)}%
-                                    {Math.abs(editingStep.connections.reduce((sum, c) => sum + c.probability, 0) - 1) > 0.01 && 
-                                        <span className="block mt-1 text-amber-400 font-bold">Warning: Probabilities do not sum to 100%</span>
-                                    }
-                                </div>
-                            )}
-                         </div>
+                       <ConnectionsTab
+                         config={config}
+                         editingStep={editingStep}
+                         setEditingStep={setEditingStep}
+                         toggleConnection={toggleConnection}
+                         updateProbability={updateProbability}
+                         updateConnection={updateConnection}
+                       />
                      )}
 
                      {/* Rules Tab */}
                      {activeTab === 'rules' && editingStep.type !== 'start' && (
                          <div className="space-y-4">
                              <p className="text-sm text-slate-400 mb-1">Override processing time based on where the item came from. (Applies mainly to Fixed mode)</p>
-                             <p className="mb-4 text-xs text-slate-500">Values use this step&apos;s Fixed processing unit: <span className="font-mono text-slate-300">{DURATION_UNITS.find((unit) => unit.value === (editingStep.processingTimeUnit || 'ms'))?.label || 'ms'}</span>.</p>
+                             {(() => {
+                               const sourceRuleUnitValue = editingStep.sourceProcessingTimeUnit || editingStep.processingTimeUnit || 'ms';
+                               const sourceRuleUnit = DURATION_UNITS.find((unit) => unit.value === sourceRuleUnitValue)?.label || 'ms';
+
+                               return (
+                                 <>
+                                   <div className="rounded-lg border border-slate-700 bg-slate-800/60 p-3">
+                                     <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-slate-400">Source rule unit</label>
+                                     <select
+                                       value={sourceRuleUnitValue}
+                                       onChange={(e) => setEditingStep({ ...editingStep, sourceProcessingTimeUnit: e.target.value as DurationUnit })}
+                                       className="w-full rounded border border-slate-600 bg-slate-900 p-2 text-sm text-slate-200 outline-none focus:border-blue-500"
+                                     >
+                                       {DURATION_UNITS.map((unit) => <option key={unit.value} value={unit.value}>{unit.label}</option>)}
+                                     </select>
+                                     <p className="mt-2 text-xs text-slate-500">Source overrides use this explicit unit and do not silently change when the main fixed duration unit changes.</p>
+                                   </div>
                              
                              {potentialSources.length === 0 ? (
                                  <div className="text-center py-8 text-slate-500 italic">
@@ -3229,12 +3334,12 @@ const App: React.FC = () => {
                                                      <input 
                                                          type="number"
                                                          placeholder={`${editingStep.processingTime} (Default)`}
-                                                         value={ruleTime || ''}
-                                                         onChange={(e) => updateSourceRule(source.id, parseInt(e.target.value))}
+                                                         value={ruleTime ?? ''}
+                                                         onChange={(e) => updateSourceRule(source.id, e.target.value === '' ? Number.NaN : Number(e.target.value))}
                                                          className="w-24 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm text-right focus:border-blue-500 outline-none"
                                                      />
-                                                     <span className="w-20 truncate text-xs text-slate-500" title={DURATION_UNITS.find((unit) => unit.value === (editingStep.processingTimeUnit || 'ms'))?.label || 'ms'}>
-                                                        {DURATION_UNITS.find((unit) => unit.value === (editingStep.processingTimeUnit || 'ms'))?.label || 'ms'}
+                                                       <span className="w-20 truncate text-xs text-slate-500" title={sourceRuleUnit}>
+                                                        {sourceRuleUnit}
                                                      </span>
                                                  </div>
                                              </div>
@@ -3242,6 +3347,9 @@ const App: React.FC = () => {
                                      })}
                                  </div>
                              )}
+                                 </>
+                               );
+                             })()}
                          </div>
                      )}
 
