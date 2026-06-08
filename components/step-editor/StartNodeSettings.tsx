@@ -466,6 +466,44 @@ const ScheduledWindowsSection: React.FC<StartSectionProps & { addArrivalWindow: 
                   />
                 </div>
               </div>
+              <div className="mt-2 space-y-2 rounded-lg border border-cyan-500/10 bg-cyan-500/5 p-2">
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-cyan-200">Weekdays</label>
+                  <div className="grid grid-cols-7 gap-1">
+                    {WEEKDAY_OPTIONS.map((day) => {
+                      const selected = Boolean(window.daysOfWeek?.includes(day.value));
+                      return (
+                        <button
+                          key={day.value}
+                          onClick={() => setEditingStep(updateScheduledArrivalWindow(editingStep, window.id, { daysOfWeek: toggleNumber(window.daysOfWeek, day.value) }))}
+                          className={`rounded border px-1 py-1 text-[10px] font-semibold ${selected ? 'border-cyan-300 bg-cyan-500 text-slate-950' : 'border-slate-700 bg-slate-900 text-slate-500'}`}
+                        >
+                          {day.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="mt-1 text-[10px] text-slate-500">Leave all unselected to allow every day.</p>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-cyan-200">Months</label>
+                  <div className="grid grid-cols-6 gap-1">
+                    {MONTH_OPTIONS.map((month) => {
+                      const selected = Boolean(window.months?.includes(month.value));
+                      return (
+                        <button
+                          key={month.value}
+                          onClick={() => setEditingStep(updateScheduledArrivalWindow(editingStep, window.id, { months: toggleNumber(window.months, month.value) }))}
+                          className={`rounded border px-1 py-1 text-[10px] font-semibold ${selected ? 'border-cyan-300 bg-cyan-500 text-slate-950' : 'border-slate-700 bg-slate-900 text-slate-500'}`}
+                        >
+                          {month.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="mt-1 text-[10px] text-slate-500">Leave all unselected to allow every month.</p>
+                </div>
+              </div>
             </div>
           ))
         )}
