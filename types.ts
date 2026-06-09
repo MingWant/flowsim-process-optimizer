@@ -307,6 +307,7 @@ export interface RouteStats {
   lastEstimatedProcessingTime: number;
   lastEstimatedCalendarDelay: number;
   lastEstimatedTotalTime: number;
+  lastTargetType: 'process' | 'end' | 'missing';
   lastTargetWasWorking: boolean;
   lastWasFallback: boolean;
   lastSelectionMode: RoutingStrategy;

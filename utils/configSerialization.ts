@@ -594,12 +594,7 @@ const sanitizeConfig = (rawConfig: unknown, migrateDefaultVariance = false): Sim
   const validIds = new Set(sanitizedSteps.map((step) => step.id));
   const normalizedSteps = sanitizedSteps.map((step) => {
     const validConnections = step.connections.filter((connection) => validIds.has(connection.targetId) && connection.targetId !== step.id);
-    const probabilityTotal = validConnections.reduce((sum, connection) => sum + connection.probability, 0);
-    const normalizedConnections = validConnections.length === 0
-      ? []
-      : probabilityTotal > 0
-        ? validConnections.map((connection) => ({ ...connection, probability: connection.probability / probabilityTotal }))
-        : validConnections.map((connection) => ({ ...connection, probability: 1 / validConnections.length }));
+    const normalizedConnections = validConnections.map((connection) => ({ ...connection }));
 
     const filteredSourceRules = Object.fromEntries(
       Object.entries(step.sourceProcessingTimes || {}).filter(([sourceId]) => validIds.has(sourceId))

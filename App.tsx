@@ -382,26 +382,14 @@ const buildClipboardSteps = (steps: ProcessStep[]) => {
   }));
 };
 
-const normalizeConnections = (connections: ProcessStep['connections']) => {
+const pruneConnections = (connections: ProcessStep['connections']) => {
   const validConnections = connections.filter((connection) => connection.targetId);
 
   if (validConnections.length === 0) {
     return [];
   }
 
-  const probabilityTotal = validConnections.reduce((sum, connection) => sum + connection.probability, 0);
-
-  if (probabilityTotal > 0) {
-    return validConnections.map((connection) => ({
-      ...connection,
-      probability: connection.probability / probabilityTotal,
-    }));
-  }
-
-  return validConnections.map((connection) => ({
-    ...connection,
-    probability: 1 / validConnections.length,
-  }));
+  return validConnections.map((connection) => ({ ...connection }));
 };
 
 const getStepWidth = (type: NodeType) => type === 'process' ? 320 : 280;
@@ -622,12 +610,7 @@ const sanitizeConfig = (rawConfig: unknown, migrateDefaultVariance = false): Sim
   const validIds = new Set(sanitizedSteps.map((step) => step.id));
   const normalizedSteps = sanitizedSteps.map((step) => {
     const validConnections = step.connections.filter((connection) => validIds.has(connection.targetId) && connection.targetId !== step.id);
-    const probabilityTotal = validConnections.reduce((sum, connection) => sum + connection.probability, 0);
-    const normalizedConnections = validConnections.length === 0
-      ? []
-      : probabilityTotal > 0
-        ? validConnections.map((connection) => ({ ...connection, probability: connection.probability / probabilityTotal }))
-        : validConnections.map((connection) => ({ ...connection, probability: 1 / validConnections.length }));
+    const normalizedConnections = validConnections.map((connection) => ({ ...connection }));
 
     const filteredSourceRules = Object.fromEntries(
       Object.entries(step.sourceProcessingTimes || {}).filter(([sourceId]) => validIds.has(sourceId))
@@ -833,7 +816,7 @@ const App: React.FC = () => {
         .filter((step) => !removedIds.has(step.id))
         .map((step) => ({
           ...step,
-          connections: normalizeConnections(
+          connections: pruneConnections(
             step.connections.filter((connection) => !removedIds.has(connection.targetId))
           ),
           sourceProcessingTimes: Object.fromEntries(

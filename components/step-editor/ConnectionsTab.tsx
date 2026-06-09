@@ -87,6 +87,7 @@ export const ConnectionsTab: React.FC<Props> = ({
   };
 
   const totalWeight = editingStep.connections.reduce((sum, connection) => sum + (connection.probability || 0), 0);
+  const hasZeroTotalWeight = editingStep.connections.length > 0 && totalWeight <= 0;
 
   return (
   <div className="space-y-4">
@@ -303,6 +304,9 @@ export const ConnectionsTab: React.FC<Props> = ({
     {editingStep.connections.length > 0 && (
       <div className="mt-4 p-3 bg-blue-500/10 border border-blue-500/30 rounded text-xs text-blue-300">
         Total {isDynamicRouting ? 'Base Weight' : 'Probability'}: {(totalWeight * 100).toFixed(0)}%
+        {hasZeroTotalWeight &&
+          <span className="block mt-1 text-red-300 font-bold">Error: all route weights are 0, so this node cannot select a next route.</span>
+        }
         {Math.abs(totalWeight - 1) > 0.01 &&
           <span className="block mt-1 text-amber-400 font-bold">Warning: weights do not sum to 100%; simulation will normalize them.</span>
         }

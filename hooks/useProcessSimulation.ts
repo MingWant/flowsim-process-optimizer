@@ -29,6 +29,7 @@ const MAX_QUEUED_ITEMS_FOR_UI = 120;
 const MAX_TERMINAL_ITEMS_FOR_UI = 60;
 
 const BUSINESS_TRANSMISSION_SIM_MS = 0;
+const TERMINAL_ROUTE_ESTIMATE_MS = MIN_PROCESSING_DURATION_MS;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const DEFAULT_CALENDAR_START_ISO = '2026-01-05T00:00:00';
@@ -96,6 +97,7 @@ type RouteEstimate = {
   processingTime: number;
   calendarDelay: number;
   totalTime: number;
+  targetType: 'process' | 'end' | 'missing';
   targetWasWorking: boolean;
 };
 
@@ -104,6 +106,7 @@ const EMPTY_ROUTE_ESTIMATE: RouteEstimate = {
   processingTime: 0,
   calendarDelay: 0,
   totalTime: 0,
+  targetType: 'missing',
   targetWasWorking: true,
 };
 
@@ -162,6 +165,7 @@ const createRouteCounter = (fromStepId: string, targetStepId: string): RouteCoun
   lastEstimatedProcessingTime: 0,
   lastEstimatedCalendarDelay: 0,
   lastEstimatedTotalTime: 0,
+  lastTargetType: 'missing',
   lastTargetWasWorking: true,
   lastWasFallback: false,
   lastSelectionMode: 'probability',
@@ -742,8 +746,12 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
 
     const safeWeights = weights.map((weight) => Number.isFinite(weight) && weight > 0 ? weight : 0);
     const totalWeight = safeWeights.reduce((sum, weight) => sum + weight, 0);
-    const effectiveWeights = totalWeight > 0 ? safeWeights : connections.map(() => 1);
-    const effectiveTotal = totalWeight > 0 ? totalWeight : connections.length;
+    if (totalWeight <= 0) {
+      return undefined;
+    }
+
+    const effectiveWeights = safeWeights;
+    const effectiveTotal = totalWeight;
     const roll = Math.random() * effectiveTotal;
     let cumulative = 0;
 
@@ -864,7 +872,19 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
   };
 
   const getEstimatedRouteTime = (currentStep: ProcessStep, targetStep: ProcessStep | undefined, context?: RoutingContext): RouteEstimate => {
-    if (!targetStep || targetStep.type !== 'process') {
+    if (!targetStep) {
+      return EMPTY_ROUTE_ESTIMATE;
+    }
+
+    if (targetStep.type === 'end') {
+      return {
+        ...EMPTY_ROUTE_ESTIMATE,
+        totalTime: TERMINAL_ROUTE_ESTIMATE_MS,
+        targetType: 'end',
+      };
+    }
+
+    if (targetStep.type !== 'process') {
       return EMPTY_ROUTE_ESTIMATE;
     }
 
@@ -948,6 +968,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
       processingTime: Number.isFinite(processingTime) ? processingTime : 0,
       calendarDelay: Number.isFinite(calendarDelay) ? calendarDelay : 0,
       totalTime: Number.isFinite(totalTime) ? totalTime : 0,
+      targetType: 'process',
       targetWasWorking,
     };
   };
@@ -990,12 +1011,13 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
       }
       counter.lastBaseWeight = baseWeight;
       counter.lastEffectiveWeight = effectiveWeight;
-      counter.lastEffectiveShare = effectiveTotal > 0 ? effectiveWeight / effectiveTotal : 1 / Math.max(1, candidateConnections.length);
+      counter.lastEffectiveShare = effectiveTotal > 0 ? effectiveWeight / effectiveTotal : 0;
       counter.lastCongestion = getTargetCongestion(targetStep, context);
       counter.lastEstimatedQueueWait = routeEstimate.queueWait;
       counter.lastEstimatedProcessingTime = routeEstimate.processingTime;
       counter.lastEstimatedCalendarDelay = routeEstimate.calendarDelay;
       counter.lastEstimatedTotalTime = routeEstimate.totalTime;
+      counter.lastTargetType = routeEstimate.targetType;
       counter.lastTargetWasWorking = routeEstimate.targetWasWorking;
       counter.lastWasFallback = wasFallback;
       counter.lastSelectionMode = currentStep.routingStrategy || 'probability';
@@ -1048,13 +1070,24 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     if (routingStrategy === 'time-aware') {
       const sensitivity = Math.max(0, Math.min(10, Number.isFinite(currentStep.routingTimeSensitivity) ? currentStep.routingTimeSensitivity ?? 2 : 2));
       const routeEstimates = candidateConnections.map((connection) => getEstimatedRouteTime(currentStep, stepMap.get(connection.targetId), context));
-      const positiveEstimatedTimes = routeEstimates
+      const fastestProcessTime = routeEstimates
+        .filter((estimate) => estimate.targetType === 'process' && Number.isFinite(estimate.totalTime) && estimate.totalTime > 0)
+        .reduce((fastest, estimate) => Math.min(fastest, estimate.totalTime), Number.POSITIVE_INFINITY);
+      const rawPositiveEstimatedTimes = routeEstimates
         .map((estimate) => estimate.totalTime)
         .filter((time) => Number.isFinite(time) && time > 0);
-      const fastestTime = positiveEstimatedTimes.length > 0 ? Math.min(...positiveEstimatedTimes) : 1;
+      const fallbackFastestTime = rawPositiveEstimatedTimes.length > 0 ? Math.min(...rawPositiveEstimatedTimes) : 1;
+      const terminalComparisonTime = Number.isFinite(fastestProcessTime) ? fastestProcessTime : fallbackFastestTime;
+      const comparableEstimatedTimes = routeEstimates
+        .map((estimate) => estimate.targetType === 'end' ? terminalComparisonTime : estimate.totalTime)
+        .filter((time) => Number.isFinite(time) && time > 0);
+      const fastestTime = comparableEstimatedTimes.length > 0 ? Math.min(...comparableEstimatedTimes) : 1;
       const dynamicWeights = candidateConnections.map((connection, index) => {
         const baseWeight = baseWeights[index];
-        const estimatedTime = routeEstimates[index]?.totalTime ?? 0;
+        const routeEstimate = routeEstimates[index];
+        const estimatedTime = routeEstimate?.targetType === 'end'
+          ? terminalComparisonTime
+          : routeEstimate?.totalTime ?? 0;
         const relativeDelay = estimatedTime > 0 && fastestTime > 0
           ? Math.max(0, (estimatedTime - fastestTime) / fastestTime)
           : 0;
