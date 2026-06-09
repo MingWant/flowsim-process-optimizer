@@ -30,7 +30,14 @@ export const CalendarOverridePanel: React.FC<Props> = ({
           Inherit
         </button>
         <button
-          onClick={() => setEditingStep({ ...editingStep, calendarMode: 'custom', businessCalendar: normalizeBusinessCalendar(editingStep.businessCalendar || { ...businessCalendar, enabled: true }) })}
+          onClick={() => setEditingStep({
+            ...editingStep,
+            calendarMode: 'custom',
+            businessCalendar: normalizeBusinessCalendar({
+              ...(editingStep.businessCalendar || businessCalendar),
+              enabled: true,
+            }),
+          })}
           className={`rounded px-3 py-1.5 font-semibold ${editingStep.calendarMode === 'custom' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:text-slate-200'}`}
         >
           Custom
@@ -39,7 +46,7 @@ export const CalendarOverridePanel: React.FC<Props> = ({
     </div>
 
     {editingStep.calendarMode === 'custom' && (() => {
-      const stepCalendar = normalizeBusinessCalendar(editingStep.businessCalendar || { ...businessCalendar, enabled: true });
+      const stepCalendar = normalizeBusinessCalendar({ ...(editingStep.businessCalendar || businessCalendar), enabled: true });
       const updateStepCalendar = (updates: Partial<typeof stepCalendar>) => setEditingStep({
         ...editingStep,
         businessCalendar: normalizeBusinessCalendar({ ...stepCalendar, ...updates, enabled: true }),

@@ -1094,6 +1094,13 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     getGlobalBusinessCalendar()
   );
 
+  const getNextStartWorkingTime = (step: ProcessStep, simulationMs: number) => {
+    const calendar = getEffectiveBusinessCalendar(step);
+    return calendar.enabled
+      ? getNextWorkingSimulationTime(calendar, config.calendarStartIso, simulationMs)
+      : simulationMs;
+  };
+
   const getCalendarStartMs = () => {
     const parsed = config.calendarStartIso ? Date.parse(config.calendarStartIso) : Date.parse(DEFAULT_CALENDAR_START_ISO);
     return Number.isFinite(parsed) ? parsed : Date.parse(DEFAULT_CALENDAR_START_ISO);
@@ -1217,6 +1224,11 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
     }
   };
 
+  const calculateNextSimpleSpawnTime = (step: ProcessStep, currentSpawnTime: number) => {
+    const nextCalendarTime = currentSpawnTime + calculateNextSpawnDelay(step, currentSpawnTime);
+    return getNextStartWorkingTime(step, nextCalendarTime);
+  };
+
   const getWindowArrivalSlots = (step: ProcessStep, frameStartMs: number, frameEndMs: number): ArrivalSlot[] => {
     const windows = (step.arrivalSchedule || []).filter((window): window is ScheduledArrivalWindow => Boolean(window?.enabled) && (window.quantity || 0) > 0);
     if (windows.length === 0) {
@@ -1234,6 +1246,11 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
       const date = new Date(dayStartMs);
 
       for (const window of windows) {
+        const startCalendar = getEffectiveBusinessCalendar(step);
+        if (startCalendar.enabled && !startCalendar.daysOfWeek.includes(date.getDay())) {
+          continue;
+        }
+
         if (!isDateInFilters(date, window)) {
           continue;
         }
@@ -1727,6 +1744,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
 
         let nextSpawnAt = nextSpawnTimeRef.current[startNode.id];
         if (isNaN(nextSpawnAt)) nextSpawnAt = frameStartSimulationMs;
+        nextSpawnAt = getNextStartWorkingTime(startNode, nextSpawnAt);
 
         while (isArrivalDueBy(nextSpawnAt, simulationTimeRef.current) && spawnedThisTick < MAX_SPAWNS_PER_START_PER_TICK) {
           const batchSize = getArrivalBatchSize(startNode);
@@ -1736,7 +1754,7 @@ export const useProcessSimulation = (config: SimulationConfig, onAutoPause?: (re
               ? Math.max(0, startNode.arrivalBatchIntervalMs)
               : 0;
           spawnedThisTick += spawnArrivalSlot(startNode, { time: nextSpawnAt, quantity: batchSize, itemIntervalMs: batchInterval });
-          nextSpawnAt += calculateNextSpawnDelay(startNode, nextSpawnAt);
+          nextSpawnAt = calculateNextSimpleSpawnTime(startNode, nextSpawnAt);
         }
 
         nextSpawnTimeRef.current[startNode.id] = nextSpawnAt;

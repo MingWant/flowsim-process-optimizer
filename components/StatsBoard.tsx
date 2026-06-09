@@ -2,7 +2,7 @@
 import React from 'react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
 import { FlowStats, SimulationStats, StepStats, ProcessStep, DurationUnit, WorkItem, SimulationConfig } from '../types';
-import { XCircle, Ban, CheckCircle2, Gauge, Timer, Activity, GitCompareArrows, Users, Clock3, PauseCircle, Percent, Hourglass, UserX, BatteryWarning } from 'lucide-react';
+import { XCircle, Ban, CheckCircle2, Gauge, Timer, Activity, GitCompareArrows, Users, Clock3, PauseCircle, Percent, Hourglass, UserX, BatteryWarning, Eye, EyeOff, SlidersHorizontal } from 'lucide-react';
 
 interface Props {
   globalStats: SimulationStats;
@@ -22,6 +22,238 @@ interface FlowGroup {
   stepIds: Set<string>;
   steps: ProcessStep[];
 }
+
+type MetricVisibilityKey =
+  | 'items'
+  | 'throughput'
+  | 'avgCalendar'
+  | 'medianCalendar'
+  | 'p90Calendar'
+  | 'avgGlobalWorking'
+  | 'medianGlobalWorking'
+  | 'p90GlobalWorking'
+  | 'avgOperational'
+  | 'medianOperational'
+  | 'p90Operational'
+  | 'touchWork'
+  | 'queueWaitCalendar'
+  | 'queueWaitWorking'
+  | 'diagnosticWorkingWait'
+  | 'transfer'
+  | 'offHoursDelay'
+  | 'flowEfficiency'
+  | 'liveResourceUtil'
+  | 'oldestWip'
+  | 'oldestQueue'
+  | 'blockedShare'
+  | 'activeWork'
+  | 'resourcesUsed'
+  | 'errors'
+  | 'cancelled';
+
+interface MetricCard {
+  id: MetricVisibilityKey;
+  label: string;
+  value: string | number;
+  suffix: string;
+  color: string;
+  icon: React.ReactNode;
+}
+
+interface MetricVisibilityOption {
+  id: MetricVisibilityKey;
+  label: string;
+  description: string;
+}
+
+type StepTimeMetricVisibilityKey =
+  | 'configuredStepTime'
+  | 'configuredStepResources'
+  | 'avgStepQueueWaitCalendar'
+  | 'avgStepQueueWaitWorking'
+  | 'avgStepProcessTime'
+  | 'oldestStepQueueAge'
+  | 'oldestStepActiveAge'
+  | 'stepProcessedCount';
+
+interface StepTimeMetricCard {
+  id: StepTimeMetricVisibilityKey;
+  label: string;
+  value: string | number;
+  suffix: string;
+  color: string;
+  icon: React.ReactNode;
+  description?: string;
+}
+
+interface StepTimeMetricVisibilityOption {
+  id: StepTimeMetricVisibilityKey;
+  label: string;
+  description: string;
+}
+
+const METRIC_VISIBILITY_STORAGE_KEY = 'flowsim-live-metrics-visibility-v1';
+const STEP_TIME_METRIC_VISIBILITY_STORAGE_KEY = 'flowsim-live-step-time-metrics-visibility-v1';
+
+const METRIC_VISIBILITY_OPTIONS: MetricVisibilityOption[] = [
+  { id: 'items', label: 'Items', description: 'Created / finished item counts' },
+  { id: 'throughput', label: 'Throughput', description: 'Completed items per selected unit' },
+  { id: 'avgCalendar', label: 'Avg Calendar', description: 'Mean customer elapsed time' },
+  { id: 'medianCalendar', label: 'Median Calendar', description: 'Typical customer elapsed time' },
+  { id: 'p90Calendar', label: 'P90 Calendar', description: 'Slow-tail customer elapsed time' },
+  { id: 'avgGlobalWorking', label: 'Avg Global Working', description: 'Mean time inside global business hours' },
+  { id: 'medianGlobalWorking', label: 'Median Global Working', description: 'Typical global working time' },
+  { id: 'p90GlobalWorking', label: 'P90 Global Working', description: 'Slow-tail global working time' },
+  { id: 'avgOperational', label: 'Avg Operational', description: 'Mean step-calendar working time' },
+  { id: 'medianOperational', label: 'Median Operational', description: 'Typical operational working time' },
+  { id: 'p90Operational', label: 'P90 Operational', description: 'Slow-tail operational working time' },
+  { id: 'touchWork', label: 'Touch / Work', description: 'Active processing time' },
+  { id: 'queueWaitCalendar', label: 'Queue Wait (Calendar)', description: 'Queue time including off-hours' },
+  { id: 'queueWaitWorking', label: 'Queue Wait (Working)', description: 'Item-weighted working-hour queue time' },
+  { id: 'diagnosticWorkingWait', label: 'Diagnostic Working Wait', description: 'Step-level wait diagnostic' },
+  { id: 'transfer', label: 'Transfer', description: 'Movement / handoff time' },
+  { id: 'offHoursDelay', label: 'Off-hours Delay', description: 'Delay outside working hours' },
+  { id: 'flowEfficiency', label: 'Flow Efficiency', description: 'Work time share of elapsed time' },
+  { id: 'liveResourceUtil', label: 'Resource Utilization', description: 'Live resource usage percentage' },
+  { id: 'oldestWip', label: 'Oldest WIP', description: 'Oldest active item age' },
+  { id: 'oldestQueue', label: 'Oldest Queue', description: 'Oldest queued item age' },
+  { id: 'blockedShare', label: 'Blocked Share', description: 'Share of time blocked' },
+  { id: 'activeWork', label: 'Active Work / Load', description: 'Live queue, processing, and active counts' },
+  { id: 'resourcesUsed', label: 'Resources Used', description: 'Used resources vs capacity' },
+  { id: 'errors', label: 'Errors', description: 'Failed item count' },
+  { id: 'cancelled', label: 'Cancelled', description: 'Cancelled item count' },
+];
+
+const METRIC_VISIBILITY_OPTION_BY_ID = METRIC_VISIBILITY_OPTIONS.reduce((optionsById, option) => {
+  optionsById[option.id] = option;
+  return optionsById;
+}, {} as Record<MetricVisibilityKey, MetricVisibilityOption>);
+
+const METRIC_VISIBILITY_GROUPS: Array<{ label: string; description: string; metricIds: MetricVisibilityKey[] }> = [
+  {
+    label: 'Core demo',
+    description: 'Keep these on for a simple audience-facing story.',
+    metricIds: ['items', 'throughput', 'avgCalendar', 'queueWaitCalendar', 'activeWork'],
+  },
+  {
+    label: 'Service time detail',
+    description: 'Use when explaining calendar, working-hour, and tail metrics.',
+    metricIds: ['medianCalendar', 'p90Calendar', 'avgGlobalWorking', 'medianGlobalWorking', 'p90GlobalWorking', 'avgOperational', 'medianOperational', 'p90Operational', 'touchWork'],
+  },
+  {
+    label: 'Wait and aging',
+    description: 'Use for queue, SLA, and bottleneck discussions.',
+    metricIds: ['queueWaitWorking', 'diagnosticWorkingWait', 'transfer', 'offHoursDelay', 'oldestWip', 'oldestQueue'],
+  },
+  {
+    label: 'Resources and exceptions',
+    description: 'Use when discussing staffing, load, or failure scenarios.',
+    metricIds: ['flowEfficiency', 'liveResourceUtil', 'resourcesUsed', 'blockedShare', 'errors', 'cancelled'],
+  },
+];
+
+const DEMO_FOCUS_METRIC_IDS: MetricVisibilityKey[] = [
+  'items',
+  'throughput',
+  'avgCalendar',
+  'queueWaitCalendar',
+  'activeWork',
+  'liveResourceUtil',
+  'errors',
+];
+
+const STEP_TIME_METRIC_VISIBILITY_OPTIONS: StepTimeMetricVisibilityOption[] = [
+  { id: 'configuredStepTime', label: 'Configured Required Time', description: 'Original time setting from the STEP editor' },
+  { id: 'configuredStepResources', label: 'Configured Resources', description: 'Original resource capacity / execution mode settings' },
+  { id: 'avgStepQueueWaitCalendar', label: 'Avg Queue Wait (Calendar)', description: 'Average step queue wait including off-hours' },
+  { id: 'avgStepQueueWaitWorking', label: 'Avg Queue Wait (Working)', description: 'Average step queue wait inside working hours' },
+  { id: 'avgStepProcessTime', label: 'Avg Process / Completion', description: 'Average processing time; end steps use completion time' },
+  { id: 'oldestStepQueueAge', label: 'Oldest Queue Age', description: 'Current oldest queued item age in this step' },
+  { id: 'oldestStepActiveAge', label: 'Oldest Active Age', description: 'Current oldest processing item age in this step' },
+  { id: 'stepProcessedCount', label: 'Processed Count', description: 'Cumulative items processed by this step' },
+];
+
+const STEP_TIME_METRIC_VISIBILITY_OPTION_BY_ID = STEP_TIME_METRIC_VISIBILITY_OPTIONS.reduce((optionsById, option) => {
+  optionsById[option.id] = option;
+  return optionsById;
+}, {} as Record<StepTimeMetricVisibilityKey, StepTimeMetricVisibilityOption>);
+
+const STEP_TIME_DEMO_FOCUS_METRIC_IDS: StepTimeMetricVisibilityKey[] = [
+  'configuredStepTime',
+  'configuredStepResources',
+  'avgStepQueueWaitCalendar',
+  'avgStepProcessTime',
+  'oldestStepQueueAge',
+  'oldestStepActiveAge',
+];
+
+const createMetricVisibilityState = (visibleMetricIds?: Set<MetricVisibilityKey>): Record<MetricVisibilityKey, boolean> => {
+  const state = {} as Record<MetricVisibilityKey, boolean>;
+  METRIC_VISIBILITY_OPTIONS.forEach((option) => {
+    state[option.id] = visibleMetricIds ? visibleMetricIds.has(option.id) : true;
+  });
+  return state;
+};
+
+const getInitialMetricVisibility = () => {
+  const defaultState = createMetricVisibilityState();
+
+  if (typeof window === 'undefined') {
+    return defaultState;
+  }
+
+  try {
+    const saved = window.localStorage.getItem(METRIC_VISIBILITY_STORAGE_KEY);
+    if (!saved) {
+      return defaultState;
+    }
+
+    const parsed = JSON.parse(saved) as Partial<Record<MetricVisibilityKey, boolean>>;
+    const restored = { ...defaultState };
+    METRIC_VISIBILITY_OPTIONS.forEach((option) => {
+      if (typeof parsed[option.id] === 'boolean') {
+        restored[option.id] = parsed[option.id] as boolean;
+      }
+    });
+    return restored;
+  } catch {
+    return defaultState;
+  }
+};
+
+const createStepTimeMetricVisibilityState = (visibleMetricIds?: Set<StepTimeMetricVisibilityKey>): Record<StepTimeMetricVisibilityKey, boolean> => {
+  const state = {} as Record<StepTimeMetricVisibilityKey, boolean>;
+  STEP_TIME_METRIC_VISIBILITY_OPTIONS.forEach((option) => {
+    state[option.id] = visibleMetricIds ? visibleMetricIds.has(option.id) : true;
+  });
+  return state;
+};
+
+const getInitialStepTimeMetricVisibility = () => {
+  const defaultState = createStepTimeMetricVisibilityState();
+
+  if (typeof window === 'undefined') {
+    return defaultState;
+  }
+
+  try {
+    const saved = window.localStorage.getItem(STEP_TIME_METRIC_VISIBILITY_STORAGE_KEY);
+    if (!saved) {
+      return defaultState;
+    }
+
+    const parsed = JSON.parse(saved) as Partial<Record<StepTimeMetricVisibilityKey, boolean>>;
+    const restored = { ...defaultState };
+    STEP_TIME_METRIC_VISIBILITY_OPTIONS.forEach((option) => {
+      if (typeof parsed[option.id] === 'boolean') {
+        restored[option.id] = parsed[option.id] as boolean;
+      }
+    });
+    return restored;
+  } catch {
+    return defaultState;
+  }
+};
 
 const TIME_UNIT_TO_MS: Record<DurationUnit, number> = {
   ms: 1,
@@ -101,11 +333,65 @@ const formatDurationValue = (milliseconds: number, unit: DurationUnit) => {
   return value.toFixed(unit === 'ms' ? 0 : 2);
 };
 
+const formatConfiguredDuration = (step: ProcessStep) => {
+  if (step.randomnessMode === 'range') {
+    const unit = step.rangeTimeUnit || step.processingTimeUnit || 'ms';
+    return `${step.minProcessingTime ?? 0}-${step.maxProcessingTime ?? 0} ${UNIT_LABELS[unit]}`;
+  }
+
+  const unit = step.processingTimeUnit || 'ms';
+  const varianceLabel = step.variance > 0 && step.simulationMode !== 'delay' ? ` ±${Math.round(step.variance * 100)}%` : '';
+  return `${step.processingTime ?? 0} ${UNIT_LABELS[unit]}${varianceLabel}`;
+};
+
 const clampPercent = (value: number) => Math.min(999, Math.max(0, value * 100));
 
 const getStepResourceCapacity = (step: ProcessStep, stats?: StepStats) => (
   Math.max(0, stats?.totalResources || step.capacity || 0)
 );
+
+const getConfiguredResourceLabel = (step: ProcessStep) => {
+  if (step.type !== 'process') {
+    return 'N/A';
+  }
+
+  if (step.simulationMode === 'delay') {
+    return 'Delay only';
+  }
+
+  if ((step.resourceExecutionMode || 'single') === 'collaborative') {
+    const teamCount = step.collaborativeTeams?.length || 0;
+    const totalTeamResources = step.collaborativeTeams?.reduce((sum, team) => sum + team.resources, 0) || step.capacity || 0;
+    const defaultTeamSize = step.targetResourcesPerItem ?? 1;
+    return `${totalTeamResources} total · ${teamCount} team${teamCount === 1 ? '' : 's'} · ${defaultTeamSize}/item`;
+  }
+
+  if (step.resourceExecutionMode === 'multitask') {
+    return `${step.capacity || 0} res · ${step.maxConcurrentItemsPerResource ?? 1} items/res`;
+  }
+
+  return `${step.capacity || 0} res · 1/item`;
+};
+
+const getConfiguredResourceDescription = (step: ProcessStep) => {
+  if (step.type !== 'process') {
+    return 'Start/end step';
+  }
+
+  if (step.simulationMode === 'delay') {
+    return 'No resource constraint';
+  }
+
+  if ((step.resourceExecutionMode || 'single') === 'collaborative') {
+    return `Mode: ${getExecutionModeLabel(step)} · min ${step.minResourcesPerItem ?? 1}, target ${step.targetResourcesPerItem ?? 1}, max ${step.maxResourcesPerItem ?? step.targetResourcesPerItem ?? 1}`;
+  }
+
+  if (step.resourceExecutionMode === 'multitask') {
+    return 'Configured multitask capacity';
+  }
+
+  return 'Configured single-resource capacity';
+};
 
 const getFlowGroups = (steps: ProcessStep[]): FlowGroup[] => {
   const stepById = new Map(steps.map(step => [step.id, step]));
@@ -185,6 +471,10 @@ const getFlowGroups = (steps: ProcessStep[]): FlowGroup[] => {
 export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats = [], steps, items = [], simulationTimeMs, cycleTimeUnit, config }) => {
   const flowGroups = getFlowGroups(steps);
   const [selectedFlowId, setSelectedFlowId] = React.useState<string>('all');
+  const [metricVisibility, setMetricVisibility] = React.useState<Record<MetricVisibilityKey, boolean>>(getInitialMetricVisibility);
+  const [stepTimeMetricVisibility, setStepTimeMetricVisibility] = React.useState<Record<StepTimeMetricVisibilityKey, boolean>>(getInitialStepTimeMetricVisibility);
+  const [isMetricVisibilityPanelOpen, setIsMetricVisibilityPanelOpen] = React.useState(false);
+  const [isStepTimeMetricVisibilityPanelOpen, setIsStepTimeMetricVisibilityPanelOpen] = React.useState(false);
   const selectedFlow = selectedFlowId === 'all' ? undefined : flowGroups.find((flow) => flow.id === selectedFlowId);
   const stepStatsById = new Map(stepStats.map(stats => [stats.stepId, stats]));
   const flowStatsById = new Map(flowStats.map(stats => [stats.flowId, stats]));
@@ -192,6 +482,41 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
     { id: 'all', name: 'All Flows', color: '#64748b' },
     ...flowGroups.map((flow) => ({ id: flow.id, name: flow.name, color: flow.color })),
   ];
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(METRIC_VISIBILITY_STORAGE_KEY, JSON.stringify(metricVisibility));
+  }, [metricVisibility]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(STEP_TIME_METRIC_VISIBILITY_STORAGE_KEY, JSON.stringify(stepTimeMetricVisibility));
+  }, [stepTimeMetricVisibility]);
+
+  const isMetricVisible = React.useCallback((metricId: MetricVisibilityKey) => metricVisibility[metricId] ?? true, [metricVisibility]);
+  const isStepTimeMetricVisible = React.useCallback((metricId: StepTimeMetricVisibilityKey) => stepTimeMetricVisibility[metricId] ?? true, [stepTimeMetricVisibility]);
+  const visibleMetricCount = METRIC_VISIBILITY_OPTIONS.filter((option) => isMetricVisible(option.id)).length;
+  const hiddenMetricCount = METRIC_VISIBILITY_OPTIONS.length - visibleMetricCount;
+  const visibleStepTimeMetricCount = STEP_TIME_METRIC_VISIBILITY_OPTIONS.filter((option) => isStepTimeMetricVisible(option.id)).length;
+  const hiddenStepTimeMetricCount = STEP_TIME_METRIC_VISIBILITY_OPTIONS.length - visibleStepTimeMetricCount;
+  const toggleMetricVisibility = (metricId: MetricVisibilityKey) => {
+    setMetricVisibility((current) => ({ ...current, [metricId]: !(current[metricId] ?? true) }));
+  };
+  const toggleStepTimeMetricVisibility = (metricId: StepTimeMetricVisibilityKey) => {
+    setStepTimeMetricVisibility((current) => ({ ...current, [metricId]: !(current[metricId] ?? true) }));
+  };
+  const showAllMetrics = () => setMetricVisibility(createMetricVisibilityState());
+  const hideAllMetrics = () => setMetricVisibility(createMetricVisibilityState(new Set<MetricVisibilityKey>()));
+  const showDemoFocusMetrics = () => setMetricVisibility(createMetricVisibilityState(new Set(DEMO_FOCUS_METRIC_IDS)));
+  const showAllStepTimeMetrics = () => setStepTimeMetricVisibility(createStepTimeMetricVisibilityState());
+  const hideAllStepTimeMetrics = () => setStepTimeMetricVisibility(createStepTimeMetricVisibilityState(new Set<StepTimeMetricVisibilityKey>()));
+  const showStepTimeDemoFocusMetrics = () => setStepTimeMetricVisibility(createStepTimeMetricVisibilityState(new Set(STEP_TIME_DEMO_FOCUS_METRIC_IDS)));
 
   // Get wait time display mode from config
   const waitTimeMode = config.waitTimeCalculationMode || 'both';
@@ -240,27 +565,33 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
   const oldestQueueAgeValue = formatDurationValue(globalStats.oldestQueueAge || 0, cycleTimeUnit);
   const resourceUtilizationValue = `${Math.min(999, Math.max(0, (globalStats.resourceUtilization || 0) * 100)).toFixed(1)}%`;
   const blockedTimeShareValue = `${Math.min(999, Math.max(0, (globalStats.blockedTimeShare || 0) * 100)).toFixed(1)}%`;
-  const globalMetricCards = [
-    { label: 'Finished / Created', value: `${globalStats.totalItemsFinished}/${globalStats.totalItemsCreated}`, suffix: '', color: 'text-emerald-300', icon: <CheckCircle2 size={18} className="text-emerald-400" /> },
-    { label: 'Throughput', value: throughputValue.toFixed(1), suffix: `/ ${UNIT_LABELS[throughputUnit]}`, color: 'text-emerald-400', icon: <Gauge size={18} className="text-emerald-400" /> },
-    { label: 'Avg Calendar', value: calendarCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-400', icon: <Timer size={18} className="text-blue-400" /> },
-    { label: 'Median Calendar', value: medianCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-300', icon: <Timer size={18} className="text-blue-300" /> },
-    { label: 'P90 Calendar', value: p90CycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-indigo-300', icon: <Timer size={18} className="text-indigo-300" /> },
-    { label: 'Avg Global Working', value: workingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-sky-300', icon: <Timer size={18} className="text-sky-300" /> },
-    { label: 'Median Global Working', value: medianWorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Timer size={18} className="text-cyan-300" /> },
-    { label: 'P90 Global Working', value: p90WorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-teal-300', icon: <Timer size={18} className="text-teal-300" /> },
-    { label: 'Avg Operational', value: operationalWorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-lime-300', icon: <Clock3 size={18} className="text-lime-300" /> },
-    { label: 'Median Operational', value: medianOperationalWorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-green-300', icon: <Clock3 size={18} className="text-green-300" /> },
-    { label: 'P90 Operational', value: p90OperationalWorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-emerald-300', icon: <Clock3 size={18} className="text-emerald-300" /> },
-    { label: 'Touch / Work', value: workTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Activity size={18} className="text-cyan-300" /> },
-    { label: 'Queue Wait', value: waitTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-amber-300', icon: <PauseCircle size={18} className="text-amber-300" /> },
-    { label: 'Off-hours Delay', value: nonWorkingDelayValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-violet-300', icon: <PauseCircle size={18} className="text-violet-300" /> },
-    { label: 'Flow Efficiency', value: flowEfficiencyValue, suffix: '', color: 'text-emerald-300', icon: <Percent size={18} className="text-emerald-300" /> },
-    { label: 'Live Resource Util.', value: resourceUtilizationValue, suffix: '', color: 'text-purple-300', icon: <Users size={18} className="text-purple-300" /> },
-    { label: 'Oldest WIP', value: oldestWipAgeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-orange-300', icon: <Hourglass size={18} className="text-orange-300" /> },
-    { label: 'Oldest Queue', value: oldestQueueAgeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-yellow-300', icon: <UserX size={18} className="text-yellow-300" /> },
-    { label: 'Blocked Share', value: blockedTimeShareValue, suffix: '', color: 'text-red-300', icon: <BatteryWarning size={18} className="text-red-300" /> },
+  const globalMetricCards: MetricCard[] = [
+    { id: 'items', label: 'Finished / Created', value: `${globalStats.totalItemsFinished}/${globalStats.totalItemsCreated}`, suffix: '', color: 'text-emerald-300', icon: <CheckCircle2 size={18} className="text-emerald-400" /> },
+    { id: 'throughput', label: 'Throughput', value: throughputValue.toFixed(1), suffix: `/ ${UNIT_LABELS[throughputUnit]}`, color: 'text-emerald-400', icon: <Gauge size={18} className="text-emerald-400" /> },
+    { id: 'avgCalendar', label: 'Avg Calendar', value: calendarCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-400', icon: <Timer size={18} className="text-blue-400" /> },
+    { id: 'medianCalendar', label: 'Median Calendar', value: medianCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-300', icon: <Timer size={18} className="text-blue-300" /> },
+    { id: 'p90Calendar', label: 'P90 Calendar', value: p90CycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-indigo-300', icon: <Timer size={18} className="text-indigo-300" /> },
+    { id: 'avgGlobalWorking', label: 'Avg Global Working', value: workingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-sky-300', icon: <Timer size={18} className="text-sky-300" /> },
+    { id: 'medianGlobalWorking', label: 'Median Global Working', value: medianWorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Timer size={18} className="text-cyan-300" /> },
+    { id: 'p90GlobalWorking', label: 'P90 Global Working', value: p90WorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-teal-300', icon: <Timer size={18} className="text-teal-300" /> },
+    { id: 'avgOperational', label: 'Avg Operational', value: operationalWorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-lime-300', icon: <Clock3 size={18} className="text-lime-300" /> },
+    { id: 'medianOperational', label: 'Median Operational', value: medianOperationalWorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-green-300', icon: <Clock3 size={18} className="text-green-300" /> },
+    { id: 'p90Operational', label: 'P90 Operational', value: p90OperationalWorkingCycleTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-emerald-300', icon: <Clock3 size={18} className="text-emerald-300" /> },
+    { id: 'touchWork', label: 'Touch / Work', value: workTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Activity size={18} className="text-cyan-300" /> },
+    { id: 'queueWaitCalendar', label: 'Queue Wait', value: waitTimeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-amber-300', icon: <PauseCircle size={18} className="text-amber-300" /> },
+    { id: 'offHoursDelay', label: 'Off-hours Delay', value: nonWorkingDelayValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-violet-300', icon: <PauseCircle size={18} className="text-violet-300" /> },
+    { id: 'flowEfficiency', label: 'Flow Efficiency', value: flowEfficiencyValue, suffix: '', color: 'text-emerald-300', icon: <Percent size={18} className="text-emerald-300" /> },
+    { id: 'liveResourceUtil', label: 'Live Resource Util.', value: resourceUtilizationValue, suffix: '', color: 'text-purple-300', icon: <Users size={18} className="text-purple-300" /> },
+    { id: 'oldestWip', label: 'Oldest WIP', value: oldestWipAgeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-orange-300', icon: <Hourglass size={18} className="text-orange-300" /> },
+    { id: 'oldestQueue', label: 'Oldest Queue', value: oldestQueueAgeValue, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-yellow-300', icon: <UserX size={18} className="text-yellow-300" /> },
+    { id: 'blockedShare', label: 'Blocked Share', value: blockedTimeShareValue, suffix: '', color: 'text-red-300', icon: <BatteryWarning size={18} className="text-red-300" /> },
   ];
+  const visibleGlobalMetricCards = globalMetricCards.filter((card) => isMetricVisible(card.id));
+  const globalSummaryParts = [
+    isMetricVisible('activeWork') ? `${globalStats.activeItems} active` : null,
+    isMetricVisible('errors') ? `${globalStats.totalItemsFailed} errors` : null,
+    isMetricVisible('cancelled') ? `${globalStats.totalItemsCancelled} cancelled` : null,
+  ].filter((part): part is string => Boolean(part));
 
   const flowMetrics = flowGroups.map((flow, index) => {
     const statsForFlow = flow.steps.map(step => stepStatsById.get(step.id)).filter((stats): stats is StepStats => Boolean(stats));
@@ -384,34 +715,66 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
   const visibleResourceSteps = selectedFlow
     ? resourceSteps.filter((entry) => selectedFlow.stepIds.has(entry.step.id))
     : resourceSteps;
-  const totalResourceUsage = resourceSteps.reduce((sum, entry) => sum + (entry.stats?.resourceUsage || 0), 0);
-  const totalResourceCapacity = resourceSteps.reduce((sum, entry) => sum + getStepResourceCapacity(entry.step, entry.stats), 0);
   const visibleResourceUsage = visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats?.resourceUsage || 0), 0);
   const visibleResourceCapacity = visibleResourceSteps.reduce((sum, entry) => sum + getStepResourceCapacity(entry.step, entry.stats), 0);
-  const weightedAvgResourcesPerItem = resourceSteps.reduce((sum, entry) => sum + (entry.stats?.avgResourcesPerItem || 0) * (entry.stats?.activeProcessing || 0), 0) / Math.max(1, resourceSteps.reduce((sum, entry) => sum + (entry.stats?.activeProcessing || 0), 0));
-  const weightedAvgResourceLoad = resourceSteps.reduce((sum, entry) => sum + (entry.stats?.avgResourceLoadFactor || 0) * (entry.stats?.activeProcessing || 0), 0) / Math.max(1, resourceSteps.reduce((sum, entry) => sum + (entry.stats?.activeProcessing || 0), 0));
   const visibleWeightedAvgResourcesPerItem = visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats?.avgResourcesPerItem || 0) * (entry.stats?.activeProcessing || 0), 0) / Math.max(1, visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats?.activeProcessing || 0), 0));
   const visibleWeightedAvgResourceLoad = visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats?.avgResourceLoadFactor || 0) * (entry.stats?.activeProcessing || 0), 0) / Math.max(1, visibleResourceSteps.reduce((sum, entry) => sum + (entry.stats?.activeProcessing || 0), 0));
 
+  const visibleStepTimeFlows = selectedFlow ? flowGroups.filter((flow) => flow.id === selectedFlow.id) : flowGroups;
+  const buildStepTimeMetricCards = (step: ProcessStep, stats?: StepStats): StepTimeMetricCard[] => {
+    const liveStepItems = items.filter((item) => item.currentStepId === step.id && !['finished', 'error', 'cancelled'].includes(item.status));
+    const queuedItems = liveStepItems.filter((item) => item.status === 'queued');
+    const activeItemsForStep = liveStepItems.filter((item) => item.status === 'processing');
+    const oldestQueueAge = queuedItems.reduce((max, item) => Math.max(max, simulationTimeMs - (item.queuedAtSimulationMs ?? item.stepEntryTime ?? item.createdAtSimulationMs)), 0);
+    const oldestActiveAge = activeItemsForStep.reduce((max, item) => Math.max(max, simulationTimeMs - (item.processingStartedAtSimulationMs ?? item.stepEntryTime ?? item.createdAtSimulationMs)), 0);
+    const processLabel = step.type === 'end' ? 'Avg Completion' : step.type === 'start' ? 'Avg Arrival Step Time' : 'Avg Process Time';
+    const configuredDurationLabel = formatConfiguredDuration(step);
+    const configuredResourceLabel = getConfiguredResourceLabel(step);
+
+    const cards: StepTimeMetricCard[] = [
+      { id: 'configuredStepTime', label: 'Configured Time', value: configuredDurationLabel, suffix: '', color: 'text-blue-200', icon: <Timer size={16} className="text-blue-200" />, description: step.randomnessMode === 'range' ? 'Original range setting' : 'Original fixed setting' },
+      { id: 'configuredStepResources', label: 'Configured Resources', value: configuredResourceLabel, suffix: '', color: 'text-purple-200', icon: <Users size={16} className="text-purple-200" />, description: getConfiguredResourceDescription(step) },
+      { id: 'avgStepQueueWaitCalendar', label: 'Avg Queue Wait (Calendar)', value: formatDurationValue(stats?.avgWaitTime || 0, cycleTimeUnit), suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-amber-300', icon: <PauseCircle size={16} className="text-amber-300" />, description: 'Includes off-hours' },
+      { id: 'avgStepQueueWaitWorking', label: 'Avg Queue Wait (Working)', value: formatDurationValue(stats?.avgWorkingWaitTime || 0, cycleTimeUnit), suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-yellow-200', icon: <Clock3 size={16} className="text-yellow-200" />, description: 'Working-hour wait' },
+      { id: 'avgStepProcessTime', label: processLabel, value: formatDurationValue(stats?.avgCompletionTime || 0, cycleTimeUnit), suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Timer size={16} className="text-cyan-300" />, description: step.type === 'end' ? 'End-node completion fallback' : 'Completed items only' },
+      { id: 'oldestStepQueueAge', label: 'Oldest Queue Age', value: formatDurationValue(oldestQueueAge, cycleTimeUnit), suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-orange-300', icon: <Hourglass size={16} className="text-orange-300" />, description: `${queuedItems.length} queued now` },
+      { id: 'oldestStepActiveAge', label: 'Oldest Active Age', value: formatDurationValue(oldestActiveAge, cycleTimeUnit), suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-300', icon: <Activity size={16} className="text-blue-300" />, description: `${activeItemsForStep.length} processing now` },
+      { id: 'stepProcessedCount', label: 'Processed Count', value: stats?.totalProcessed || 0, suffix: '', color: 'text-emerald-300', icon: <CheckCircle2 size={16} className="text-emerald-300" />, description: 'Cumulative history' },
+    ];
+
+    return cards.filter((card) => {
+      if (card.id === 'avgStepQueueWaitCalendar' && waitTimeMode === 'working') {
+        return false;
+      }
+
+      if (card.id === 'avgStepQueueWaitWorking' && waitTimeMode === 'calendar') {
+        return false;
+      }
+
+      return isStepTimeMetricVisible(card.id);
+    });
+  };
+
   const buildFlowMetricCards = (flow: typeof liveFlowCards[number]) => {
-    const cards = [
-      { label: 'Items Finished', value: flow.finished, suffix: '', color: 'text-emerald-300', icon: <CheckCircle2 size={18} className="text-emerald-400" /> },
-      { label: 'Throughput', value: flow.throughput.toFixed(1), suffix: `/ ${UNIT_LABELS[flow.throughputUnit]}`, color: 'text-emerald-400', icon: <Gauge size={18} className="text-emerald-400" /> },
-      { label: 'Avg Calendar', value: flow.avgCalendarCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-400', icon: <Timer size={18} className="text-blue-400" /> },
-      { label: 'Median Calendar', value: flow.medianCalendarCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-300', icon: <Timer size={18} className="text-blue-300" /> },
-      { label: 'P90 Calendar', value: flow.p90CalendarCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-indigo-300', icon: <Timer size={18} className="text-indigo-300" /> },
-      { label: 'Avg Global Working', value: flow.avgWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-sky-300', icon: <Timer size={18} className="text-sky-300" /> },
-      { label: 'Median Global Working', value: flow.medianWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Timer size={18} className="text-cyan-300" /> },
-      { label: 'P90 Global Working', value: flow.p90WorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-teal-300', icon: <Timer size={18} className="text-teal-300" /> },
-      { label: 'Avg Operational', value: flow.avgOperationalWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-lime-300', icon: <Clock3 size={18} className="text-lime-300" /> },
-      { label: 'Median Operational', value: flow.medianOperationalWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-green-300', icon: <Clock3 size={18} className="text-green-300" /> },
-      { label: 'P90 Operational', value: flow.p90OperationalWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-emerald-300', icon: <Clock3 size={18} className="text-emerald-300" /> },
-      { label: 'Touch / Work', value: flow.avgTouchTimeLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Clock3 size={18} className="text-cyan-300" /> },
+    const cards: MetricCard[] = [
+      { id: 'items', label: 'Items Finished', value: flow.finished, suffix: '', color: 'text-emerald-300', icon: <CheckCircle2 size={18} className="text-emerald-400" /> },
+      { id: 'throughput', label: 'Throughput', value: flow.throughput.toFixed(1), suffix: `/ ${UNIT_LABELS[flow.throughputUnit]}`, color: 'text-emerald-400', icon: <Gauge size={18} className="text-emerald-400" /> },
+      { id: 'avgCalendar', label: 'Avg Calendar', value: flow.avgCalendarCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-400', icon: <Timer size={18} className="text-blue-400" /> },
+      { id: 'medianCalendar', label: 'Median Calendar', value: flow.medianCalendarCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-blue-300', icon: <Timer size={18} className="text-blue-300" /> },
+      { id: 'p90Calendar', label: 'P90 Calendar', value: flow.p90CalendarCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-indigo-300', icon: <Timer size={18} className="text-indigo-300" /> },
+      { id: 'avgGlobalWorking', label: 'Avg Global Working', value: flow.avgWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-sky-300', icon: <Timer size={18} className="text-sky-300" /> },
+      { id: 'medianGlobalWorking', label: 'Median Global Working', value: flow.medianWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Timer size={18} className="text-cyan-300" /> },
+      { id: 'p90GlobalWorking', label: 'P90 Global Working', value: flow.p90WorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-teal-300', icon: <Timer size={18} className="text-teal-300" /> },
+      { id: 'avgOperational', label: 'Avg Operational', value: flow.avgOperationalWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-lime-300', icon: <Clock3 size={18} className="text-lime-300" /> },
+      { id: 'medianOperational', label: 'Median Operational', value: flow.medianOperationalWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-green-300', icon: <Clock3 size={18} className="text-green-300" /> },
+      { id: 'p90Operational', label: 'P90 Operational', value: flow.p90OperationalWorkingCycleLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-emerald-300', icon: <Clock3 size={18} className="text-emerald-300" /> },
+      { id: 'touchWork', label: 'Touch / Work', value: flow.avgTouchTimeLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-cyan-300', icon: <Clock3 size={18} className="text-cyan-300" /> },
     ];
 
     // Add wait time cards based on configuration
     if (waitTimeMode === 'calendar' || waitTimeMode === 'both') {
       cards.push({
+        id: 'queueWaitCalendar',
         label: waitTimeMode === 'both' ? 'Queue Wait (Calendar)' : 'Queue Wait',
         value: flow.avgWaitTimeLabel,
         suffix: UNIT_LABELS[cycleTimeUnit],
@@ -422,6 +785,7 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
 
     if (waitTimeMode === 'working' || waitTimeMode === 'both') {
       cards.push({
+        id: 'queueWaitWorking',
         label: waitTimeMode === 'both' ? 'Queue Wait (Working)' : 'Queue Wait',
         value: flow.avgItemWorkingWaitTimeLabel,
         suffix: UNIT_LABELS[cycleTimeUnit],
@@ -430,6 +794,7 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
       });
 
       cards.push({
+        id: 'diagnosticWorkingWait',
         label: 'Diagnostic Working Wait',
         value: flow.diagnosticWorkingWaitTimeLabel,
         suffix: UNIT_LABELS[cycleTimeUnit],
@@ -440,23 +805,154 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
 
     // Add remaining cards
     cards.push(
-      { label: 'Transfer', value: flow.avgTransmissionTimeLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-indigo-300', icon: <GitCompareArrows size={18} className="text-indigo-300" /> },
-      { label: 'Off-hours Delay', value: flow.avgOffHoursDelayLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-violet-300', icon: <PauseCircle size={18} className="text-violet-300" /> },
-      { label: 'Flow Efficiency', value: flow.flowEfficiencyLabel, suffix: '', color: 'text-emerald-300', icon: <Percent size={18} className="text-emerald-300" /> },
-      { label: 'Oldest WIP', value: flow.oldestWipAgeLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-orange-300', icon: <Hourglass size={18} className="text-orange-300" /> },
-      { label: 'Oldest Queue', value: flow.oldestQueueAgeLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-yellow-300', icon: <UserX size={18} className="text-yellow-300" /> },
-      { label: 'Live Resource Util.', value: flow.resourceUtilizationLabel, suffix: '', color: 'text-purple-300', icon: <Gauge size={18} className="text-purple-300" /> },
-      { label: 'Active Work', value: flow.activeItems, suffix: '', color: 'text-amber-400', icon: <Activity size={18} className="text-amber-400" /> },
-      { label: 'Resources Used', value: `${flow.resourceUsage}/${flow.resourceCapacity}`, suffix: '', color: 'text-purple-300', icon: <Users size={18} className="text-purple-300" /> },
-      { label: 'Errors', value: flow.failed, suffix: '', color: 'text-red-400', icon: <XCircle size={18} className="text-red-400" /> },
-      { label: 'Cancelled', value: flow.cancelled, suffix: '', color: 'text-slate-400', icon: <Ban size={18} className="text-slate-400" /> }
+      { id: 'transfer', label: 'Transfer', value: flow.avgTransmissionTimeLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-indigo-300', icon: <GitCompareArrows size={18} className="text-indigo-300" /> },
+      { id: 'offHoursDelay', label: 'Off-hours Delay', value: flow.avgOffHoursDelayLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-violet-300', icon: <PauseCircle size={18} className="text-violet-300" /> },
+      { id: 'flowEfficiency', label: 'Flow Efficiency', value: flow.flowEfficiencyLabel, suffix: '', color: 'text-emerald-300', icon: <Percent size={18} className="text-emerald-300" /> },
+      { id: 'oldestWip', label: 'Oldest WIP', value: flow.oldestWipAgeLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-orange-300', icon: <Hourglass size={18} className="text-orange-300" /> },
+      { id: 'oldestQueue', label: 'Oldest Queue', value: flow.oldestQueueAgeLabel, suffix: UNIT_LABELS[cycleTimeUnit], color: 'text-yellow-300', icon: <UserX size={18} className="text-yellow-300" /> },
+      { id: 'liveResourceUtil', label: 'Live Resource Util.', value: flow.resourceUtilizationLabel, suffix: '', color: 'text-purple-300', icon: <Gauge size={18} className="text-purple-300" /> },
+      { id: 'activeWork', label: 'Active Work', value: flow.activeItems, suffix: '', color: 'text-amber-400', icon: <Activity size={18} className="text-amber-400" /> },
+      { id: 'resourcesUsed', label: 'Resources Used', value: `${flow.resourceUsage}/${flow.resourceCapacity}`, suffix: '', color: 'text-purple-300', icon: <Users size={18} className="text-purple-300" /> },
+      { id: 'errors', label: 'Errors', value: flow.failed, suffix: '', color: 'text-red-400', icon: <XCircle size={18} className="text-red-400" /> },
+      { id: 'cancelled', label: 'Cancelled', value: flow.cancelled, suffix: '', color: 'text-slate-400', icon: <Ban size={18} className="text-slate-400" /> }
     );
 
-    return cards;
+    return cards.filter((card) => isMetricVisible(card.id));
   };
 
   return (
     <div className="space-y-4 w-full">
+      <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="flex items-center gap-2 text-base font-bold text-slate-100">
+              <SlidersHorizontal size={18} className="text-cyan-300" /> Metrics Display
+            </h3>
+            <p className="mt-1 text-xs text-slate-500">Choose which Live Metrics are shown during demos. Hidden choices are saved on this browser.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${hiddenMetricCount > 0 ? 'border-amber-500/20 bg-amber-500/10 text-amber-200' : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200'}`}>
+              {visibleMetricCount}/{METRIC_VISIBILITY_OPTIONS.length} shown
+            </span>
+            <button
+              type="button"
+              onClick={() => setIsMetricVisibilityPanelOpen((current) => !current)}
+              className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-cyan-500/50 hover:text-cyan-100"
+            >
+              {isMetricVisibilityPanelOpen ? <EyeOff size={14} /> : <Eye size={14} />}
+              {isMetricVisibilityPanelOpen ? 'Hide Controls' : 'Show / Hide Metrics'}
+            </button>
+          </div>
+        </div>
+
+        {isMetricVisibilityPanelOpen && (
+          <div className="mt-4 space-y-4 border-t border-cyan-500/10 pt-4">
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={showDemoFocusMetrics} className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-500/20">Demo focus</button>
+              <button type="button" onClick={showAllMetrics} className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-500/20">Show all</button>
+              <button type="button" onClick={hideAllMetrics} className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-slate-500 hover:text-slate-100">Hide all</button>
+            </div>
+
+            <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-4">
+              {METRIC_VISIBILITY_GROUPS.map((group) => (
+                <div key={group.label} className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3">
+                  <div className="mb-3">
+                    <div className="text-xs font-bold text-slate-200">{group.label}</div>
+                    <div className="mt-1 text-[11px] leading-snug text-slate-500">{group.description}</div>
+                  </div>
+                  <div className="space-y-2">
+                    {group.metricIds.map((metricId) => {
+                      const option = METRIC_VISIBILITY_OPTION_BY_ID[metricId];
+                      const visible = isMetricVisible(metricId);
+                      return (
+                        <button
+                          key={metricId}
+                          type="button"
+                          onClick={() => toggleMetricVisibility(metricId)}
+                          className={`flex w-full items-start justify-between gap-3 rounded-xl border px-3 py-2 text-left transition ${visible ? 'border-cyan-500/25 bg-cyan-500/10 text-slate-100' : 'border-slate-800 bg-slate-900/50 text-slate-500 hover:border-slate-600 hover:text-slate-300'}`}
+                        >
+                          <span className="min-w-0">
+                            <span className="block text-xs font-semibold leading-tight">{option.label}</span>
+                            <span className="mt-0.5 block text-[10px] leading-snug opacity-75">{option.description}</span>
+                          </span>
+                          <span className={`mt-0.5 inline-flex h-5 min-w-10 items-center justify-center rounded-full text-[10px] font-bold ${visible ? 'bg-cyan-400/20 text-cyan-100' : 'bg-slate-800 text-slate-500'}`}>
+                            {visible ? 'Show' : 'Hide'}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+          </div>
+        )}
+      </div>
+
+      {visibleMetricCount === 0 && (
+        <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-100">
+          All Live Metrics are hidden. Open <span className="font-semibold">Show / Hide Metrics</span> and enable at least one metric to present data.
+        </div>
+      )}
+
+      <div className="rounded-2xl border border-blue-500/20 bg-blue-500/5 p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="flex items-center gap-2 text-base font-bold text-slate-100">
+              <Clock3 size={18} className="text-blue-300" /> STEP Time Display
+            </h3>
+            <p className="mt-1 text-xs text-slate-500">Choose which per-STEP time cards are shown. These settings are independent from Live Metrics.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${hiddenStepTimeMetricCount > 0 ? 'border-blue-500/20 bg-blue-500/10 text-blue-200' : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200'}`}>
+              {visibleStepTimeMetricCount}/{STEP_TIME_METRIC_VISIBILITY_OPTIONS.length} shown
+            </span>
+            <button
+              type="button"
+              onClick={() => setIsStepTimeMetricVisibilityPanelOpen((current) => !current)}
+              className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-blue-500/50 hover:text-blue-100"
+            >
+              {isStepTimeMetricVisibilityPanelOpen ? <EyeOff size={14} /> : <Eye size={14} />}
+              {isStepTimeMetricVisibilityPanelOpen ? 'Hide STEP Controls' : 'Show / Hide STEP Time'}
+            </button>
+          </div>
+        </div>
+
+        {isStepTimeMetricVisibilityPanelOpen && (
+          <div className="mt-4 space-y-4 border-t border-blue-500/10 pt-4">
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={showStepTimeDemoFocusMetrics} className="rounded-full border border-blue-500/30 bg-blue-500/10 px-3 py-1.5 text-xs font-semibold text-blue-100 transition hover:bg-blue-500/20">Step demo focus</button>
+              <button type="button" onClick={showAllStepTimeMetrics} className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-500/20">Show all step times</button>
+              <button type="button" onClick={hideAllStepTimeMetrics} className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-slate-500 hover:text-slate-100">Hide step times</button>
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {STEP_TIME_METRIC_VISIBILITY_OPTIONS.map((option) => {
+                const visible = isStepTimeMetricVisible(option.id);
+                const label = STEP_TIME_METRIC_VISIBILITY_OPTION_BY_ID[option.id].label;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => toggleStepTimeMetricVisibility(option.id)}
+                    className={`flex w-full items-start justify-between gap-3 rounded-xl border px-3 py-2 text-left transition ${visible ? 'border-blue-500/25 bg-blue-500/10 text-slate-100' : 'border-slate-800 bg-slate-900/50 text-slate-500 hover:border-slate-600 hover:text-slate-300'}`}
+                  >
+                    <span className="min-w-0">
+                      <span className="block text-xs font-semibold leading-tight">{label}</span>
+                      <span className="mt-0.5 block text-[10px] leading-snug opacity-75">{option.description}</span>
+                    </span>
+                    <span className={`mt-0.5 inline-flex h-5 min-w-10 items-center justify-center rounded-full text-[10px] font-bold ${visible ? 'bg-blue-400/20 text-blue-100' : 'bg-slate-800 text-slate-500'}`}>
+                      {visible ? 'Show' : 'Hide'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Flow-first Metrics Cards */}
       <div className="rounded-2xl border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-slate-400">
         <span className="font-semibold text-blue-200">Time model:</span> Calendar is customer elapsed time. Global Working uses the shared business calendar. Operational Working uses each item&apos;s actual step calendars, counted as working queue wait plus active processing. Avg shows the mean, Median shows the typical item, and P90 shows the slow-tail service level. Touch / Work is active processing. <span className="font-semibold text-amber-200">Queue Wait (Calendar)</span> includes non-working hours for SLA tracking. <span className="font-semibold text-yellow-200">Queue Wait (Working)</span> is item-weighted from completed items, showing each item&apos;s real working-hour queue experience. <span className="font-semibold text-yellow-300">Diagnostic Working Wait</span> is the current Avg Step Working Wait / Step-level Working Wait diagnostic metric, useful for bottleneck analysis and not item-weighted. Transfer is movement time, and Off-hours Delay is calendar time outside working hours.
@@ -470,13 +966,16 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
             </h3>
             <p className="mt-1 text-xs text-slate-500">All completed items are pooled here, so Median and P90 represent the true global item distribution instead of an average of flow-level percentiles.</p>
           </div>
-          <div className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-200">
-            {globalStats.activeItems} active · {globalStats.totalItemsFailed} errors · {globalStats.totalItemsCancelled} cancelled
-          </div>
+          {globalSummaryParts.length > 0 && (
+            <div className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-200">
+              {globalSummaryParts.join(' · ')}
+            </div>
+          )}
         </div>
 
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
-          {globalMetricCards.map((card) => (
+        {visibleGlobalMetricCards.length > 0 ? (
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
+            {visibleGlobalMetricCards.map((card) => (
             <div key={`global-${card.label}`} className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-sm">
               <div className="mb-3 flex items-start justify-between gap-2">
                 <div className="text-sm leading-tight text-slate-400">{card.label}</div>
@@ -486,8 +985,11 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
                 {card.value} {card.suffix && <span className="text-[11px] text-slate-500">{card.suffix}</span>}
               </div>
             </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4 text-sm text-slate-500">Global metric cards are hidden.</div>
+        )}
       </div>
 
       <div className="rounded-2xl border border-slate-800 bg-slate-950/80 p-4 shadow-sm">
@@ -531,29 +1033,130 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
                     {flow.label}
                   </div>
                   <h4 className="truncate text-lg font-bold text-slate-100" title={flow.name}>{flow.name}</h4>
-                  <p className="mt-1 text-xs text-slate-500">{flow.steps.length} nodes · {flow.created} created · {flow.activeItems} active</p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {flow.steps.length} nodes
+                    {isMetricVisible('items') && <> · {flow.created} created</>}
+                    {isMetricVisible('activeWork') && <> · {flow.activeItems} active</>}
+                  </p>
                 </div>
-                <div className={`rounded-full px-3 py-1 text-xs font-semibold ${flow.maxUtilization > 0.9 || flow.queue > 10 ? 'bg-red-500/10 text-red-300 border border-red-500/30' : 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'}`}>
-                  {flow.maxUtilization > 0.9 || flow.queue > 10 ? 'Bottleneck risk' : 'Stable'}
-                </div>
+                {(isMetricVisible('activeWork') || isMetricVisible('liveResourceUtil')) && (
+                  <div className={`rounded-full px-3 py-1 text-xs font-semibold ${flow.maxUtilization > 0.9 || flow.queue > 10 ? 'bg-red-500/10 text-red-300 border border-red-500/30' : 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'}`}>
+                    {flow.maxUtilization > 0.9 || flow.queue > 10 ? 'Bottleneck risk' : 'Stable'}
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
-                {buildFlowMetricCards(flow).map((card) => (
-                  <div key={`${flow.id}-${card.label}`} className="rounded-2xl border border-slate-800 bg-slate-950/80 p-4 shadow-sm">
-                    <div className="mb-3 flex items-start justify-between gap-2">
-                      <div className="text-sm leading-tight text-slate-400">{card.label}</div>
-                      {card.icon}
+                {(() => {
+                  const cards = buildFlowMetricCards(flow);
+                  return cards.length > 0 ? cards.map((card) => (
+                    <div key={`${flow.id}-${card.label}`} className="rounded-2xl border border-slate-800 bg-slate-950/80 p-4 shadow-sm">
+                      <div className="mb-3 flex items-start justify-between gap-2">
+                        <div className="text-sm leading-tight text-slate-400">{card.label}</div>
+                        {card.icon}
+                      </div>
+                      <div className={`font-mono text-2xl font-bold ${card.color}`}>
+                        {card.value} {card.suffix && <span className="text-[11px] text-slate-500">{card.suffix}</span>}
+                      </div>
                     </div>
-                    <div className={`font-mono text-2xl font-bold ${card.color}`}>
-                      {card.value} {card.suffix && <span className="text-[11px] text-slate-500">{card.suffix}</span>}
-                    </div>
-                  </div>
-                ))}
+                  )) : (
+                    <div className="col-span-full rounded-2xl border border-slate-800 bg-slate-950/70 p-4 text-sm text-slate-500">All flow metric cards are hidden for this flow.</div>
+                  );
+                })()}
               </div>
             </section>
           ))}
         </div>
+      </div>
+
+      <div className="rounded-2xl border border-blue-500/20 bg-slate-950/80 p-4 shadow-sm">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="flex items-center gap-2 text-base font-bold text-slate-100">
+              <Clock3 size={18} className="text-blue-300" /> STEP Time Cards by Flow
+            </h3>
+            <p className="mt-1 text-xs text-slate-500">Each STEP shows its own queue wait, processing/completion time, and current aging signals. These cards follow the same Flow filter.</p>
+          </div>
+          <div className="flex flex-wrap gap-2 text-xs">
+            <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1 font-semibold text-blue-200">
+              {selectedFlow ? selectedFlow.name : `${visibleStepTimeFlows.length} flow${visibleStepTimeFlows.length === 1 ? '' : 's'}`}
+            </span>
+            <span className={`rounded-full border px-3 py-1 font-semibold ${visibleStepTimeMetricCount > 0 ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-200' : 'border-amber-500/20 bg-amber-500/10 text-amber-200'}`}>
+              Step time {visibleStepTimeMetricCount}/{STEP_TIME_METRIC_VISIBILITY_OPTIONS.length} shown
+            </span>
+          </div>
+        </div>
+
+        {visibleStepTimeMetricCount > 0 ? (
+          <div className="space-y-4">
+            {visibleStepTimeFlows.map((flow, flowIndex) => (
+              <section key={`${flow.id}-step-time-cards`} className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="mb-1 flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: flow.color }} />
+                      Flow {String.fromCharCode(65 + flowIndex)} step times
+                    </div>
+                    <h4 className="truncate text-lg font-bold text-slate-100" title={flow.name}>{flow.name}</h4>
+                  </div>
+                  <span className="rounded-full border border-slate-700 bg-slate-950/70 px-3 py-1 text-xs font-semibold text-slate-300">
+                    {flow.steps.length} step{flow.steps.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+
+                <div className="grid gap-3 xl:grid-cols-2">
+                  {flow.steps.map((step) => {
+                    const stats = stepStatsById.get(step.id);
+                    const cards = buildStepTimeMetricCards(step, stats);
+                    const queueLength = stats?.queueLength || 0;
+                    const activeProcessing = stats?.activeProcessing || 0;
+                    const hasLiveLoad = queueLength > 0 || activeProcessing > 0;
+
+                    return (
+                      <article key={`${flow.id}-${step.id}-time-card`} className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+                        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="mb-1 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: step.color || flow.color }} />
+                              {step.type} · {getExecutionModeLabel(step)}
+                            </div>
+                            <h5 className="truncate text-sm font-bold text-slate-100" title={step.name}>{step.name}</h5>
+                          </div>
+                          <div className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${hasLiveLoad ? 'border-amber-500/25 bg-amber-500/10 text-amber-200' : 'border-slate-700 bg-slate-900/70 text-slate-400'}`}>
+                            Q {queueLength} · P {activeProcessing}
+                          </div>
+                        </div>
+
+                        {cards.length > 0 ? (
+                          <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+                            {cards.map((card) => (
+                              <div key={`${step.id}-${card.id}`} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
+                                <div className="mb-2 flex items-start justify-between gap-2">
+                                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">{card.label}</div>
+                                  {card.icon}
+                                </div>
+                                <div className={`font-mono text-lg font-bold ${card.color}`}>
+                                  {card.value} {card.suffix && <span className="text-[10px] text-slate-500">{card.suffix}</span>}
+                                </div>
+                                {card.description && <div className="mt-1 text-[9px] leading-snug text-slate-500">{card.description}</div>}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-3 text-xs text-slate-500">No visible STEP time metrics for this step.</div>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-100">
+            All STEP time cards are hidden. Open <span className="font-semibold">STEP Time Display</span> and enable at least one STEP time metric.
+          </div>
+        )}
       </div>
 
       <div className="rounded-2xl border border-slate-800 bg-slate-950/80 p-4 shadow-sm">
@@ -569,7 +1172,7 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
           </div>
         </div>
 
-        {visibleResourceSteps.length > 0 && (
+        {visibleResourceSteps.length > 0 && (isMetricVisible('resourcesUsed') || isMetricVisible('liveResourceUtil')) && (
           <div className="mb-4 rounded-2xl border border-purple-500/20 bg-purple-500/5 p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -579,9 +1182,9 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
                 <p className="mt-1 text-xs text-slate-500">Live resource allocation {selectedFlow ? `inside ${selectedFlow.name}` : 'split across visible flows'}.</p>
               </div>
               <div className="flex flex-wrap gap-2 text-xs">
-                <span className="rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1 font-semibold text-purple-200">Used {visibleResourceUsage}/{visibleResourceCapacity}</span>
-                <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1 font-semibold text-blue-200">Avg team {visibleWeightedAvgResourcesPerItem.toFixed(1)}</span>
-                <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 font-semibold text-cyan-200">Avg load {visibleWeightedAvgResourceLoad.toFixed(1)}</span>
+                {isMetricVisible('resourcesUsed') && <span className="rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1 font-semibold text-purple-200">Used {visibleResourceUsage}/{visibleResourceCapacity}</span>}
+                {isMetricVisible('resourcesUsed') && <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1 font-semibold text-blue-200">Avg team {visibleWeightedAvgResourcesPerItem.toFixed(1)}</span>}
+                {isMetricVisible('liveResourceUtil') && <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 font-semibold text-cyan-200">Avg load {visibleWeightedAvgResourceLoad.toFixed(1)}</span>}
               </div>
             </div>
             <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
@@ -596,15 +1199,19 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
                         <div className="truncate text-sm font-semibold text-slate-100" title={step.name}>{step.name}</div>
                         <div className="text-[10px] uppercase tracking-wider text-slate-500">{getExecutionModeLabel(step)}</div>
                       </div>
-                      <div className="font-mono text-sm font-bold text-purple-200">{usage}/{capacity}</div>
+                      {isMetricVisible('resourcesUsed') && <div className="font-mono text-sm font-bold text-purple-200">{usage}/{capacity}</div>}
                     </div>
-                    <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
-                      <div className="h-full rounded-full bg-purple-400" style={{ width: `${usagePercent}%` }} />
-                    </div>
-                    <div className="mt-2 flex justify-between text-[10px] text-slate-500">
-                      <span>Avg team <span className="font-mono text-blue-200">{(stats?.avgResourcesPerItem || 0).toFixed(1)}</span></span>
-                      <span>Avg load <span className="font-mono text-cyan-200">{(stats?.avgResourceLoadFactor || 0).toFixed(1)}</span></span>
-                    </div>
+                    {isMetricVisible('liveResourceUtil') && (
+                      <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
+                        <div className="h-full rounded-full bg-purple-400" style={{ width: `${usagePercent}%` }} />
+                      </div>
+                    )}
+                    {isMetricVisible('resourcesUsed') && (
+                      <div className="mt-2 flex justify-between text-[10px] text-slate-500">
+                        <span>Avg team <span className="font-mono text-blue-200">{(stats?.avgResourcesPerItem || 0).toFixed(1)}</span></span>
+                        <span>Avg load <span className="font-mono text-cyan-200">{(stats?.avgResourceLoadFactor || 0).toFixed(1)}</span></span>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -622,104 +1229,136 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
                     {flow.label}
                   </div>
                   <div className="truncate text-base font-bold text-slate-100" title={flow.name}>{flow.name}</div>
-                  <div className="text-xs text-slate-500">{flow.steps.length} nodes · {flow.created} created</div>
+                  <div className="text-xs text-slate-500">
+                    {flow.steps.length} nodes
+                    {isMetricVisible('items') && <> · {flow.created} created</>}
+                  </div>
                 </div>
-                <div className={`rounded-full px-2.5 py-1 text-xs font-semibold ${flow.maxUtilization > 0.9 || flow.queue > 10 ? 'bg-red-500/10 text-red-300 border border-red-500/30' : 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'}`}>
-                  {flow.maxUtilization > 0.9 || flow.queue > 10 ? 'Bottleneck risk' : 'Stable'}
-                </div>
+                {(isMetricVisible('activeWork') || isMetricVisible('liveResourceUtil')) && (
+                  <div className={`rounded-full px-2.5 py-1 text-xs font-semibold ${flow.maxUtilization > 0.9 || flow.queue > 10 ? 'bg-red-500/10 text-red-300 border border-red-500/30' : 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'}`}>
+                    {flow.maxUtilization > 0.9 || flow.queue > 10 ? 'Bottleneck risk' : 'Stable'}
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Finished</div>
-                  <div className="mt-1 font-mono text-2xl font-bold text-emerald-300">{flow.finished}</div>
-                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800">
-                    <div className="h-full rounded-full bg-emerald-400" style={{ width: `${Math.min(100, (flow.finished / maxFinished) * 100)}%` }} />
+                {isMetricVisible('items') && (
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Finished</div>
+                    <div className="mt-1 font-mono text-2xl font-bold text-emerald-300">{flow.finished}</div>
+                    <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                      <div className="h-full rounded-full bg-emerald-400" style={{ width: `${Math.min(100, (flow.finished / maxFinished) * 100)}%` }} />
+                    </div>
                   </div>
-                </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Throughput</div>
-                  <div className="mt-1 font-mono text-2xl font-bold text-cyan-300">
-                    {flow.throughput.toFixed(1)} <span className="text-[10px] text-slate-500">/ {UNIT_LABELS[flow.throughputUnit]}</span>
+                )}
+                {isMetricVisible('throughput') && (
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Throughput</div>
+                    <div className="mt-1 font-mono text-2xl font-bold text-cyan-300">
+                      {flow.throughput.toFixed(1)} <span className="text-[10px] text-slate-500">/ {UNIT_LABELS[flow.throughputUnit]}</span>
+                    </div>
+                    <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                      <div className="h-full rounded-full bg-cyan-400" style={{ width: `${Math.min(100, (flow.throughput / maxThroughput) * 100)}%` }} />
+                    </div>
                   </div>
-                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800">
-                    <div className="h-full rounded-full bg-cyan-400" style={{ width: `${Math.min(100, (flow.throughput / maxThroughput) * 100)}%` }} />
+                )}
+                {isMetricVisible('avgCalendar') && (
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Avg Cycle</div>
+                    <div className="mt-1 font-mono text-xl font-bold text-blue-300">
+                      {flow.cycleTimeValue.toFixed(cycleTimeUnit === 'ms' ? 0 : 2)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
+                    </div>
                   </div>
-                </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Avg Cycle</div>
-                  <div className="mt-1 font-mono text-xl font-bold text-blue-300">
-                    {flow.cycleTimeValue.toFixed(cycleTimeUnit === 'ms' ? 0 : 2)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
+                )}
+                {isMetricVisible('avgGlobalWorking') && (
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Avg Global Working</div>
+                    <div className="mt-1 font-mono text-xl font-bold text-sky-300">
+                      {formatDurationValue(flow.avgWorkingCycle, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
+                    </div>
                   </div>
-                </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Avg Global Working</div>
-                  <div className="mt-1 font-mono text-xl font-bold text-sky-300">
-                    {formatDurationValue(flow.avgWorkingCycle, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
+                )}
+                {isMetricVisible('avgOperational') && (
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Avg Operational</div>
+                    <div className="mt-1 font-mono text-xl font-bold text-lime-300">
+                      {formatDurationValue(flow.avgOperationalWorkingCycle, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
+                    </div>
                   </div>
-                </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Avg Operational</div>
-                  <div className="mt-1 font-mono text-xl font-bold text-lime-300">
-                    {formatDurationValue(flow.avgOperationalWorkingCycle, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
-                  </div>
-                </div>
+                )}
               </div>
 
-              <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Calendar Wait</div>
-                  <div className="mt-1 font-mono text-sm text-amber-300">
-                    {formatDurationValue(flow.avgWaitTime, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
-                  </div>
-                  <div className="mt-1 text-[9px] text-slate-500">Includes non-working hours</div>
+              {(isMetricVisible('queueWaitCalendar') || isMetricVisible('queueWaitWorking') || isMetricVisible('diagnosticWorkingWait')) && (
+                <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+                  {isMetricVisible('queueWaitCalendar') && (
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Calendar Wait</div>
+                      <div className="mt-1 font-mono text-sm text-amber-300">
+                        {formatDurationValue(flow.avgWaitTime, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
+                      </div>
+                      <div className="mt-1 text-[9px] text-slate-500">Includes non-working hours</div>
+                    </div>
+                  )}
+                  {isMetricVisible('queueWaitWorking') && (
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Working Wait</div>
+                      <div className="mt-1 font-mono text-sm text-yellow-200">
+                        {formatDurationValue(flow.avgItemWorkingWaitTime, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
+                      </div>
+                      <div className="mt-1 text-[9px] text-slate-500">Item-weighted working-hour queue wait</div>
+                    </div>
+                  )}
+                  {isMetricVisible('diagnosticWorkingWait') && (
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Diagnostic Wait</div>
+                      <div className="mt-1 font-mono text-sm text-yellow-300">
+                        {formatDurationValue(flow.diagnosticWorkingWaitTime, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
+                      </div>
+                      <div className="mt-1 text-[9px] text-slate-500">Avg Step Working Wait; not item-weighted</div>
+                    </div>
+                  )}
                 </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Working Wait</div>
-                  <div className="mt-1 font-mono text-sm text-yellow-200">
-                    {formatDurationValue(flow.avgItemWorkingWaitTime, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
-                  </div>
-                  <div className="mt-1 text-[9px] text-slate-500">Item-weighted working-hour queue wait</div>
-                </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Diagnostic Wait</div>
-                  <div className="mt-1 font-mono text-sm text-yellow-300">
-                    {formatDurationValue(flow.diagnosticWorkingWaitTime, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
-                  </div>
-                  <div className="mt-1 text-[9px] text-slate-500">Avg Step Working Wait; not item-weighted</div>
-                </div>
-              </div>
+              )}
 
-              <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Touch Time</div>
-                  <div className="mt-1 font-mono text-sm text-cyan-300">
-                    {formatDurationValue(flow.avgTouchTime, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
-                  </div>
+              {(isMetricVisible('touchWork') || isMetricVisible('activeWork')) && (
+                <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+                  {isMetricVisible('touchWork') && (
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Touch Time</div>
+                      <div className="mt-1 font-mono text-sm text-cyan-300">
+                        {formatDurationValue(flow.avgTouchTime, cycleTimeUnit)} <span className="text-[10px] text-slate-500">{UNIT_LABELS[cycleTimeUnit]}</span>
+                      </div>
+                    </div>
+                  )}
+                  {isMetricVisible('activeWork') && (
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Live Load</div>
+                      <div className="mt-1 flex items-end gap-2 font-mono text-sm">
+                        <span className="text-amber-300">Q {flow.queue}</span>
+                        <span className="text-blue-300">P {flow.processing}</span>
+                        <span className="text-slate-400">A {flow.activeItems}</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Live Load</div>
-                  <div className="mt-1 flex items-end gap-2 font-mono text-sm">
-                    <span className="text-amber-300">Q {flow.queue}</span>
-                    <span className="text-blue-300">P {flow.processing}</span>
-                    <span className="text-slate-400">A {flow.activeItems}</span>
-                  </div>
-                </div>
-              </div>
+              )}
 
-              <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                <span className="rounded-full border border-red-500/20 bg-red-500/10 px-2.5 py-1 text-red-300">Errors {flow.failed}</span>
-                <span className="rounded-full border border-slate-700 bg-slate-950/70 px-2.5 py-1 text-slate-400">Cancelled {flow.cancelled}</span>
-                <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-2.5 py-1 text-sky-300">Non-work {formatDurationValue(flow.avgNonWorkingDelay, cycleTimeUnit)} {UNIT_LABELS[cycleTimeUnit]}</span>
-                <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">Eff. {(flow.flowEfficiency * 100).toFixed(1)}%</span>
-                <span className="rounded-full border border-purple-500/20 bg-purple-500/10 px-2.5 py-1 text-purple-300">Max util {(flow.maxUtilization * 100).toFixed(0)}%</span>
-              </div>
+              {(isMetricVisible('errors') || isMetricVisible('cancelled') || isMetricVisible('offHoursDelay') || isMetricVisible('flowEfficiency') || isMetricVisible('liveResourceUtil')) && (
+                <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                  {isMetricVisible('errors') && <span className="rounded-full border border-red-500/20 bg-red-500/10 px-2.5 py-1 text-red-300">Errors {flow.failed}</span>}
+                  {isMetricVisible('cancelled') && <span className="rounded-full border border-slate-700 bg-slate-950/70 px-2.5 py-1 text-slate-400">Cancelled {flow.cancelled}</span>}
+                  {isMetricVisible('offHoursDelay') && <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-2.5 py-1 text-sky-300">Non-work {formatDurationValue(flow.avgNonWorkingDelay, cycleTimeUnit)} {UNIT_LABELS[cycleTimeUnit]}</span>}
+                  {isMetricVisible('flowEfficiency') && <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">Eff. {(flow.flowEfficiency * 100).toFixed(1)}%</span>}
+                  {isMetricVisible('liveResourceUtil') && <span className="rounded-full border border-purple-500/20 bg-purple-500/10 px-2.5 py-1 text-purple-300">Max util {(flow.maxUtilization * 100).toFixed(0)}%</span>}
+                </div>
+              )}
             </div>
           ))}
         </div>
       </div>
 
       {/* Queue Visualization */}
+      {isMetricVisible('activeWork') && (
       <div className="bg-slate-950/80 p-4 rounded-2xl border border-slate-800 shadow-sm">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-3 shrink-0">
           <div>
@@ -802,6 +1441,7 @@ export const StatsBoard: React.FC<Props> = ({ globalStats, stepStats, flowStats 
           ))}
         </div>
       </div>
+      )}
     </div>
   );
 };

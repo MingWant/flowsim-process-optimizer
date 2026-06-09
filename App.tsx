@@ -802,9 +802,18 @@ const App: React.FC = () => {
   const saveStepUpdate = () => {
     if (!editingStep) return;
     if (editingStepValidationError) return;
+    const stepToSave = editingStep.calendarMode === 'custom'
+      ? {
+          ...editingStep,
+          businessCalendar: normalizeBusinessCalendar({
+            ...(editingStep.businessCalendar || normalizeBusinessCalendar(config.businessCalendar)),
+            enabled: true,
+          }),
+        }
+      : editingStep;
     setConfig(p => ({
       ...p,
-      steps: p.steps.map(s => s.id === editingStep.id ? editingStep : s)
+      steps: p.steps.map(s => s.id === editingStep.id ? stepToSave : s)
     }));
     setEditingStep(null);
   };
@@ -1390,7 +1399,7 @@ const App: React.FC = () => {
   const updateBusinessCalendar = (updates: Partial<typeof businessCalendar>) => {
     setConfig((previous) => ({
       ...previous,
-      businessCalendar: normalizeBusinessCalendar({ ...businessCalendar, ...updates }),
+      businessCalendar: normalizeBusinessCalendar({ ...normalizeBusinessCalendar(previous.businessCalendar), ...updates }),
     }));
   };
   const updateDemandModifier = (modifierId: string, updates: Partial<DemandModifier>) => {
@@ -2758,7 +2767,14 @@ const App: React.FC = () => {
                                       Inherit
                                     </button>
                                     <button
-                                      onClick={() => setEditingStep({ ...editingStep, calendarMode: 'custom', businessCalendar: normalizeBusinessCalendar(editingStep.businessCalendar || { ...businessCalendar, enabled: true }) })}
+                                      onClick={() => setEditingStep({
+                                        ...editingStep,
+                                        calendarMode: 'custom',
+                                        businessCalendar: normalizeBusinessCalendar({
+                                          ...(editingStep.businessCalendar || businessCalendar),
+                                          enabled: true,
+                                        }),
+                                      })}
                                       className={`rounded px-3 py-1.5 font-semibold ${editingStep.calendarMode === 'custom' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:text-slate-200'}`}
                                     >
                                       Custom
@@ -2767,7 +2783,7 @@ const App: React.FC = () => {
                                 </div>
 
                                 {editingStep.calendarMode === 'custom' && (() => {
-                                  const stepCalendar = normalizeBusinessCalendar(editingStep.businessCalendar || { ...businessCalendar, enabled: true });
+                                  const stepCalendar = normalizeBusinessCalendar({ ...(editingStep.businessCalendar || businessCalendar), enabled: true });
                                   const updateStepCalendar = (updates: Partial<typeof stepCalendar>) => setEditingStep({
                                     ...editingStep,
                                     businessCalendar: normalizeBusinessCalendar({ ...stepCalendar, ...updates, enabled: true }),
